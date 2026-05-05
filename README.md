@@ -1,6 +1,6 @@
 # Databricks Coding Gateway
 
-`coding-gateway` is a lightweight launcher for running Codex, Claude Code, and Gemini CLI through Databricks.
+`coding-gateway` is a lightweight launcher for running Codex, Claude Code, Gemini CLI, and OpenCode through Databricks.
 
 ## Requirements
 
@@ -25,9 +25,18 @@ coding-gateway configure
 
 Enter your Databricks workspace URL. `coding-gateway` automatically detects whether Databricks AI Gateway is available and configures tool endpoints accordingly.
 
-This writes managed config files for all three tools (`~/.codex/config.toml`, `~/.claude/settings.json`, `~/.gemini/.env`).
+This writes managed config files for each tool (`~/.codex/config.toml`, `~/.claude/settings.json`, `~/.gemini/.env`, `~/.config/opencode/opencode.json`).
 
-### 2. Configure MCP servers (optional)
+### 2. Launch an agent
+
+```bash
+coding-gateway                    # launches Codex (default)
+coding-gateway --agent claude
+coding-gateway --agent gemini
+coding-gateway --agent opencode
+```
+
+### 3. Configure MCP servers (optional)
 
 ```bash
 coding-gateway configure mcp
@@ -42,13 +51,20 @@ Add Databricks MCP servers to Claude Code. Supported server types:
 
 You will be prompted for OAuth credentials (client ID and secret) that are reused for all servers added in the session.
 
-### 3. Launch an agent
+---
+
+## Usage
+
+Once configured, launch any supported agent directly from your terminal:
 
 ```bash
-coding-gateway                    # launches Codex (default)
-coding-gateway --agent claude
-coding-gateway --agent gemini
+coding-gateway                    # Codex (default)
+coding-gateway --agent claude     # Claude Code
+coding-gateway --agent gemini     # Gemini CLI
+coding-gateway --agent opencode   # OpenCode
 ```
+
+All agents route through Databricks AI Gateway using your workspace credentials — no API keys required.
 
 ---
 
@@ -82,14 +98,10 @@ Requires Databricks AI Gateway. Queries `system.ai_gateway.usage` and shows:
 | `~/.codex/config.toml` | Codex |
 | `~/.claude/settings.json` | Claude Code |
 | `~/.gemini/.env` | Gemini CLI |
+| `~/.config/opencode/opencode.json` | OpenCode |
 
 Existing files are backed up before being overwritten. `coding-gateway revert` restores backups.
 
-## Authentication
-
-- Databricks authentication uses OAuth via `databricks auth login`
-- Codex and Claude use a Databricks token helper (no fixed token stored)
-- Gemini refreshes its bearer token automatically while running through `coding-gateway`
 
 ## Documentation
 
@@ -100,7 +112,40 @@ Existing files are backed up before being overwritten. `coding-gateway revert` r
 
 ## Contributing
 
-Contributions are welcome. Fork the repo, create a feature branch, and open a pull request against `main`.
+Contributions are welcome.
+
+### Getting started
+
+```bash
+git clone https://github.com/databricks/coding-gateway
+cd coding-gateway
+uv sync
+```
+
+### Development workflow
+
+1. Create a feature branch off `main`.
+2. Make your changes — keep them scoped to the requested behavior.
+3. Run the test suite before pushing:
+
+   ```bash
+   uv run pytest          # unit tests
+   uv run ruff check .    # lint
+   ```
+
+4. For end-to-end testing against a real workspace:
+
+   ```bash
+   CODING_GATEWAY_TEST_WORKSPACE=<db_workspace_url> uv run pytest tests/test_e2e.py -v
+   ```
+
+5. Open a pull request against `main`.
+
+### Adding a new agent
+
+- Add `src/coding_tool_gateway/agents/<name>.py` with at least `write_tool_config`, `launch`, `default_model`, and `validate_cmd`.
+- Register it in `src/coding_tool_gateway/agents/__init__.py`.
+- Add focused tests under `tests/`.
 
 ## Security
 
