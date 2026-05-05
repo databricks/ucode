@@ -1,6 +1,6 @@
 # Databricks Coding Gateway
 
-`coding-gateway` is a lightweight launcher for running Codex, Claude Code, Gemini CLI, and OpenCode through Databricks.
+`coding-gateway` is a lightweight launcher for running Codex, Claude Code, Gemini CLI, OpenCode, and GitHub Copilot CLI through Databricks.
 
 ## Requirements
 
@@ -24,6 +24,7 @@ coding-gateway codex      # OpenAI Codex
 coding-gateway claude     # Claude Code
 coding-gateway gemini     # Gemini CLI
 coding-gateway opencode   # OpenCode
+coding-gateway copilot    # GitHub Copilot CLI
 ```
 
 On first launch, `coding-gateway` will prompt for your Databricks workspace URL, authenticate, and configure that tool automatically. Subsequent launches go straight to the agent.
@@ -79,6 +80,7 @@ You will be prompted for OAuth credentials (client ID and secret) that are reuse
 | `~/.claude/settings.json` | Claude Code |
 | `~/.gemini/.env` | Gemini CLI |
 | `~/.config/opencode/opencode.json` | OpenCode |
+| `~/.copilot/.env` | GitHub Copilot CLI |
 
 Existing files are backed up before being overwritten. `coding-gateway revert` restores backups.
 

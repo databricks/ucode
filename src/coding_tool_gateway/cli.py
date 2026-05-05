@@ -88,7 +88,7 @@ def configure_shared_state(
     with spinner("Fetching available models..."):
         claude_models = (
             fetch_ai_gateway_claude_models(workspace, token)
-            if fetch_all or "claude" in tools or "opencode" in tools
+            if fetch_all or "claude" in tools or "opencode" in tools or "copilot" in tools
             else {}
         )
         gemini_models = (
@@ -96,7 +96,11 @@ def configure_shared_state(
             if fetch_all or "gemini" in tools or "opencode" in tools
             else []
         )
-        codex_models = fetch_codex_models(workspace, token) if fetch_all or "codex" in tools else []
+        codex_models = (
+            fetch_codex_models(workspace, token)
+            if fetch_all or "codex" in tools or "copilot" in tools
+            else []
+        )
 
     opencode_models: dict[str, list[str]] = {}
     if claude_models:
@@ -108,11 +112,11 @@ def configure_shared_state(
     state = load_state()
     state["workspace"] = workspace
     state["base_urls"] = build_shared_base_urls(workspace)
-    if fetch_all or "claude" in tools or "opencode" in tools:
+    if fetch_all or "claude" in tools or "opencode" in tools or "copilot" in tools:
         state["claude_models"] = claude_models
     if fetch_all or "gemini" in tools or "opencode" in tools:
         state["gemini_models"] = gemini_models
-    if fetch_all or "codex" in tools:
+    if fetch_all or "codex" in tools or "copilot" in tools:
         state["codex_models"] = codex_models
     if fetch_all or "opencode" in tools:
         state["opencode_models"] = opencode_models
@@ -270,7 +274,7 @@ def _launch_tool(tool_name: str, ctx: typer.Context) -> None:
         if resolved_model:
             print_kv("Model", resolved_model)
         print_kv("Base URL", str(state["base_urls"][tool]))
-        if tool in ("gemini", "opencode"):
+        if tool in ("gemini", "opencode", "copilot"):
             print_note(
                 f"{TOOL_SPECS[tool]['display']} token refresh is managed automatically "
                 f"every 30 minutes while the session is running."
@@ -309,6 +313,12 @@ def gemini_cmd(ctx: typer.Context) -> None:
 def opencode_cmd(ctx: typer.Context) -> None:
     """Launch OpenCode via Databricks."""
     _launch_tool("opencode", ctx)
+
+
+@app.command("copilot", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
+def copilot_cmd(ctx: typer.Context) -> None:
+    """Launch GitHub Copilot CLI via Databricks."""
+    _launch_tool("copilot", ctx)
 
 
 @configure_app.callback(invoke_without_command=True)

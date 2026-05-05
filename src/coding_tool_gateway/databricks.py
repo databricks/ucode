@@ -419,6 +419,10 @@ def build_tool_base_url(tool: str, workspace: str) -> str:
         raise RuntimeError(
             "OpenCode has multiple base URLs — use build_opencode_base_urls() instead."
         )
+    if tool == "copilot":
+        raise RuntimeError(
+            "Copilot has multiple base URLs — use build_copilot_base_urls() instead."
+        )
     raise RuntimeError(f"Unsupported tool '{tool}'.")
 
 
@@ -429,11 +433,20 @@ def build_opencode_base_urls(workspace: str) -> dict[str, str]:
     }
 
 
+def build_copilot_base_url(workspace: str) -> str:
+    # Copilot CLI's `openai` provider appends `/chat/completions` to the
+    # configured base URL. The Databricks MLflow chat-completions gateway is
+    # OpenAI-compatible and serves Claude, codex (gpt-5), and gemini models
+    # behind one URL.
+    return f"{workspace}/ai-gateway/mlflow/v1"
+
+
 def build_shared_base_urls(workspace: str) -> dict[str, str | dict[str, str]]:
     urls: dict[str, str | dict[str, str]] = {
         "codex": build_tool_base_url("codex", workspace),
         "claude": build_tool_base_url("claude", workspace),
         "gemini": build_tool_base_url("gemini", workspace),
         "opencode": build_opencode_base_urls(workspace),
+        "copilot": build_copilot_base_url(workspace),
     }
     return urls

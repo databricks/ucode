@@ -120,7 +120,7 @@ class TestUrlBuilders:
 
     def test_shared_base_urls_all_tools(self, e2e_workspace):
         urls = build_shared_base_urls(e2e_workspace)
-        for tool in ("codex", "claude", "gemini", "opencode"):
+        for tool in ("codex", "claude", "gemini", "opencode", "copilot"):
             assert tool in urls
 
 
@@ -369,3 +369,77 @@ class TestOpencodeLaunch:
                 )
 
         assert not failures, "OpenCode launch failures:\n" + "\n".join(failures)
+
+
+class TestCopilotLaunch:
+    """Run copilot against every Claude/codex model via the MLflow chat-completions gateway.
+
+    Gemini is excluded by design — Databricks' Gemini translator rejects the
+    `stream_options` field Copilot CLI sends. Some codex variants are also
+    incompatible upstream and are listed in COPILOT_INCOMPATIBLE_MODEL_FRAGMENTS.
+    """
+
+    # Substrings of model IDs that are known-incompatible with Copilot CLI on
+    # Databricks today. Each entry should have a comment explaining why.
+    COPILOT_INCOMPATIBLE_MODEL_FRAGMENTS = (
+        # Codex-tuned endpoints expose only openai/v1/responses and
+        # cursor/v1/chat/completions, not mlflow/v1/chat/completions.
+        "-codex",
+        # gpt-5.5 rejects function tools + reasoning_effort on /chat/completions
+        # ("Please use /v1/responses instead").
+        "gpt-5-5",
+    )
+
+    def _all_models(self, e2e_state: dict) -> list[tuple[str, str]]:
+        """Return [(family, model_id), ...] for every model copilot can talk to."""
+        out: list[tuple[str, str]] = []
+        claude_models: dict = e2e_state.get("claude_models") or {}
+        for family, model_id in claude_models.items():
+            if model_id:
+                out.append((f"claude-{family}", model_id))
+        for model in e2e_state.get("codex_models") or []:
+            if any(frag in model for frag in self.COPILOT_INCOMPATIBLE_MODEL_FRAGMENTS):
+                continue
+            out.append(("codex", model))
+        return out
+
+    def test_launch_copilot_per_model(
+        self, tmp_path, monkeypatch, e2e_state, e2e_workspace, e2e_token
+    ):
+        import coding_tool_gateway.config_io as config_io_mod
+        from coding_tool_gateway.agents import copilot
+
+        _require_binary("copilot")
+        models = self._all_models(e2e_state)
+        if not models:
+            pytest.skip("No Copilot-compatible models available on this workspace")
+
+        monkeypatch.setattr(config_io_mod, "APP_DIR", tmp_path)
+        env_path = tmp_path / ".copilot-env"
+        backup_path = tmp_path / "copilot-env.backup"
+        monkeypatch.setattr(copilot, "COPILOT_ENV_PATH", env_path)
+        monkeypatch.setattr(copilot, "COPILOT_BACKUP_PATH", backup_path)
+
+        failures = []
+        for family, model in models:
+            with pytest.MonkeyPatch().context() as mp:
+                mp.setattr("coding_tool_gateway.state.save_state", lambda s: None)
+                mp.setattr(
+                    "coding_tool_gateway.agents.copilot.get_databricks_token",
+                    lambda ws: e2e_token,
+                )
+                copilot.write_tool_config(
+                    {**e2e_state, "workspace": e2e_workspace}, model, token=e2e_token
+                )
+
+            env = copilot.build_runtime_env(e2e_workspace, model, e2e_token)
+            cmd = copilot.validate_cmd("copilot")
+            result = _run_agent(cmd, env=env, timeout=120)
+            combined = (result.stdout + result.stderr).strip()
+            if result.returncode != 0 or not combined:
+                failures.append(
+                    f"family={family} model={model} rc={result.returncode} "
+                    f"stdout={result.stdout[:300]!r} stderr={result.stderr[:300]!r}"
+                )
+
+        assert not failures, "Copilot launch failures:\n" + "\n".join(failures)

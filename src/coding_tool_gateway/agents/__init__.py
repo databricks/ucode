@@ -31,13 +31,14 @@ from coding_tool_gateway.ui import (
     spinner,
 )
 
-from . import claude, codex, gemini, opencode
+from . import claude, codex, copilot, gemini, opencode
 
 _MODULES = {
     "codex": codex,
     "claude": claude,
     "gemini": gemini,
     "opencode": opencode,
+    "copilot": copilot,
 }
 
 TOOL_SPECS: dict[str, ToolSpec] = {name: module.SPEC for name, module in _MODULES.items()}
@@ -49,6 +50,7 @@ TOOL_ALIASES = {
     "gemini": "gemini",
     "gemini-cli": "gemini",
     "opencode": "opencode",
+    "copilot": "copilot",
 }
 
 DEFAULT_TOOL = "codex"
@@ -59,7 +61,7 @@ def normalize_tool(tool: str) -> str:
     normalized = TOOL_ALIASES.get(tool.strip().lower())
     if not normalized:
         raise RuntimeError(
-            f"Unsupported tool '{tool}'. Use one of: codex, claude, gemini, opencode."
+            f"Unsupported tool '{tool}'. Use one of: codex, claude, gemini, opencode, copilot."
         )
     return normalized
 
@@ -148,9 +150,11 @@ def configure_tool(tool: str, state: dict, model: str | None = None) -> dict:
             result = claude.write_tool_config(state, model)
         elif tool == "gemini":
             result = gemini.write_tool_config(state, model)
+        elif tool == "copilot":
+            result = copilot.write_tool_config(state, model)
         else:
             result = opencode.write_tool_config(state, model)
-    # gemini/opencode return (state, token); codex/claude return state
+    # gemini/opencode/copilot return (state, token); codex/claude return state
     if isinstance(result, tuple):
         return result[0]
     return result
@@ -170,6 +174,8 @@ def check_gateway_endpoint(state: dict, tool: str) -> bool:
         return bool(state.get("codex_models"))
     if tool == "gemini":
         return bool(state.get("gemini_models"))
+    if tool == "copilot":
+        return bool(state.get("claude_models")) or bool(state.get("codex_models"))
     return False
 
 
@@ -236,9 +242,18 @@ def validate_tool(tool: str) -> tuple[bool, str]:
     """Invoke a tool with a simple prompt to verify it works. Returns (ok, error_msg)."""
     spec = TOOL_SPECS[tool]
     binary = spec["binary"]
-    cmd = _MODULES[tool].validate_cmd(binary)
+    module = _MODULES[tool]
+    cmd = module.validate_cmd(binary)
+    env = None
+    if hasattr(module, "validate_env"):
+        try:
+            env = module.validate_env(load_state())
+        except RuntimeError:
+            env = None
     try:
-        result = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=60)
+        result = subprocess.run(
+            cmd, check=False, capture_output=True, text=True, timeout=60, env=env
+        )
         if result.returncode == 0:
             return True, ""
         output = (result.stderr or result.stdout or "").strip()
