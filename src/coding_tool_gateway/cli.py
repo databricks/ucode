@@ -42,6 +42,9 @@ GEMINI_ENV_PATH = GEMINI_CONFIG_DIR / ".env"
 CODEX_BACKUP_PATH = APP_DIR / "codex-config.backup.toml"
 CLAUDE_BACKUP_PATH = APP_DIR / "claude-settings.backup.json"
 GEMINI_BACKUP_PATH = APP_DIR / "gemini-env.backup"
+OPENCODE_CONFIG_DIR = Path.home() / ".config" / "opencode"
+OPENCODE_CONFIG_PATH = OPENCODE_CONFIG_DIR / "opencode.json"
+OPENCODE_BACKUP_PATH = APP_DIR / "opencode-config.backup.json"
 
 UNIX_DATABRICKS_INSTALL_URL = (
     "https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh"
@@ -82,6 +85,13 @@ TOOL_SPECS = {
         "config_path": GEMINI_ENV_PATH,
         "backup_path": GEMINI_BACKUP_PATH,
     },
+    "opencode": {
+        "binary": "opencode",
+        "package": "opencode-ai",
+        "display": "OpenCode",
+        "config_path": OPENCODE_CONFIG_PATH,
+        "backup_path": OPENCODE_BACKUP_PATH,
+    },
 }
 TOOL_ALIASES = {
     "codex": "codex",
@@ -89,12 +99,9 @@ TOOL_ALIASES = {
     "claude-code": "claude",
     "gemini": "gemini",
     "gemini-cli": "gemini",
+    "opencode": "opencode",
 }
 DEFAULT_TOOL = "codex"
-DEFAULT_SELECTED_MODELS = {
-    "claude": "databricks-claude-opus-4-6",
-    "gemini": "databricks-gemini-3-1-pro",
-}
 USAGE_BREAKDOWN_DAYS = 7
 USAGE_SUMMARY_DAYS = 30
 BUNDLE_VERSION = 1
@@ -232,7 +239,7 @@ def normalize_tool(tool: str) -> str:
     normalized = TOOL_ALIASES.get(tool.strip().lower())
     if not normalized:
         raise RuntimeError(
-            f"Unsupported tool '{tool}'. Use one of: codex, claude, gemini."
+            f"Unsupported tool '{tool}'. Use one of: codex, claude, gemini, opencode."
         )
     return normalized
 
@@ -449,13 +456,8 @@ def find_profile_name_for_host(workspace: str) -> str | None:
     return None
 
 
-def ensure_databricks_auth(workspace: str) -> None:
-    with spinner("Checking Databricks auth..."):
-        auth_is_valid = has_valid_databricks_auth(workspace)
-    if auth_is_valid:
-        print_success(f"Databricks auth already available for {workspace}")
-        return
-
+def run_databricks_login(workspace: str) -> None:
+    """Run databricks auth login unconditionally."""
     print_section("Databricks Login")
     print_kv("Workspace", workspace)
     print_note("A browser may open for `databricks auth login`.")
@@ -464,21 +466,22 @@ def ensure_databricks_auth(workspace: str) -> None:
         profile_name = find_profile_name_for_host(workspace)
         if profile_name:
             cmd += ["--profile", profile_name]
-        run(
-            cmd,
-            env=build_databricks_cli_env(workspace),
-            timeout=300,
-        )
+        run(cmd, env=build_databricks_cli_env(workspace), timeout=300)
     except subprocess.CalledProcessError as exc:
         raise RuntimeError("`databricks auth login` failed.") from exc
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError("`databricks auth login` timed out.") from exc
-
-    if not has_valid_databricks_auth(workspace):
-        raise RuntimeError(
-            "Databricks login completed, but no access token is available yet."
-        )
     print_success("Databricks authentication complete")
+
+
+def ensure_databricks_auth(workspace: str) -> None:
+    """Check auth and login only if needed (used by launch path)."""
+    with spinner("Checking Databricks auth..."):
+        auth_is_valid = has_valid_databricks_auth(workspace)
+    if auth_is_valid:
+        print_success(f"Databricks auth already available for {workspace}")
+        return
+    run_databricks_login(workspace)
 
 
 def fetch_ai_gateway_claude_models(workspace: str, token: str) -> dict[str, str]:
@@ -507,6 +510,34 @@ def fetch_ai_gateway_claude_models(workspace: str, token: str) -> dict[str, str]
         if candidates:
             result[key] = candidates[0]
     return result
+
+
+def fetch_gemini_models(workspace: str, token: str) -> list[str]:
+    """Return Gemini model names from serving-endpoints:foundation-models."""
+    hostname = workspace_hostname(workspace)
+    request = urllib_request.Request(
+        f"https://{hostname}/api/2.0/serving-endpoints:foundation-models",
+        headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+    )
+    try:
+        with urllib_request.urlopen(request, timeout=10) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except (urllib_error.URLError, urllib_error.HTTPError, json.JSONDecodeError):
+        return []
+
+    gemini: list[str] = []
+    for ep in data.get("endpoints", []):
+        name = ep.get("name", "")
+        entities = ep.get("config", {}).get("served_entities", [])
+        api_types: set[str] = set()
+        for se in entities:
+            fm = se.get("foundation_model", {})
+            if fm.get("ai_gateway_v2_supported") is True:
+                api_types.update(fm.get("api_types", []))
+        if "gemini/v1/generateContent" in api_types:
+            gemini.append(name)
+
+    return sorted(gemini)
 
 
 def detect_ai_gateway_v2(workspace: str, token: str) -> bool:
@@ -635,6 +666,7 @@ SELECT
     WHEN lower(user_agent) LIKE '%codex%' THEN 'codex'
     WHEN lower(user_agent) LIKE '%claude%' THEN 'claude'
     WHEN lower(user_agent) LIKE '%gemini%' THEN 'gemini'
+    WHEN lower(user_agent) LIKE '%opencode%' THEN 'opencode'
     ELSE 'other'
   END AS tool,
   date(event_time) AS usage_day,
@@ -650,6 +682,7 @@ WHERE event_time >= current_timestamp() - interval {USAGE_SUMMARY_DAYS} days
     lower(user_agent) LIKE '%codex%'
     OR lower(user_agent) LIKE '%claude%'
     OR lower(user_agent) LIKE '%gemini%'
+    OR lower(user_agent) LIKE '%opencode%'
   )
 GROUP BY 1, 2, 3
 ORDER BY usage_day DESC, tool ASC
@@ -951,6 +984,12 @@ def build_tool_base_url(
             if use_ai_gateway_v2
             else f"{workspace}/serving-endpoints/gemini"
         )
+    if tool == "opencode":
+        return (
+            f"{workspace}/ai-gateway/anthropic"
+            if use_ai_gateway_v2
+            else f"{workspace}/serving-endpoints/anthropic"
+        )
     raise RuntimeError(f"Unsupported tool '{tool}'.")
 
 
@@ -985,14 +1024,7 @@ def resolve_launch_model(
     if existing_model:
         return state, existing_model
 
-    default_model = DEFAULT_SELECTED_MODELS.get(tool)
-    if not default_model:
-        raise RuntimeError(f"No default model is configured for {tool}.")
-
-    selected_models[tool] = default_model
-    state["selected_models"] = selected_models
-    save_state(state)
-    return state, default_model
+    raise RuntimeError(f"No model is configured for {tool}. Run `coding-gateway configure` to set one.")
 
 
 def render_codex_config(workspace: str, use_ai_gateway_v2: bool) -> str:
@@ -1056,6 +1088,47 @@ def render_gemini_env(
         'GEMINI_API_KEY_AUTH_MECHANISM="bearer"\n'
         f'GEMINI_API_KEY="{token}"\n'
     )
+
+
+def render_opencode_config(
+    workspace: str,
+    use_ai_gateway_v2: bool,
+    model: str,
+    token: str,
+    claude_models: dict[str, str] | None = None,
+    gemini_models: list[str] | None = None,
+) -> dict:
+    """Generate opencode.json config with Anthropic and Google providers."""
+    anthropic_url = build_tool_base_url("claude", workspace, use_ai_gateway_v2) + "/v1"
+    gemini_url = build_tool_base_url("gemini", workspace, use_ai_gateway_v2) + "/v1beta"
+    auth_headers = {"Authorization": f"Bearer {token}"}
+
+    anthropic_model_ids = {m: {} for m in (claude_models or {}).values() if m}
+    gemini_model_ids = {m: {} for m in (gemini_models or [])}
+
+    providers: dict = {
+        "databricks-anthropic": {
+            "npm": "@ai-sdk/anthropic",
+            "options": {
+                "baseURL": anthropic_url,
+                "apiKey": token,
+                "headers": auth_headers,
+            },
+            "models": anthropic_model_ids,
+        },
+    }
+    if gemini_model_ids:
+        providers["databricks-google"] = {
+            "npm": "@ai-sdk/google",
+            "options": {
+                "baseURL": gemini_url,
+                "apiKey": token,
+                "headers": auth_headers,
+            },
+            "models": gemini_model_ids,
+        }
+
+    return {"provider": providers, "model": model}
 
 
 def build_gemini_runtime_env(
@@ -1189,23 +1262,26 @@ def mark_tool_managed(state: dict, tool: str) -> dict:
 
 def configure_shared_state(workspace: str) -> dict:
     workspace = normalize_workspace_url(workspace)
-    ensure_databricks_auth(workspace)
+    run_databricks_login(workspace)
     with spinner("Detecting AI Gateway..."):
         token = get_databricks_token(workspace)
         use_ai_gateway_v2 = detect_ai_gateway_v2(workspace, token)
     if use_ai_gateway_v2:
         print_success("AI Gateway detected — using AI Gateway endpoints")
-        with spinner("Fetching available Claude models..."):
+        with spinner("Fetching available models..."):
             claude_models = fetch_ai_gateway_claude_models(workspace, token)
+            gemini_models = fetch_gemini_models(workspace, token)
     else:
         print_note("AI Gateway not detected — using workspace serving endpoints")
         claude_models = {}
+        gemini_models = []
     state = load_state()
     state.update(
         {
             "workspace": workspace,
             "use_ai_gateway_v2": use_ai_gateway_v2,
             "claude_models": claude_models,
+            "gemini_models": gemini_models,
             "base_urls": build_shared_base_urls(workspace, use_ai_gateway_v2),
         }
     )
@@ -1260,6 +1336,25 @@ def write_gemini_tool_config(state: dict, model: str) -> dict:
     return state
 
 
+def write_opencode_tool_config(state: dict, model: str) -> dict:
+    backup_existing_file(OPENCODE_CONFIG_PATH, OPENCODE_BACKUP_PATH)
+    token = get_databricks_token(state["workspace"])
+    write_json_file(
+        OPENCODE_CONFIG_PATH,
+        render_opencode_config(
+            state["workspace"],
+            bool(state.get("use_ai_gateway_v2")),
+            model,
+            token,
+            state.get("claude_models") or {},
+            state.get("gemini_models") or [],
+        ),
+    )
+    state = mark_tool_managed(state, "opencode")
+    save_state(state)
+    return state
+
+
 def refresh_gemini_token_once(state: dict) -> str:
     token = get_databricks_token(state["workspace"])
     model = (state.get("selected_models") or {}).get("gemini")
@@ -1282,7 +1377,34 @@ def refresh_gemini_env_forever(state: dict, stop_event: threading.Event) -> None
         try:
             refresh_gemini_token_once(state)
         except RuntimeError:
-            # Avoid crashing the user's active Gemini session if refresh fails.
+            continue
+
+
+def refresh_opencode_token_once(state: dict) -> str:
+    """Get a fresh token and rewrite opencode.json with it."""
+    token = get_databricks_token(state["workspace"])
+    model = (state.get("selected_models") or {}).get("opencode")
+    if not model:
+        raise RuntimeError("No OpenCode model is configured.")
+    write_json_file(
+        OPENCODE_CONFIG_PATH,
+        render_opencode_config(
+            state["workspace"],
+            bool(state.get("use_ai_gateway_v2")),
+            model,
+            token,
+            state.get("claude_models") or {},
+            state.get("gemini_models") or [],
+        ),
+    )
+    return token
+
+
+def refresh_opencode_config_forever(state: dict, stop_event: threading.Event) -> None:
+    while not stop_event.wait(TOKEN_REFRESH_INTERVAL_SECONDS):
+        try:
+            refresh_opencode_token_once(state)
+        except RuntimeError:
             continue
 
 
@@ -1297,6 +1419,10 @@ def configure_tool(tool: str, state: dict, model: str | None = None) -> dict:
         if not model:
             raise RuntimeError("A Gemini model must be selected before configuration.")
         return write_gemini_tool_config(state, model)
+    if tool == "opencode":
+        if not model:
+            raise RuntimeError("An OpenCode model must be selected before configuration.")
+        return write_opencode_tool_config(state, model)
     raise RuntimeError(f"Unsupported tool '{tool}'.")
 
 
@@ -1304,7 +1430,7 @@ def check_gateway_endpoint(workspace: str, token: str, tool: str, use_ai_gateway
     """Check if a tool's AI Gateway endpoint is reachable."""
     base_url = build_tool_base_url(tool, workspace, use_ai_gateway_v2)
     hostname = workspace_hostname(workspace)
-    if tool == "claude":
+    if tool in ("claude", "opencode"):
         url = f"https://{hostname}/ai-gateway/anthropic/v1/messages" if use_ai_gateway_v2 else f"{base_url}/v1/messages"
     elif tool == "codex":
         url = f"{base_url}/responses"
@@ -1317,7 +1443,7 @@ def check_gateway_endpoint(workspace: str, token: str, tool: str, use_ai_gateway
         urllib_request.urlopen(req, timeout=10)
         return True
     except urllib_error.HTTPError as exc:
-        return exc.code in (400, 401, 405, 422)
+        return exc.code in (400, 401, 422)
     except (urllib_error.URLError, OSError):
         return False
 
@@ -1373,6 +1499,8 @@ def validate_tool(tool: str) -> tuple[bool, str]:
         cmd = [binary, "exec", "say hi in 5 words or less"]
     elif tool == "gemini":
         cmd = [binary, "-p", "say hi in 5 words or less"]
+    elif tool == "opencode":
+        cmd = [binary, "run", "say hi in 5 words or less"]
     else:
         return False, "unsupported tool"
     try:
@@ -1402,7 +1530,7 @@ def validate_all_tools(state: dict) -> None:
     console.print()
     console.print(Panel("Testing each tool with a quick message...", title="Validating", style="bold blue", expand=False))
     results: list[tuple[str, bool]] = []
-    available_tools = state.get("available_tools") or []
+    available_tools = list(state.get("available_tools") or [])
     for tool, spec in TOOL_SPECS.items():
         if tool not in available_tools:
             continue
@@ -1413,6 +1541,9 @@ def validate_all_tools(state: dict) -> None:
             print_success(f"{spec['display']} is working")
         else:
             print_err(f"{spec['display']}: {err}")
+            available_tools.remove(tool)
+    state["available_tools"] = available_tools
+    save_state(state)
 
     console.print()
     success_tools = [(t, s) for t, s in results if s]
@@ -1637,6 +1768,8 @@ def usage() -> int:
 def launch_tool(tool: str, tool_args: list[str]) -> None:
     if tool == "gemini":
         raise RuntimeError("Use launch_gemini_tool for Gemini.")
+    if tool == "opencode":
+        raise RuntimeError("Use launch_opencode_tool for OpenCode.")
     binary = TOOL_SPECS[tool]["binary"]
     os.execvp(binary, [binary, *tool_args])
 
@@ -1662,6 +1795,31 @@ def launch_gemini_tool(state: dict, tool_args: list[str]) -> None:
     refresher.start()
 
     proc = subprocess.Popen([TOOL_SPECS["gemini"]["binary"], *tool_args], env=env)
+    try:
+        returncode = proc.wait()
+    except KeyboardInterrupt:
+        proc.send_signal(signal.SIGINT)
+        returncode = proc.wait()
+    finally:
+        stop_event.set()
+        refresher.join(timeout=1)
+
+    raise SystemExit(returncode)
+
+
+def launch_opencode_tool(state: dict, tool_args: list[str]) -> None:
+    """Launch opencode with background token refresh (same pattern as Gemini)."""
+    refresh_opencode_token_once(state)
+
+    stop_event = threading.Event()
+    refresher = threading.Thread(
+        target=refresh_opencode_config_forever,
+        args=(state, stop_event),
+        daemon=True,
+    )
+    refresher.start()
+
+    proc = subprocess.Popen([TOOL_SPECS["opencode"]["binary"], *tool_args])
     try:
         returncode = proc.wait()
     except KeyboardInterrupt:
@@ -1750,9 +1908,9 @@ app.add_typer(configure_app, name="configure", help="Configure workspace and too
 @app.callback(invoke_without_command=True)
 def launch(
     ctx: typer.Context,
-    agent: Annotated[str, typer.Option("--agent", help="Agent to launch: codex, claude, or gemini.")] = DEFAULT_TOOL,
+    agent: Annotated[str, typer.Option("--agent", help="Agent to launch: codex, claude, gemini, or opencode.")] = DEFAULT_TOOL,
 ) -> None:
-    """Launch Codex, Claude Code, or Gemini CLI via Databricks."""
+    """Launch Codex, Claude Code, Gemini CLI, or OpenCode via Databricks."""
     if ctx.invoked_subcommand is not None:
         return
     try:
@@ -1766,11 +1924,13 @@ def launch(
         if resolved_model:
             print_kv("Model", resolved_model)
         print_kv("Base URL", state["base_urls"][_tool])
-        if _tool == "gemini":
-            print_note("Gemini token refresh is managed automatically every 30 minutes while the session is running.")
+        if _tool in ("gemini", "opencode"):
+            print_note(f"{TOOL_SPECS[_tool]['display']} token refresh is managed automatically every 30 minutes while the session is running.")
         print_success(f"Starting {TOOL_SPECS[_tool]['display']}")
         if _tool == "gemini":
             launch_gemini_tool(state, ctx.args)
+        elif _tool == "opencode":
+            launch_opencode_tool(state, ctx.args)
         else:
             launch_tool(_tool, ctx.args)
     except RuntimeError as exc:
