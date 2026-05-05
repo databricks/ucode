@@ -247,7 +247,7 @@ def configure(
     try:
         install_databricks_cli()
         for t in TOOL_SPECS:
-            install_tool_binary(t)
+            install_tool_binary(t, strict=False)
         configure_workspace_command()
     except RuntimeError as exc:
         print_err(str(exc))

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import subprocess
+
 import pytest
 
 from coding_tool_gateway.agents import (
@@ -9,6 +11,8 @@ from coding_tool_gateway.agents import (
     TOOL_SPECS,
     check_gateway_endpoint,
     default_model_for_tool,
+    ensure_tool_binary_available,
+    install_tool_binary,
     normalize_tool,
     resolve_launch_model,
 )
@@ -121,3 +125,30 @@ class TestResolveLaunchModel:
     def test_raises_when_no_models_available(self):
         with pytest.raises(RuntimeError, match="No models available"):
             resolve_launch_model("claude", {}, None)
+
+
+class TestInstallToolBinary:
+    def test_non_strict_returns_false_when_npm_missing(self, monkeypatch):
+        monkeypatch.setattr("coding_tool_gateway.agents.shutil.which", lambda _: None)
+
+        assert install_tool_binary("opencode", strict=False) is False
+
+    def test_non_strict_returns_false_when_install_fails(self, monkeypatch):
+        def fake_which(binary: str) -> str | None:
+            if binary == "npm":
+                return "/usr/bin/npm"
+            return None
+
+        def fake_run(*args, **kwargs):
+            raise subprocess.CalledProcessError(1, args[0])
+
+        monkeypatch.setattr("coding_tool_gateway.agents.shutil.which", fake_which)
+        monkeypatch.setattr("coding_tool_gateway.agents.subprocess.run", fake_run)
+
+        assert install_tool_binary("opencode", strict=False) is False
+
+    def test_ensure_tool_binary_available_raises_when_missing(self, monkeypatch):
+        monkeypatch.setattr("coding_tool_gateway.agents.shutil.which", lambda _: None)
+
+        with pytest.raises(RuntimeError, match="OpenCode is not installed"):
+            ensure_tool_binary_available("opencode")

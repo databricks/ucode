@@ -64,33 +64,57 @@ def normalize_tool(tool: str) -> str:
     return normalized
 
 
-def install_tool_binary(tool: str) -> None:
+def install_tool_binary(tool: str, *, strict: bool = True) -> bool:
     spec = TOOL_SPECS[tool]
     binary = spec["binary"]
     package = spec["package"]
 
     if shutil.which(binary):
-        return
+        return True
 
     if not shutil.which("npm"):
-        raise RuntimeError(f"`{binary}` is not installed and npm is not available to install it.")
+        message = f"`{binary}` is not installed and npm is not available to install it."
+        if strict:
+            raise RuntimeError(message)
+        print_warning(message)
+        return False
 
     print_section("Bootstrap")
     print_warning(f"`{binary}` was not found. Installing {spec['display']}...")
     try:
         subprocess.run(["npm", "install", "-g", package], check=True, timeout=300)
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
-        raise RuntimeError(f"Failed to install {spec['display']} automatically.") from exc
+        message = f"Failed to install {spec['display']} automatically."
+        if strict:
+            raise RuntimeError(message) from exc
+        print_warning(f"{message} Continuing without it.")
+        return False
 
     if not shutil.which(binary):
-        raise RuntimeError(
-            f"{spec['display']} install completed, but `{binary}` is still not on PATH."
-        )
+        message = f"{spec['display']} install completed, but `{binary}` is still not on PATH."
+        if strict:
+            raise RuntimeError(message)
+        print_warning(f"{message} Continuing without it.")
+        return False
+
+    return True
+
+
+def ensure_tool_binary_available(tool: str) -> None:
+    spec = TOOL_SPECS[tool]
+    binary = spec["binary"]
+    if shutil.which(binary):
+        return
+    raise RuntimeError(
+        f"{spec['display']} is not installed (`{binary}` was not found on PATH). "
+        f"Install it with `npm install -g {spec['package']}` or run "
+        f"`coding-gateway configure` to try automatic installation."
+    )
 
 
 def ensure_bootstrap_dependencies(tool: str) -> None:
     install_databricks_cli()
-    install_tool_binary(tool)
+    ensure_tool_binary_available(tool)
 
 
 def default_model_for_tool(tool: str, state: dict) -> str | None:
