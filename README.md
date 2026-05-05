@@ -20,10 +20,10 @@ uv tool install git+https://github.com/databricks/coding-gateway
 Just run the tool you want:
 
 ```bash
-coding-gateway codex
-coding-gateway claude
-coding-gateway gemini
-coding-gateway opencode
+coding-gateway codex      # OpenAI Codex
+coding-gateway claude     # Claude Code
+coding-gateway gemini     # Gemini CLI
+coding-gateway opencode   # OpenCode
 ```
 
 On first launch, `coding-gateway` will prompt for your Databricks workspace URL, authenticate, and configure that tool automatically. Subsequent launches go straight to the agent.
