@@ -15,9 +15,9 @@ uv tool install git+https://github.com/databricks/coding-gateway
 
 ---
 
-## Setup
+## Usage
 
-Just run the tool you want — no setup step required:
+Just run the tool you want:
 
 ```bash
 coding-gateway codex
@@ -28,13 +28,22 @@ coding-gateway opencode
 
 On first launch, `coding-gateway` will prompt for your Databricks workspace URL, authenticate, and configure that tool automatically. Subsequent launches go straight to the agent.
 
+Pass flags directly to the underlying tool:
+
+```bash
+coding-gateway claude -r          # resume last session
+coding-gateway codex --full-auto
+```
+
+All agents route through Databricks AI Gateway using your workspace credentials — no API keys required.
+
 To configure all tools at once:
 
 ```bash
 coding-gateway configure
 ```
 
-### 3. Configure MCP servers (optional)
+### MCP servers (optional)
 
 ```bash
 coding-gateway configure mcp
@@ -48,28 +57,6 @@ Add Databricks MCP servers to Claude Code. Supported server types:
 - **Custom** — any MCP server URL
 
 You will be prompted for OAuth credentials (client ID and secret) that are reused for all servers added in the session.
-
----
-
-## Usage
-
-Once configured, launch any supported agent directly from your terminal:
-
-```bash
-coding-gateway codex
-coding-gateway claude
-coding-gateway gemini
-coding-gateway opencode
-```
-
-Pass flags directly to the underlying tool:
-
-```bash
-coding-gateway claude -r          # resume last session
-coding-gateway codex --full-auto
-```
-
-All agents route through Databricks AI Gateway using your workspace credentials — no API keys required.
 
 ---
 
