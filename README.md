@@ -15,30 +15,35 @@ uv tool install git+https://github.com/databricks/coding-gateway
 
 ---
 
-## Setup
+## Usage
 
-### 1. Configure the workspace
+Just run the tool you want:
+
+```bash
+coding-gateway codex      # OpenAI Codex
+coding-gateway claude     # Claude Code
+coding-gateway gemini     # Gemini CLI
+coding-gateway opencode   # OpenCode
+```
+
+On first launch, `coding-gateway` will prompt for your Databricks workspace URL, authenticate, and configure that tool automatically. Subsequent launches go straight to the agent.
+
+Pass flags directly to the underlying tool:
+
+```bash
+coding-gateway claude -r          # resume last session
+coding-gateway codex --full-auto
+```
+
+All agents route through Databricks AI Gateway using your workspace credentials — no API keys required.
+
+To configure all tools at once:
 
 ```bash
 coding-gateway configure
 ```
 
-Enter your Databricks workspace URL. `coding-gateway` automatically detects whether Databricks AI Gateway is available and configures tool endpoints accordingly.
-
-This writes managed config files for each tool (`~/.codex/config.toml`, `~/.claude/settings.json`, `~/.gemini/.env`, `~/.config/opencode/opencode.json`).
-
-### 2. Launch an agent
-
-```bash
-coding-gateway codex
-coding-gateway claude
-coding-gateway gemini
-coding-gateway opencode
-```
-
-If a tool hasn't been configured yet, running it will automatically configure it for you.
-
-### 3. Configure MCP servers (optional)
+### MCP servers (optional)
 
 ```bash
 coding-gateway configure mcp
@@ -55,28 +60,6 @@ You will be prompted for OAuth credentials (client ID and secret) that are reuse
 
 ---
 
-## Usage
-
-Once configured, launch any supported agent directly from your terminal:
-
-```bash
-coding-gateway codex
-coding-gateway claude
-coding-gateway gemini
-coding-gateway opencode
-```
-
-Pass flags directly to the underlying tool:
-
-```bash
-coding-gateway claude -r          # resume last session
-coding-gateway codex --full-auto
-```
-
-All agents route through Databricks AI Gateway using your workspace credentials — no API keys required.
-
----
-
 ## Other Commands
 
 | Command | Description |
@@ -85,18 +68,6 @@ All agents route through Databricks AI Gateway using your workspace credentials 
 | `coding-gateway usage` | Show AI Gateway usage summary |
 | `coding-gateway revert` | Clear saved state and restore backed-up config files |
 | `coding-gateway configure --dry-run` | Preview config files without writing them |
-
-## Usage Reporting
-
-```bash
-coding-gateway usage
-```
-
-Requires Databricks AI Gateway. Queries `system.ai_gateway.usage` and shows:
-
-- Token totals for today, last 7 days, and last 30 days
-- Active tools and top models this week
-- 7-day breakdown per tool (Codex, Claude Code, Gemini CLI)
 
 ## Managed Local Files
 
