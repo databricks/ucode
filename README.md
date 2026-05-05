@@ -69,18 +69,6 @@ You will be prompted for OAuth credentials (client ID and secret) that are reuse
 | `coding-gateway revert` | Clear saved state and restore backed-up config files |
 | `coding-gateway configure --dry-run` | Preview config files without writing them |
 
-## Usage Reporting
-
-```bash
-coding-gateway usage
-```
-
-Requires Databricks AI Gateway. Queries `system.ai_gateway.usage` and shows:
-
-- Token totals for today, last 7 days, and last 30 days
-- Active tools and top models this week
-- 7-day breakdown per tool (Codex, Claude Code, Gemini CLI)
-
 ## Managed Local Files
 
 `coding-gateway` manages these files:
