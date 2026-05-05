@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 from coding_tool_gateway.agents import claude
 
 WS = "https://example.databricks.com"
@@ -102,3 +104,24 @@ class TestClaudeValidateCmd:
         assert "--max-turns" in cmd
         idx = cmd.index("--max-turns")
         assert cmd[idx + 1] == "1"
+
+
+class TestClaudeLaunch:
+    def test_sets_oauth_token_before_exec(self, monkeypatch):
+        exec_calls: list[tuple[str, list[str]]] = []
+
+        def fake_execvp(binary: str, args: list[str]) -> None:
+            exec_calls.append((binary, args))
+            raise RuntimeError("stop")
+
+        monkeypatch.delenv("OAUTH_TOKEN", raising=False)
+        monkeypatch.setattr(claude, "get_databricks_token", lambda workspace: "fresh-token")
+        monkeypatch.setattr(os, "execvp", fake_execvp)
+
+        try:
+            claude.launch({"workspace": WS}, ["--debug"])
+        except RuntimeError as exc:
+            assert str(exc) == "stop"
+
+        assert os.environ["OAUTH_TOKEN"] == "fresh-token"
+        assert exec_calls == [("claude", ["claude", "--debug"])]

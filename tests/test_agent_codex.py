@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 from coding_tool_gateway.agents import codex
 
 WS = "https://example.databricks.com"
@@ -72,3 +74,24 @@ class TestCodexValidateCmd:
     def test_has_prompt(self):
         cmd = codex.validate_cmd("codex")
         assert len(cmd) > 2
+
+
+class TestCodexLaunch:
+    def test_sets_oauth_token_before_exec(self, monkeypatch):
+        exec_calls: list[tuple[str, list[str]]] = []
+
+        def fake_execvp(binary: str, args: list[str]) -> None:
+            exec_calls.append((binary, args))
+            raise RuntimeError("stop")
+
+        monkeypatch.delenv("OAUTH_TOKEN", raising=False)
+        monkeypatch.setattr(codex, "get_databricks_token", lambda workspace: "fresh-token")
+        monkeypatch.setattr(os, "execvp", fake_execvp)
+
+        try:
+            codex.launch({"workspace": WS}, ["--search"])
+        except RuntimeError as exc:
+            assert str(exc) == "stop"
+
+        assert os.environ["OAUTH_TOKEN"] == "fresh-token"
+        assert exec_calls == [("codex", ["codex", "--search"])]

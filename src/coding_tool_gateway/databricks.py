@@ -215,6 +215,70 @@ def get_databricks_token(workspace: str) -> str:
         raise RuntimeError("Failed to retrieve Databricks access token.") from exc
 
 
+def _extract_connection_page(payload: object) -> tuple[list[dict], str | None]:
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)], None
+    if not isinstance(payload, dict):
+        raise RuntimeError("Databricks connections listing returned invalid JSON.")
+
+    payload_dict = cast(dict[str, object], payload)
+    raw_connections = payload_dict.get("connections") or []
+    if not isinstance(raw_connections, list):
+        raise RuntimeError("Databricks connections listing returned invalid JSON.")
+
+    next_page_token = payload_dict.get("next_page_token")
+    if next_page_token is not None and not isinstance(next_page_token, str):
+        raise RuntimeError("Databricks connections listing returned invalid JSON.")
+
+    return [item for item in raw_connections if isinstance(item, dict)], next_page_token
+
+
+def list_databricks_connections(workspace: str) -> list[dict]:
+    env = build_databricks_cli_env(workspace)
+    connections: list[dict] = []
+    page_token: str | None = None
+    seen_page_tokens: set[str] = set()
+
+    try:
+        while True:
+            cmd = [
+                "databricks",
+                "connections",
+                "list",
+                "--max-results",
+                "0",
+                "--output",
+                "json",
+            ]
+            if page_token:
+                cmd.extend(["--page-token", page_token])
+
+            result = run(
+                cmd,
+                capture_output=True,
+                text=True,
+                env=env,
+                timeout=30,
+            )
+            payload = json.loads(result.stdout or "{}")
+            page_connections, page_token = _extract_connection_page(payload)
+            connections.extend(page_connections)
+
+            if not page_token:
+                return connections
+            if page_token in seen_page_tokens:
+                raise RuntimeError("Databricks connections listing returned a repeated page token.")
+            seen_page_tokens.add(page_token)
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(
+            "Failed to list Databricks connections via `databricks connections list`."
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("Timed out while listing Databricks connections.") from exc
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Databricks connections listing returned invalid JSON.") from exc
+
+
 def build_auth_shell_command(workspace: str) -> str:
     python_expr = "import json,sys; print(json.load(sys.stdin).get('access_token', ''))"
     unset_prefix = " ".join(f"-u {key}" for key in SCRUBBED_DATABRICKS_ENV_VARS)

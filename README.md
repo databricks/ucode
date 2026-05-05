@@ -33,14 +33,17 @@ This writes managed config files for all three tools (`~/.codex/config.toml`, `~
 coding-gateway configure mcp
 ```
 
-Add Databricks MCP servers to Claude Code. Supported server types:
+Add Databricks MCP servers to installed MCP-capable tools: Codex, Claude Code, Gemini CLI, and OpenCode.
+Options are shown in this order:
 
-- **External** — e.g. confluence-mcp, jira-mcp
-- **UC Functions** — Unity Catalog AI functions
-- **Genie** — AI/BI dashboards
-- **Custom** — any MCP server URL
+- Discovered external MCP connections
+- Databricks SQL
+- Built-in AI tools
+- Other Databricks MCP products
+- Custom MCP server URL
 
-You will be prompted for OAuth credentials (client ID and secret) that are reused for all servers added in the session.
+Discovered external MCP connections are listed directly. MCP auth uses a Databricks token that
+`coding-gateway` sets when launching each tool.
 
 ### 3. Launch an agent
 

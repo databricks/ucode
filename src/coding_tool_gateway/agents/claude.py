@@ -16,6 +16,7 @@ from coding_tool_gateway.config_io import (
 from coding_tool_gateway.databricks import (
     build_auth_shell_command,
     build_tool_base_url,
+    get_databricks_token,
 )
 from coding_tool_gateway.state import mark_tool_managed, save_state
 
@@ -80,6 +81,9 @@ def default_model(state: dict) -> str | None:
 
 def launch(state: dict, tool_args: list[str]) -> None:
     binary = SPEC["binary"]
+    workspace = state.get("workspace")
+    if workspace:
+        os.environ["OAUTH_TOKEN"] = get_databricks_token(workspace)
     os.execvp(binary, [binary, *tool_args])
 
 

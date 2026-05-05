@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import signal
 import subprocess
 import threading
@@ -25,6 +26,7 @@ from coding_tool_gateway.state import mark_tool_managed, save_state
 OPENCODE_CONFIG_DIR = Path.home() / ".config" / "opencode"
 OPENCODE_CONFIG_PATH = OPENCODE_CONFIG_DIR / "opencode.json"
 OPENCODE_BACKUP_PATH = APP_DIR / "opencode-config.backup.json"
+OPENCODE_MCP_AUTH_HEADER_VALUE = "Bearer {env:OAUTH_TOKEN}"
 
 SPEC: ToolSpec = {
     "binary": "opencode",
@@ -112,6 +114,30 @@ def write_tool_config(
     return state, token
 
 
+def build_mcp_server_entry(url: str) -> dict:
+    return {
+        "type": "remote",
+        "url": url,
+        "enabled": True,
+        "headers": {
+            "Authorization": OPENCODE_MCP_AUTH_HEADER_VALUE,
+        },
+    }
+
+
+def write_mcp_server_config(name: str, url: str) -> bool:
+    backup_existing_file(OPENCODE_CONFIG_PATH, OPENCODE_BACKUP_PATH)
+    existing = read_json_safe(OPENCODE_CONFIG_PATH)
+    mcp_servers = existing.get("mcp")
+    if not isinstance(mcp_servers, dict):
+        mcp_servers = {}
+    removed = name in mcp_servers
+    mcp_servers[name] = build_mcp_server_entry(url)
+    existing["mcp"] = mcp_servers
+    write_json_file(OPENCODE_CONFIG_PATH, existing)
+    return removed
+
+
 def default_model(state: dict) -> str | None:
     opencode_models = state.get("opencode_models") or {}
     anthropic = opencode_models.get("anthropic") or []
@@ -137,9 +163,16 @@ def _refresh_forever(state: dict, stop_event: threading.Event) -> None:
             continue
 
 
+def build_runtime_env(token: str) -> dict[str, str]:
+    env = os.environ.copy()
+    env["OAUTH_TOKEN"] = token
+    return env
+
+
 def launch(state: dict, tool_args: list[str]) -> None:
     """Launch opencode with background token refresh (same pattern as Gemini)."""
-    _refresh_token_once(state)
+    token = _refresh_token_once(state)
+    env = build_runtime_env(token)
 
     stop_event = threading.Event()
     refresher = threading.Thread(
@@ -149,7 +182,7 @@ def launch(state: dict, tool_args: list[str]) -> None:
     )
     refresher.start()
 
-    proc = subprocess.Popen([SPEC["binary"], *tool_args])
+    proc = subprocess.Popen([SPEC["binary"], *tool_args], env=env)
     try:
         returncode = proc.wait()
     except KeyboardInterrupt:

@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import json
+import subprocess
+
 import pytest
 
+import coding_tool_gateway.databricks as db_mod
 from coding_tool_gateway.databricks import (
     AI_GATEWAY_V2_DOCS_URL,
     build_auth_shell_command,
@@ -11,6 +15,7 @@ from coding_tool_gateway.databricks import (
     build_opencode_base_urls,
     build_shared_base_urls,
     build_tool_base_url,
+    list_databricks_connections,
     workspace_hostname,
 )
 
@@ -104,6 +109,49 @@ class TestBuildAuthShellCommand:
     def test_unsets_scrubbed_vars(self):
         cmd = build_auth_shell_command(WS)
         assert "DATABRICKS_TOKEN" in cmd
+
+
+class TestListDatabricksConnections:
+    def test_lists_paginated_connections_with_workspace_env(self, monkeypatch):
+        calls: list[dict] = []
+
+        def fake_run(args, **kwargs):
+            calls.append({"args": args, "kwargs": kwargs})
+            if "--page-token" in args:
+                payload = {"connections": [{"name": "jira-mcp", "connection_type": "HTTP"}]}
+            else:
+                payload = {
+                    "connections": [{"name": "confluence-mcp", "connection_type": "HTTP"}],
+                    "next_page_token": "next-page",
+                }
+            return subprocess.CompletedProcess(args, 0, stdout=json.dumps(payload))
+
+        monkeypatch.setattr(db_mod, "run", fake_run)
+
+        assert list_databricks_connections(WS) == [
+            {"name": "confluence-mcp", "connection_type": "HTTP"},
+            {"name": "jira-mcp", "connection_type": "HTTP"},
+        ]
+        assert calls[0]["args"] == [
+            "databricks",
+            "connections",
+            "list",
+            "--max-results",
+            "0",
+            "--output",
+            "json",
+        ]
+        assert calls[0]["kwargs"]["env"]["DATABRICKS_HOST"] == WS
+        assert calls[1]["args"][-2:] == ["--page-token", "next-page"]
+
+    def test_raises_on_invalid_json(self, monkeypatch):
+        def fake_run(args, **kwargs):
+            return subprocess.CompletedProcess(args, 0, stdout="not-json")
+
+        monkeypatch.setattr(db_mod, "run", fake_run)
+
+        with pytest.raises(RuntimeError, match="invalid JSON"):
+            list_databricks_connections(WS)
 
 
 class TestEnsureAiGatewayV2:
