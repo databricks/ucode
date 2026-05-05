@@ -17,17 +17,7 @@ uv tool install git+https://github.com/databricks/coding-gateway
 
 ## Setup
 
-### 1. Configure the workspace
-
-```bash
-coding-gateway configure
-```
-
-Enter your Databricks workspace URL. `coding-gateway` automatically detects whether Databricks AI Gateway is available and configures tool endpoints accordingly.
-
-This writes managed config files for each tool (`~/.codex/config.toml`, `~/.claude/settings.json`, `~/.gemini/.env`, `~/.config/opencode/opencode.json`).
-
-### 2. Launch an agent
+Just run the tool you want — no setup step required:
 
 ```bash
 coding-gateway codex
@@ -36,7 +26,13 @@ coding-gateway gemini
 coding-gateway opencode
 ```
 
-If a tool hasn't been configured yet, running it will automatically configure it for you.
+On first launch, `coding-gateway` will prompt for your Databricks workspace URL, authenticate, and configure that tool automatically. Subsequent launches go straight to the agent.
+
+To configure all tools at once:
+
+```bash
+coding-gateway configure
+```
 
 ### 3. Configure MCP servers (optional)
 
