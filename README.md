@@ -30,11 +30,13 @@ This writes managed config files for each tool (`~/.codex/config.toml`, `~/.clau
 ### 2. Launch an agent
 
 ```bash
-coding-gateway                    # launches Codex (default)
-coding-gateway --agent claude
-coding-gateway --agent gemini
-coding-gateway --agent opencode
+coding-gateway codex
+coding-gateway claude
+coding-gateway gemini
+coding-gateway opencode
 ```
+
+If a tool hasn't been configured yet, running it will automatically configure it for you.
 
 ### 3. Configure MCP servers (optional)
 
@@ -58,10 +60,17 @@ You will be prompted for OAuth credentials (client ID and secret) that are reuse
 Once configured, launch any supported agent directly from your terminal:
 
 ```bash
-coding-gateway                    # Codex (default)
-coding-gateway --agent claude     # Claude Code
-coding-gateway --agent gemini     # Gemini CLI
-coding-gateway --agent opencode   # OpenCode
+coding-gateway codex
+coding-gateway claude
+coding-gateway gemini
+coding-gateway opencode
+```
+
+Pass flags directly to the underlying tool:
+
+```bash
+coding-gateway claude -r          # resume last session
+coding-gateway codex --full-auto
 ```
 
 All agents route through Databricks AI Gateway using your workspace credentials — no API keys required.

@@ -155,7 +155,7 @@ class TestWriteToolConfigStaleProviderCleanup:
 
         with (
             patch("coding_tool_gateway.agents.opencode.get_databricks_token", return_value="tok"),
-            patch("coding_tool_gateway.state.save_state"),
+            patch("coding_tool_gateway.agents.opencode.save_state"),
         ):
             oc_mod.write_tool_config(state, "claude-sonnet", token="tok")
 
@@ -185,7 +185,7 @@ class TestWriteToolConfigStaleProviderCleanup:
 
         with (
             patch("coding_tool_gateway.agents.opencode.get_databricks_token", return_value="tok"),
-            patch("coding_tool_gateway.state.save_state"),
+            patch("coding_tool_gateway.agents.opencode.save_state"),
         ):
             oc_mod.write_tool_config(state, "claude-sonnet", token="tok")
 

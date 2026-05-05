@@ -9,9 +9,9 @@ import typer
 from rich.panel import Panel
 
 from coding_tool_gateway.agents import (
-    DEFAULT_TOOL,
     TOOL_SPECS,
     configure_all_tools,
+    configure_single_tool,
     configure_tool,
     default_model_for_tool,
     ensure_bootstrap_dependencies,
@@ -20,6 +20,7 @@ from coding_tool_gateway.agents import (
     normalize_tool,
     resolve_launch_model,
     validate_all_tools,
+    validate_tool,
 )
 from coding_tool_gateway.agents import (
     launch as launch_agent,
@@ -28,6 +29,7 @@ from coding_tool_gateway.config_io import restore_file, set_dry_run
 from coding_tool_gateway.databricks import (
     build_shared_base_urls,
     ensure_ai_gateway_v2,
+    ensure_databricks_auth,
     fetch_ai_gateway_claude_models,
     fetch_codex_models,
     fetch_gemini_models,
@@ -64,19 +66,37 @@ def _prompt_for_configuration(tool: str | None = None) -> str:
     return prompt_for_workspace(desc, profiles)
 
 
-def configure_shared_state(workspace: str) -> dict:
-    """Log into Databricks, enforce AI Gateway v2, fetch model lists, persist state."""
+def configure_shared_state(
+    workspace: str, tools: list[str] | None = None, force_login: bool = False
+) -> dict:
+    """Log into Databricks, enforce AI Gateway v2, fetch model lists, persist state.
+
+    If tools is provided, only fetch models for those tools. Otherwise fetch all.
+    If force_login is True, always run databricks auth login (used by explicit configure).
+    """
     workspace = normalize_workspace_url(workspace)
-    run_databricks_login(workspace)
+    fetch_all = tools is None
+    if force_login:
+        run_databricks_login(workspace)
+    else:
+        ensure_databricks_auth(workspace)
     with spinner("Verifying AI Gateway V2..."):
         token = get_databricks_token(workspace)
         ensure_ai_gateway_v2(workspace, token)
     print_success("AI Gateway V2 detected")
 
     with spinner("Fetching available models..."):
-        claude_models = fetch_ai_gateway_claude_models(workspace, token)
-        gemini_models = fetch_gemini_models(workspace, token)
-        codex_models = fetch_codex_models(workspace, token)
+        claude_models = (
+            fetch_ai_gateway_claude_models(workspace, token)
+            if fetch_all or "claude" in tools or "opencode" in tools
+            else {}
+        )
+        gemini_models = (
+            fetch_gemini_models(workspace, token)
+            if fetch_all or "gemini" in tools or "opencode" in tools
+            else []
+        )
+        codex_models = fetch_codex_models(workspace, token) if fetch_all or "codex" in tools else []
 
     opencode_models: dict[str, list[str]] = {}
     if claude_models:
@@ -84,21 +104,25 @@ def configure_shared_state(workspace: str) -> dict:
     if gemini_models:
         opencode_models["gemini"] = gemini_models
 
-    state = {
-        "workspace": workspace,
-        "claude_models": claude_models,
-        "gemini_models": gemini_models,
-        "codex_models": codex_models,
-        "opencode_models": opencode_models,
-        "base_urls": build_shared_base_urls(workspace),
-    }
+    # Merge into existing workspace state so prior tool configs are preserved.
+    state = load_state()
+    state["workspace"] = workspace
+    state["base_urls"] = build_shared_base_urls(workspace)
+    if fetch_all or "claude" in tools or "opencode" in tools:
+        state["claude_models"] = claude_models
+    if fetch_all or "gemini" in tools or "opencode" in tools:
+        state["gemini_models"] = gemini_models
+    if fetch_all or "codex" in tools:
+        state["codex_models"] = codex_models
+    if fetch_all or "opencode" in tools:
+        state["opencode_models"] = opencode_models
     save_state(state)
     return state
 
 
 def configure_workspace_command() -> int:
     workspace = _prompt_for_configuration()
-    state = configure_shared_state(workspace)
+    state = configure_shared_state(workspace, force_login=True)
     state = configure_all_tools(state)
 
     available_tools = state.get("available_tools") or []
@@ -189,27 +213,55 @@ def revert() -> int:
 
 app = typer.Typer(
     add_completion=False,
-    no_args_is_help=False,
+    no_args_is_help=True,
     context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
 )
 configure_app = typer.Typer(add_completion=False, no_args_is_help=False)
 app.add_typer(configure_app, name="configure", help="Configure workspace and tool settings.")
 
 
-@app.callback(invoke_without_command=True)
-def launch(
-    ctx: typer.Context,
-    agent: Annotated[
-        str,
-        typer.Option("--agent", help="Agent to launch: codex, claude, gemini, or opencode."),
-    ] = DEFAULT_TOOL,
-) -> None:
-    """Launch Codex, Claude Code, Gemini CLI, or OpenCode via Databricks."""
-    if ctx.invoked_subcommand is not None:
-        return
+def _auto_configure_tool(tool: str) -> None:
+    """First-time setup for a single tool — mirrors configure_workspace_command."""
+    existing = load_state()
+    workspace = existing.get("workspace")
+    if not workspace:
+        workspace = _prompt_for_configuration(tool)
+    state = configure_shared_state(workspace, tools=[tool])
+
+    state = configure_single_tool(tool, state)
+
+    spec = TOOL_SPECS[tool]
+    console.print(
+        Panel(
+            f"[bold]Workspace:[/bold] [cyan]{state['workspace']}[/cyan]\n"
+            f"[bold]{spec['display']}:[/bold] [green]configured[/green]",
+            title="Configuration Complete",
+            style="green",
+            expand=False,
+        )
+    )
+
+    with spinner(f"Validating {spec['display']}..."):
+        ok, err = validate_tool(tool)
+    if ok:
+        print_success(f"{spec['display']} is working")
+    else:
+        print_err(f"{spec['display']}: {err}")
+        managed = bool(state.get("managed_configs", {}).get(tool))
+        restore_file(spec["config_path"], spec["backup_path"], managed)
+        available_tools = [t for t in (state.get("available_tools") or []) if t != tool]
+        state["available_tools"] = available_tools
+        save_state(state)
+        raise RuntimeError(f"{spec['display']} validation failed — config reverted.")
+
+
+def _launch_tool(tool_name: str, ctx: typer.Context) -> None:
     try:
-        tool = normalize_tool(agent)
+        tool = normalize_tool(tool_name)
         ensure_bootstrap_dependencies(tool)
+        existing = load_state()
+        if not existing.get("workspace") or tool not in (existing.get("available_tools") or []):
+            _auto_configure_tool(tool)
         state = ensure_provider_state(tool)
         state, resolved_model = resolve_launch_model(tool, state, None)
         state = configure_tool(tool, state, resolved_model)
@@ -231,6 +283,32 @@ def launch(
     except KeyboardInterrupt:
         print_err("Interrupted.")
         raise typer.Exit(130) from None
+
+
+@app.command("codex", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
+def codex_cmd(ctx: typer.Context) -> None:
+    """Launch Codex via Databricks."""
+    _launch_tool("codex", ctx)
+
+
+@app.command("claude", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
+def claude_cmd(ctx: typer.Context) -> None:
+    """Launch Claude Code via Databricks."""
+    _launch_tool("claude", ctx)
+
+
+@app.command("gemini", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
+def gemini_cmd(ctx: typer.Context) -> None:
+    """Launch Gemini CLI via Databricks."""
+    _launch_tool("gemini", ctx)
+
+
+@app.command(
+    "opencode", context_settings={"allow_extra_args": True, "ignore_unknown_options": True}
+)
+def opencode_cmd(ctx: typer.Context) -> None:
+    """Launch OpenCode via Databricks."""
+    _launch_tool("opencode", ctx)
 
 
 @configure_app.callback(invoke_without_command=True)

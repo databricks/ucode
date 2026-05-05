@@ -114,7 +114,7 @@ def ensure_tool_binary_available(tool: str) -> None:
 
 def ensure_bootstrap_dependencies(tool: str) -> None:
     install_databricks_cli()
-    ensure_tool_binary_available(tool)
+    install_tool_binary(tool, strict=True)
 
 
 def default_model_for_tool(tool: str, state: dict) -> str | None:
@@ -171,6 +171,23 @@ def check_gateway_endpoint(state: dict, tool: str) -> bool:
     if tool == "gemini":
         return bool(state.get("gemini_models"))
     return False
+
+
+def configure_single_tool(tool: str, state: dict) -> dict:
+    """Check availability, configure, and persist state for one tool only."""
+    with spinner(f"Checking {TOOL_SPECS[tool]['display']} availability..."):
+        ok = check_gateway_endpoint(state, tool)
+    if not ok:
+        raise RuntimeError(f"{TOOL_SPECS[tool]['display']} is not available on this workspace.")
+    if tool == "codex":
+        state = configure_tool("codex", state)
+    else:
+        state, model = resolve_launch_model(tool, state, None)
+        state = configure_tool(tool, state, model)
+    available_tools = list(set((state.get("available_tools") or []) + [tool]))
+    state["available_tools"] = available_tools
+    save_state(state)
+    return state
 
 
 def configure_all_tools(state: dict) -> dict:
