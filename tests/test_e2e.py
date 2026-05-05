@@ -53,6 +53,7 @@ def _run_agent(
         text=True,
         timeout=timeout,
         env=env,
+        stdin=subprocess.DEVNULL,
     )
 
 
