@@ -599,10 +599,9 @@ class TestGeminiAuthRecovery:
             pytest.skip("No Gemini models available on this workspace")
 
         monkeypatch.setattr(config_io_mod, "APP_DIR", tmp_path)
-        env_path = tmp_path / ".env"
-        backup_path = tmp_path / "gemini-env.backup"
-        monkeypatch.setattr(gemini, "GEMINI_ENV_PATH", env_path)
-        monkeypatch.setattr(gemini, "GEMINI_BACKUP_PATH", backup_path)
+        monkeypatch.setattr(gemini, "GEMINI_ENV_PATH", tmp_path / ".env")
+        monkeypatch.setattr(gemini, "GEMINI_SETTINGS_PATH", tmp_path / "settings.json")
+        monkeypatch.setattr(gemini, "GEMINI_BACKUP_PATH", tmp_path / "gemini-env.backup")
 
         model = gemini_models[0]
         fake_db_dir = _make_reauth_fake_databricks(tmp_path / "fake_db", e2e_token)
