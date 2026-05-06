@@ -33,6 +33,10 @@ class TestRenderEnvOverlay:
         env = gemini.render_env_overlay(WS, "gemini-2.0-flash", "tok123")
         assert env["GEMINI_API_KEY"] == "tok123"
 
+    def test_sets_oauth_token_for_mcp(self):
+        env = gemini.render_env_overlay(WS, "gemini-2.0-flash", "tok123")
+        assert env["OAUTH_TOKEN"] == "tok123"
+
     def test_sets_bearer_auth_mechanism(self):
         env = gemini.render_env_overlay(WS, "gemini-2.0-flash", "tok123")
         assert env["GEMINI_API_KEY_AUTH_MECHANISM"] == "bearer"
@@ -52,6 +56,10 @@ class TestBuildRuntimeEnv:
     def test_sets_base_url(self):
         env = gemini.build_runtime_env(WS, "gemini-2", "tok")
         assert env["GOOGLE_GEMINI_BASE_URL"] == f"{WS}/ai-gateway/gemini"
+
+    def test_sets_oauth_token_for_mcp(self):
+        env = gemini.build_runtime_env(WS, "gemini-2", "tok")
+        assert env["OAUTH_TOKEN"] == "tok"
 
 
 class TestGeminiDefaultModel:
@@ -89,6 +97,9 @@ class TestGeminiManagedKeys:
 
     def test_managed_keys_includes_api_key(self):
         assert "GEMINI_API_KEY" in gemini.MANAGED_KEYS
+
+    def test_managed_keys_includes_oauth_token(self):
+        assert "OAUTH_TOKEN" in gemini.MANAGED_KEYS
 
 
 class TestWriteToolConfigSetsAuthType:

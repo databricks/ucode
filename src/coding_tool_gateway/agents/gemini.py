@@ -42,6 +42,7 @@ MANAGED_KEYS: list[str] = [
     "GOOGLE_GEMINI_BASE_URL",
     "GEMINI_API_KEY_AUTH_MECHANISM",
     "GEMINI_API_KEY",
+    "OAUTH_TOKEN",
 ]
 
 
@@ -51,6 +52,7 @@ def render_env_overlay(workspace: str, model: str, token: str) -> dict[str, str]
         "GOOGLE_GEMINI_BASE_URL": build_tool_base_url("gemini", workspace),
         "GEMINI_API_KEY_AUTH_MECHANISM": "bearer",
         "GEMINI_API_KEY": token,
+        "OAUTH_TOKEN": token,
     }
 
 
@@ -60,6 +62,7 @@ def build_runtime_env(workspace: str, model: str, token: str) -> dict[str, str]:
     env["GOOGLE_GEMINI_BASE_URL"] = build_tool_base_url("gemini", workspace)
     env["GEMINI_API_KEY_AUTH_MECHANISM"] = "bearer"
     env["GEMINI_API_KEY"] = token
+    env["OAUTH_TOKEN"] = token
     return env
 
 

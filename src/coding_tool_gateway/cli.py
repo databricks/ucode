@@ -178,14 +178,14 @@ def status() -> int:
         print_kv("Config file", str(config_path) if config_path.exists() else "missing")
         console.print()
 
-    print_heading("MCP Servers (Claude Code)")
-    print_note("Run `claude mcp list` to see configured MCP servers.")
+    print_heading("MCP Servers")
+    print_note("Run each tool's MCP list command to see configured MCP servers.")
     print_note("Run `coding-gateway configure mcp` to add Databricks MCP servers.")
 
     print_heading("State")
     print_kv("State file", str(STATE_PATH) if STATE_PATH.exists() else "missing")
     print_note("Use `coding-gateway configure` to update workspace settings or tool models.")
-    print_note("Use `coding-gateway configure mcp` to add Databricks MCP servers to Claude Code.")
+    print_note("Use `coding-gateway configure mcp` to add Databricks MCP servers to coding tools.")
     print_note("Use `coding-gateway revert` to clear managed configs and restore prior files.")
     return 0
 
@@ -347,7 +347,7 @@ def configure(
 
 @configure_app.command("mcp")
 def configure_mcp() -> None:
-    """Add Databricks MCP servers to Claude Code."""
+    """Add Databricks MCP servers to installed coding tools."""
     try:
         configure_mcp_command()
     except RuntimeError as exc:

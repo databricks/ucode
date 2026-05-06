@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 from coding_tool_gateway.agents import copilot
 
 WS = "https://example.databricks.com"
@@ -51,6 +53,83 @@ class TestBuildRuntimeEnv:
         assert env["COPILOT_PROVIDER_TYPE"] == "openai"
         assert env["COPILOT_PROVIDER_BEARER_TOKEN"] == "tok"
 
+    def test_sets_oauth_token_for_mcp(self):
+        env = copilot.build_runtime_env(WS, "m", "tok")
+
+        assert env["OAUTH_TOKEN"] == "tok"
+
+
+class TestMcpServerConfig:
+    def test_builds_http_server_entry_with_oauth_token_env_header(self):
+        entry = copilot.build_mcp_server_entry(f"{WS}/api/2.0/mcp/external/github")
+
+        assert entry == {
+            "type": "http",
+            "url": f"{WS}/api/2.0/mcp/external/github",
+            "headers": {"Authorization": "Bearer ${OAUTH_TOKEN}"},
+            "tools": ["*"],
+        }
+
+    def test_writes_mcp_server_without_clobbering_existing_config(self, tmp_path, monkeypatch):
+        import coding_tool_gateway.agents.copilot as cp_mod
+        import coding_tool_gateway.config_io as config_io_mod
+
+        monkeypatch.setattr(config_io_mod, "APP_DIR", tmp_path)
+        config_file = tmp_path / "mcp-config.json"
+        backup_file = tmp_path / "copilot-mcp-backup.json"
+        monkeypatch.setattr(cp_mod, "COPILOT_MCP_CONFIG_PATH", config_file)
+        monkeypatch.setattr(cp_mod, "COPILOT_MCP_BACKUP_PATH", backup_file)
+
+        config_file.write_text(
+            json.dumps(
+                {
+                    "other": True,
+                    "mcpServers": {"old-server": {"type": "stdio", "command": "old"}},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        removed = cp_mod.write_mcp_server_config(
+            "github",
+            f"{WS}/api/2.0/mcp/external/github",
+        )
+
+        written = json.loads(config_file.read_text())
+        assert removed is False
+        assert written["other"] is True
+        assert written["mcpServers"]["old-server"] == {"type": "stdio", "command": "old"}
+        assert written["mcpServers"]["github"] == {
+            "type": "http",
+            "url": f"{WS}/api/2.0/mcp/external/github",
+            "headers": {"Authorization": "Bearer ${OAUTH_TOKEN}"},
+            "tools": ["*"],
+        }
+
+    def test_reports_replaced_mcp_server(self, tmp_path, monkeypatch):
+        import coding_tool_gateway.agents.copilot as cp_mod
+        import coding_tool_gateway.config_io as config_io_mod
+
+        monkeypatch.setattr(config_io_mod, "APP_DIR", tmp_path)
+        config_file = tmp_path / "mcp-config.json"
+        backup_file = tmp_path / "copilot-mcp-backup.json"
+        monkeypatch.setattr(cp_mod, "COPILOT_MCP_CONFIG_PATH", config_file)
+        monkeypatch.setattr(cp_mod, "COPILOT_MCP_BACKUP_PATH", backup_file)
+
+        config_file.write_text(
+            json.dumps({"mcpServers": {"github": {"old": True}}}),
+            encoding="utf-8",
+        )
+
+        removed = cp_mod.write_mcp_server_config(
+            "github",
+            f"{WS}/api/2.0/mcp/external/github",
+        )
+
+        assert removed is True
+        written = json.loads(config_file.read_text())
+        assert written["mcpServers"]["github"]["url"] == f"{WS}/api/2.0/mcp/external/github"
+
 
 class TestDefaultModel:
     def test_prefers_claude_sonnet(self):
@@ -89,6 +168,7 @@ class TestManagedKeys:
             "COPILOT_MODEL",
             "COPILOT_PROVIDER_BEARER_TOKEN",
             "COPILOT_OFFLINE",
+            "OAUTH_TOKEN",
         ):
             assert key in copilot.MANAGED_KEYS
 

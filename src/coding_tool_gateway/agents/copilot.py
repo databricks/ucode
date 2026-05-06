@@ -25,7 +25,9 @@ from coding_tool_gateway.config_io import (
     ToolSpec,
     backup_existing_file,
     parse_dotenv,
+    read_json_safe,
     write_dotenv,
+    write_json_file,
 )
 from coding_tool_gateway.databricks import (
     TOKEN_REFRESH_INTERVAL_SECONDS,
@@ -36,7 +38,9 @@ from coding_tool_gateway.state import mark_tool_managed, save_state
 
 COPILOT_CONFIG_DIR = Path.home() / ".copilot"
 COPILOT_ENV_PATH = COPILOT_CONFIG_DIR / ".env"
+COPILOT_MCP_CONFIG_PATH = COPILOT_CONFIG_DIR / "mcp-config.json"
 COPILOT_BACKUP_PATH = APP_DIR / "copilot-env.backup"
+COPILOT_MCP_BACKUP_PATH = APP_DIR / "copilot-mcp-config.backup.json"
 
 SPEC: ToolSpec = {
     "binary": "copilot",
@@ -52,6 +56,7 @@ MANAGED_KEYS: list[str] = [
     "COPILOT_MODEL",
     "COPILOT_PROVIDER_BEARER_TOKEN",
     "COPILOT_OFFLINE",
+    "OAUTH_TOKEN",
 ]
 
 
@@ -74,6 +79,7 @@ def render_env_overlay(workspace: str, model: str, token: str) -> dict[str, str]
         "COPILOT_MODEL": model,
         "COPILOT_PROVIDER_BEARER_TOKEN": token,
         "COPILOT_OFFLINE": "true",
+        "OAUTH_TOKEN": token,
     }
 
 
@@ -81,6 +87,30 @@ def build_runtime_env(workspace: str, model: str, token: str) -> dict[str, str]:
     env = os.environ.copy()
     env.update(render_env_overlay(workspace, model, token))
     return env
+
+
+def build_mcp_server_entry(url: str) -> dict:
+    return {
+        "type": "http",
+        "url": url,
+        "headers": {
+            "Authorization": "Bearer ${OAUTH_TOKEN}",
+        },
+        "tools": ["*"],
+    }
+
+
+def write_mcp_server_config(name: str, url: str) -> bool:
+    backup_existing_file(COPILOT_MCP_CONFIG_PATH, COPILOT_MCP_BACKUP_PATH)
+    existing = read_json_safe(COPILOT_MCP_CONFIG_PATH)
+    mcp_servers = existing.get("mcpServers")
+    if not isinstance(mcp_servers, dict):
+        mcp_servers = {}
+    removed = name in mcp_servers
+    mcp_servers[name] = build_mcp_server_entry(url)
+    existing["mcpServers"] = mcp_servers
+    write_json_file(COPILOT_MCP_CONFIG_PATH, existing)
+    return removed
 
 
 def write_tool_config(

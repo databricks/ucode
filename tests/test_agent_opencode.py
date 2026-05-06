@@ -98,6 +98,82 @@ class TestRenderOverlay:
         assert "claude-haiku" in provider_models
 
 
+class TestMcpServerConfig:
+    def test_builds_remote_server_entry_with_oauth_token_env_header(self):
+        entry = opencode.build_mcp_server_entry(f"{WS}/api/2.0/mcp/external/github")
+
+        assert entry == {
+            "type": "remote",
+            "url": f"{WS}/api/2.0/mcp/external/github",
+            "enabled": True,
+            "headers": {"Authorization": "Bearer {env:OAUTH_TOKEN}"},
+        }
+
+    def test_writes_mcp_server_without_clobbering_existing_config(self, tmp_path, monkeypatch):
+        import coding_tool_gateway.agents.opencode as oc_mod
+        import coding_tool_gateway.config_io as config_io_mod
+
+        monkeypatch.setattr(config_io_mod, "APP_DIR", tmp_path)
+        config_file = tmp_path / "opencode.json"
+        backup_file = tmp_path / "opencode-backup.json"
+        monkeypatch.setattr(oc_mod, "OPENCODE_CONFIG_PATH", config_file)
+        monkeypatch.setattr(oc_mod, "OPENCODE_BACKUP_PATH", backup_file)
+
+        config_file.write_text(
+            json.dumps(
+                {
+                    "model": "existing-model",
+                    "mcp": {"old-server": {"type": "local", "command": ["old"]}},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        removed = oc_mod.write_mcp_server_config(
+            "github",
+            f"{WS}/api/2.0/mcp/external/github",
+        )
+
+        written = json.loads(config_file.read_text())
+        assert removed is False
+        assert written["model"] == "existing-model"
+        assert written["mcp"]["old-server"] == {"type": "local", "command": ["old"]}
+        assert written["mcp"]["github"] == {
+            "type": "remote",
+            "url": f"{WS}/api/2.0/mcp/external/github",
+            "enabled": True,
+            "headers": {"Authorization": "Bearer {env:OAUTH_TOKEN}"},
+        }
+
+    def test_reports_replaced_mcp_server(self, tmp_path, monkeypatch):
+        import coding_tool_gateway.agents.opencode as oc_mod
+        import coding_tool_gateway.config_io as config_io_mod
+
+        monkeypatch.setattr(config_io_mod, "APP_DIR", tmp_path)
+        config_file = tmp_path / "opencode.json"
+        backup_file = tmp_path / "opencode-backup.json"
+        monkeypatch.setattr(oc_mod, "OPENCODE_CONFIG_PATH", config_file)
+        monkeypatch.setattr(oc_mod, "OPENCODE_BACKUP_PATH", backup_file)
+
+        config_file.write_text(json.dumps({"mcp": {"github": {"old": True}}}), encoding="utf-8")
+
+        removed = oc_mod.write_mcp_server_config(
+            "github",
+            f"{WS}/api/2.0/mcp/external/github",
+        )
+
+        assert removed is True
+        written = json.loads(config_file.read_text())
+        assert written["mcp"]["github"]["url"] == f"{WS}/api/2.0/mcp/external/github"
+
+
+class TestBuildRuntimeEnv:
+    def test_sets_oauth_token_for_mcp(self):
+        env = opencode.build_runtime_env("tok")
+
+        assert env["OAUTH_TOKEN"] == "tok"
+
+
 class TestOpencodeDefaultModel:
     def test_prefers_anthropic(self):
         state = {"opencode_models": {"anthropic": ["claude-sonnet"], "gemini": ["gemini-2"]}}
