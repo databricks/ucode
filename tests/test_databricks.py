@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
+
 import pytest
 
 from coding_tool_gateway.databricks import (
@@ -11,6 +14,7 @@ from coding_tool_gateway.databricks import (
     build_opencode_base_urls,
     build_shared_base_urls,
     build_tool_base_url,
+    get_databricks_token,
     workspace_hostname,
 )
 
@@ -96,14 +100,109 @@ class TestBuildAuthShellCommand:
         cmd = build_auth_shell_command(WS)
         assert WS in cmd
 
-    def test_pipes_through_python(self):
+    def test_parses_access_token(self):
         cmd = build_auth_shell_command(WS)
-        assert "python3" in cmd
         assert "access_token" in cmd
+        assert "grep" in cmd
+        assert "sed" in cmd
 
     def test_unsets_scrubbed_vars(self):
         cmd = build_auth_shell_command(WS)
         assert "DATABRICKS_TOKEN" in cmd
+
+    def test_returns_token_when_auth_succeeds(self, tmp_path):
+        # Fake databricks binary that always returns a valid token JSON.
+        fake = tmp_path / "databricks"
+        fake.write_text(
+            '#!/bin/sh\necho \'{"access_token": "good-token", "token_type": "Bearer"}\'\n'
+        )
+        fake.chmod(0o755)
+        cmd = build_auth_shell_command(WS)
+        result = subprocess.run(
+            ["sh", "-c", cmd],
+            capture_output=True,
+            text=True,
+            env={**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}"},
+        )
+        assert result.stdout.strip() == "good-token"
+
+    def test_reauths_and_retries_when_token_empty(self, tmp_path):
+        # Fake databricks binary: returns empty token on `auth token`, succeeds on retry
+        # after `auth login` is called. Uses a call-count file to track invocations.
+        call_count = tmp_path / "calls"
+        call_count.write_text("0")
+        fake = tmp_path / "databricks"
+        fake.write_text(
+            "#!/bin/sh\n"
+            f"count=$(cat {call_count})\n"
+            f"echo $((count + 1)) > {call_count}\n"
+            "# auth login is a no-op\n"
+            'case "$*" in\n'
+            '  *"auth login"*) exit 0 ;;\n'
+            "esac\n"
+            "# first auth token call returns empty; second returns a real token\n"
+            'if [ "$count" -eq 0 ]; then\n'
+            '  echo \'{"access_token": "", "token_type": "Bearer"}\'\n'
+            "else\n"
+            '  echo \'{"access_token": "refreshed-token", "token_type": "Bearer"}\'\n'
+            "fi\n"
+        )
+        fake.chmod(0o755)
+        cmd = build_auth_shell_command(WS)
+        result = subprocess.run(
+            ["sh", "-c", cmd],
+            capture_output=True,
+            text=True,
+            env={**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}"},
+        )
+        assert result.stdout.strip() == "refreshed-token"
+        assert int(call_count.read_text()) >= 3  # auth token, auth login, auth token
+
+
+class TestGetDatabricksToken:
+    def _fake_databricks(self, tmp_path, script: str) -> dict:
+        fake = tmp_path / "databricks"
+        fake.write_text(f"#!/bin/sh\n{script}\n")
+        fake.chmod(0o755)
+        return {**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}"}
+
+    def test_returns_token_on_success(self, tmp_path, monkeypatch):
+        env = self._fake_databricks(
+            tmp_path,
+            'echo \'{"access_token": "good-token", "token_type": "Bearer"}\'',
+        )
+        monkeypatch.setattr("os.environ", env)
+        token = get_databricks_token(WS)
+        assert token == "good-token"
+
+    def test_reauths_and_retries_when_token_empty(self, tmp_path, monkeypatch):
+        call_count = tmp_path / "calls"
+        call_count.write_text("0")
+        env = self._fake_databricks(
+            tmp_path,
+            f"count=$(cat {call_count})\n"
+            f"echo $((count + 1)) > {call_count}\n"
+            'case "$*" in\n'
+            '  *"auth login"*) exit 0 ;;\n'
+            "esac\n"
+            'if [ "$count" -eq 0 ]; then\n'
+            '  echo \'{"access_token": "", "token_type": "Bearer"}\'\n'
+            "else\n"
+            '  echo \'{"access_token": "refreshed-token", "token_type": "Bearer"}\'\n'
+            "fi",
+        )
+        monkeypatch.setattr("os.environ", env)
+        token = get_databricks_token(WS)
+        assert token == "refreshed-token"
+
+    def test_raises_when_reauth_also_fails(self, tmp_path, monkeypatch):
+        env = self._fake_databricks(
+            tmp_path,
+            'echo \'{"access_token": "", "token_type": "Bearer"}\'',
+        )
+        monkeypatch.setattr("os.environ", env)
+        with pytest.raises(RuntimeError, match="no access token"):
+            get_databricks_token(WS)
 
 
 class TestEnsureAiGatewayV2:

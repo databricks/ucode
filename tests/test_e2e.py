@@ -236,11 +236,13 @@ class TestClaudeLaunch:
         if not claude_models:
             pytest.skip("No Claude models available on this workspace")
 
+        # Use an isolated config dir so the claude subprocess never reads or
+        # writes ~/.claude/settings.json during this test.
+        config_dir = tmp_path / "claude_config"
+        config_dir.mkdir()
         monkeypatch.setattr(config_io_mod, "APP_DIR", tmp_path)
-        config_path = tmp_path / "claude-settings.json"
-        backup_path = tmp_path / "claude-settings.backup.json"
-        monkeypatch.setattr(claude, "CLAUDE_SETTINGS_PATH", config_path)
-        monkeypatch.setattr(claude, "CLAUDE_BACKUP_PATH", backup_path)
+        monkeypatch.setattr(claude, "CLAUDE_SETTINGS_PATH", config_dir / "settings.json")
+        monkeypatch.setattr(claude, "CLAUDE_BACKUP_PATH", tmp_path / "claude-settings.backup.json")
 
         base_url = build_tool_base_url("claude", e2e_workspace)
 
@@ -252,6 +254,7 @@ class TestClaudeLaunch:
 
             env = {
                 **os.environ,
+                "CLAUDE_CONFIG_DIR": str(config_dir),
                 "ANTHROPIC_MODEL": model_id,
                 "ANTHROPIC_BASE_URL": base_url,
                 "ANTHROPIC_API_KEY": e2e_token,
@@ -284,10 +287,9 @@ class TestGeminiLaunch:
             pytest.skip("No Gemini models available on this workspace")
 
         monkeypatch.setattr(config_io_mod, "APP_DIR", tmp_path)
-        env_path = tmp_path / ".env"
-        backup_path = tmp_path / "gemini-env.backup"
-        monkeypatch.setattr(gemini, "GEMINI_ENV_PATH", env_path)
-        monkeypatch.setattr(gemini, "GEMINI_BACKUP_PATH", backup_path)
+        monkeypatch.setattr(gemini, "GEMINI_ENV_PATH", tmp_path / ".env")
+        monkeypatch.setattr(gemini, "GEMINI_SETTINGS_PATH", tmp_path / "settings.json")
+        monkeypatch.setattr(gemini, "GEMINI_BACKUP_PATH", tmp_path / "gemini-env.backup")
 
         failures = []
         for model in gemini_models:
@@ -311,6 +313,43 @@ class TestGeminiLaunch:
                 )
 
         assert not failures, "Gemini launch failures:\n" + "\n".join(failures)
+
+
+class TestGeminiSettingsJsonOnFreshInstall:
+    """Verify write_tool_config writes settings.json with the correct auth type.
+
+    Reproduces the failure mode where a fresh Gemini CLI install has no
+    settings.json and the CLI errors: 'Please set an Auth method'.
+    """
+
+    def test_writes_settings_json_with_gemini_api_key_auth(
+        self, tmp_path, monkeypatch, e2e_state, e2e_workspace, e2e_token
+    ):
+        import json
+
+        import coding_tool_gateway.config_io as config_io_mod
+        from coding_tool_gateway.agents import gemini
+
+        settings_path = tmp_path / "settings.json"
+        monkeypatch.setattr(config_io_mod, "APP_DIR", tmp_path)
+        monkeypatch.setattr(gemini, "GEMINI_ENV_PATH", tmp_path / ".env")
+        monkeypatch.setattr(gemini, "GEMINI_SETTINGS_PATH", settings_path)
+        monkeypatch.setattr(gemini, "GEMINI_BACKUP_PATH", tmp_path / "gemini-env.backup")
+
+        gemini_models: list = e2e_state.get("gemini_models") or []
+        model = gemini_models[0] if gemini_models else "some-model"
+
+        with pytest.MonkeyPatch().context() as mp:
+            mp.setattr("coding_tool_gateway.state.save_state", lambda s: None)
+            gemini.write_tool_config(
+                {**e2e_state, "workspace": e2e_workspace}, model, token=e2e_token
+            )
+
+        assert settings_path.exists(), "settings.json was not created"
+        settings = json.loads(settings_path.read_text())
+        assert settings["security"]["auth"]["selectedType"] == "gemini-api-key", (
+            f"Expected selectedType=gemini-api-key, got: {settings}"
+        )
 
 
 class TestOpencodeLaunch:
@@ -443,3 +482,149 @@ class TestCopilotLaunch:
                 )
 
         assert not failures, "Copilot launch failures:\n" + "\n".join(failures)
+
+
+# ---------------------------------------------------------------------------
+# Auth recovery tests
+# ---------------------------------------------------------------------------
+#
+# These tests verify that when Databricks auth fails (empty token), the agents
+# recover by re-authenticating rather than hanging or crashing.
+#
+# Claude uses apiKeyHelper (shell command called by Claude Code on each refresh).
+# Gemini/OpenCode/Copilot use get_databricks_token() at launch and on refresh.
+# ---------------------------------------------------------------------------
+
+
+def _make_reauth_fake_databricks(tmp_path, real_token: str) -> str:
+    """Write a fake `databricks` binary that returns empty on the first `auth token`
+    call, then returns a real token on subsequent calls (simulating session expiry
+    followed by successful re-auth). Returns the directory containing the binary."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    call_count = tmp_path / "db_calls"
+    call_count.write_text("0")
+    fake = tmp_path / "databricks"
+    fake.write_text(
+        "#!/bin/sh\n"
+        f"count=$(cat {call_count})\n"
+        f"echo $((count + 1)) > {call_count}\n"
+        # auth login is a silent no-op (re-auth succeeds immediately)
+        'case "$*" in\n'
+        '  *"auth login"*) exit 0 ;;\n'
+        "esac\n"
+        # first auth token call returns empty (simulates expired session)
+        'if [ "$count" -eq 0 ]; then\n'
+        '  echo \'{"access_token": "", "token_type": "Bearer"}\'\n'
+        "else\n"
+        f'  echo \'{{"access_token": "{real_token}", "token_type": "Bearer"}}\'\n'
+        "fi\n"
+    )
+    fake.chmod(0o755)
+    return str(tmp_path)
+
+
+class TestClaudeAuthRecovery:
+    """Claude Code uses apiKeyHelper — verify it reauths and recovers when the
+    first token fetch returns empty (simulating an expired Databricks session).
+
+    Uses CLAUDE_CONFIG_DIR to point the claude subprocess at an isolated temp
+    directory, so ~/.claude/settings.json is never touched.
+    """
+
+    def test_recovers_when_initial_token_empty(self, tmp_path, e2e_state, e2e_workspace, e2e_token):
+        import json
+
+        from coding_tool_gateway.agents import claude
+
+        _require_binary("claude")
+        claude_models: dict = e2e_state.get("claude_models") or {}
+        if not claude_models:
+            pytest.skip("No Claude models available on this workspace")
+
+        fake_db_dir = _make_reauth_fake_databricks(tmp_path / "fake_db", e2e_token)
+        model_id = next(iter(claude_models.values()))
+        base_url = build_tool_base_url("claude", e2e_workspace)
+
+        # Write an isolated settings.json under a temp config dir.
+        # CLAUDE_CONFIG_DIR makes the claude subprocess use this instead of ~/.claude.
+        config_dir = tmp_path / "claude_config"
+        config_dir.mkdir()
+        fake_helper = (
+            f"{fake_db_dir}/databricks auth token "
+            f"--host {e2e_workspace} --output json "
+            f'| grep -o \'"access_token": *"[^"]*"\' '
+            f'| sed \'s/.*": *"\\(.*\\)"/\\1/\''
+        )
+        settings = {
+            "apiKeyHelper": fake_helper,
+            "env": {
+                "ANTHROPIC_MODEL": model_id,
+                "ANTHROPIC_BASE_URL": base_url,
+                "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1",
+                # TTL=1ms so every API call triggers a helper refresh.
+                "CLAUDE_CODE_API_KEY_HELPER_TTL_MS": "1",
+            },
+        }
+        (config_dir / "settings.json").write_text(json.dumps(settings, indent=2))
+
+        env = {
+            **os.environ,
+            "CLAUDE_CONFIG_DIR": str(config_dir),
+            "PATH": f"{fake_db_dir}:{os.environ['PATH']}",
+        }
+        env.pop("ANTHROPIC_API_KEY", None)
+
+        cmd = claude.validate_cmd("claude")
+        result = _run_agent(cmd, env=env, timeout=90)
+        combined = (result.stdout + result.stderr).strip()
+        assert result.returncode == 0 and combined, (
+            f"Claude failed to recover from empty token: rc={result.returncode} "
+            f"stdout={result.stdout[:300]!r} stderr={result.stderr[:300]!r}"
+        )
+
+
+class TestGeminiAuthRecovery:
+    """Gemini uses get_databricks_token() at launch — verify it reauths and
+    recovers when the first token fetch returns empty."""
+
+    def test_recovers_when_initial_token_empty(
+        self, tmp_path, monkeypatch, e2e_state, e2e_workspace, e2e_token
+    ):
+        import coding_tool_gateway.config_io as config_io_mod
+        from coding_tool_gateway.agents import gemini
+
+        _require_binary("gemini")
+        gemini_models: list = e2e_state.get("gemini_models") or []
+        if not gemini_models:
+            pytest.skip("No Gemini models available on this workspace")
+
+        monkeypatch.setattr(config_io_mod, "APP_DIR", tmp_path)
+        env_path = tmp_path / ".env"
+        backup_path = tmp_path / "gemini-env.backup"
+        monkeypatch.setattr(gemini, "GEMINI_ENV_PATH", env_path)
+        monkeypatch.setattr(gemini, "GEMINI_BACKUP_PATH", backup_path)
+
+        model = gemini_models[0]
+        fake_db_dir = _make_reauth_fake_databricks(tmp_path / "fake_db", e2e_token)
+
+        with pytest.MonkeyPatch().context() as mp:
+            mp.setattr("coding_tool_gateway.state.save_state", lambda s: None)
+            mp.setenv("PATH", f"{fake_db_dir}:{os.environ['PATH']}")
+            # get_databricks_token will fail first, reauth, then return e2e_token
+            _, recovered_token = gemini.write_tool_config(
+                {**e2e_state, "workspace": e2e_workspace}, model
+            )
+
+        assert recovered_token == e2e_token, (
+            "Expected recovered token after reauth, got empty. "
+            "get_databricks_token may not be retrying after auth login."
+        )
+
+        env = gemini.build_runtime_env(e2e_workspace, model, recovered_token)
+        cmd = gemini.validate_cmd("gemini")
+        result = _run_agent(cmd, env=env, timeout=90)
+        combined = (result.stdout + result.stderr).strip()
+        assert result.returncode == 0 and combined, (
+            f"Gemini failed after auth recovery: rc={result.returncode} "
+            f"stdout={result.stdout[:300]!r} stderr={result.stderr[:300]!r}"
+        )

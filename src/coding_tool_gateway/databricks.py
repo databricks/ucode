@@ -197,30 +197,58 @@ def ensure_databricks_auth(workspace: str) -> None:
 
 
 def get_databricks_token(workspace: str) -> str:
-    try:
-        env = build_databricks_cli_env(workspace)
-        result = run(
-            ["databricks", "auth", "token", "--host", workspace, "--output", "json"],
-            capture_output=True,
-            text=True,
-            env=env,
-            timeout=15,
+    env = build_databricks_cli_env(workspace)
+
+    def _fetch() -> str:
+        try:
+            result = run(
+                ["databricks", "auth", "token", "--host", workspace, "--output", "json"],
+                capture_output=True,
+                text=True,
+                env=env,
+                timeout=15,
+            )
+            return json.loads(result.stdout or "{}").get("access_token", "")
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, json.JSONDecodeError):
+            return ""
+
+    token = _fetch()
+    if not token:
+        # Session may have expired — attempt non-interactive re-auth and retry once.
+        try:
+            run(
+                ["databricks", "auth", "login", "--host", workspace, "--no-browser"],
+                capture_output=True,
+                env=env,
+                timeout=30,
+            )
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            pass
+        token = _fetch()
+
+    if not token:
+        raise RuntimeError(
+            f"Databricks CLI returned no access token for {workspace}. "
+            "Run `databricks auth login` to re-authenticate."
         )
-        data = json.loads(result.stdout or "{}")
-        token = data.get("access_token")
-        if not token:
-            raise RuntimeError("Databricks CLI returned no access token.")
-        return token
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, json.JSONDecodeError) as exc:
-        raise RuntimeError("Failed to retrieve Databricks access token.") from exc
+    return token
 
 
 def build_auth_shell_command(workspace: str) -> str:
-    python_expr = "import json,sys; print(json.load(sys.stdin).get('access_token', ''))"
     unset_prefix = " ".join(f"-u {key}" for key in SCRUBBED_DATABRICKS_ENV_VARS)
+    # grep+sed are POSIX — no python3 or jq dependency required on the user's machine.
+    parse_token = 'grep -o \'"access_token": *"[^"]*"\' | sed \'s/.*": *"\\(.*\\)"/\\1/\''
+    get_token = (
+        f"env {unset_prefix} databricks auth token --host {workspace} --output json | {parse_token}"
+    )
+    # If the token comes back empty (expired session), re-authenticate and retry once.
     return (
-        f"env {unset_prefix} databricks auth token --host {workspace} --output json "
-        f'| python3 -c "{python_expr}"'
+        f"token=$({get_token} 2>/dev/null); "
+        f'if [ -z "$token" ]; then '
+        f"env {unset_prefix} databricks auth login --host {workspace} --no-browser 2>/dev/null; "
+        f"token=$({get_token}); "
+        f"fi; "
+        f'echo "$token"'
     )
 
 

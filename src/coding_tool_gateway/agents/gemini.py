@@ -13,7 +13,9 @@ from coding_tool_gateway.config_io import (
     ToolSpec,
     backup_existing_file,
     parse_dotenv,
+    read_json_safe,
     write_dotenv,
+    write_json_file,
 )
 from coding_tool_gateway.databricks import (
     TOKEN_REFRESH_INTERVAL_SECONDS,
@@ -24,6 +26,7 @@ from coding_tool_gateway.state import mark_tool_managed, save_state
 
 GEMINI_CONFIG_DIR = Path.home() / ".gemini"
 GEMINI_ENV_PATH = GEMINI_CONFIG_DIR / ".env"
+GEMINI_SETTINGS_PATH = GEMINI_CONFIG_DIR / "settings.json"
 GEMINI_BACKUP_PATH = APP_DIR / "gemini-env.backup"
 
 SPEC: ToolSpec = {
@@ -72,6 +75,11 @@ def write_tool_config(
     existing = parse_dotenv(GEMINI_ENV_PATH)
     existing.update(overlay)
     write_dotenv(GEMINI_ENV_PATH, existing)
+    # Ensure settings.json selects gemini-api-key auth so the CLI doesn't
+    # prompt for an auth method on first launch (e.g. fresh installs).
+    settings = read_json_safe(GEMINI_SETTINGS_PATH)
+    settings.setdefault("security", {}).setdefault("auth", {})["selectedType"] = "gemini-api-key"
+    write_json_file(GEMINI_SETTINGS_PATH, settings)
     state = mark_tool_managed(state, "gemini", MANAGED_KEYS)
     save_state(state)
     return state, token
