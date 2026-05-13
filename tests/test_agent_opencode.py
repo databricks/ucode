@@ -97,6 +97,16 @@ class TestRenderOverlay:
         assert "claude-sonnet" in provider_models
         assert "claude-haiku" in provider_models
 
+    def test_prefixes_anthropic_model_with_provider_id(self):
+        models = {"anthropic": ["claude-sonnet"], "gemini": []}
+        overlay, _ = opencode.render_overlay("claude-sonnet", "tok", _base_urls(), models)
+        assert overlay["model"] == "databricks-anthropic/claude-sonnet"
+
+    def test_prefixes_gemini_model_with_provider_id(self):
+        models = {"anthropic": [], "gemini": ["gemini-2"]}
+        overlay, _ = opencode.render_overlay("gemini-2", "tok", _base_urls(), models)
+        assert overlay["model"] == "databricks-google/gemini-2"
+
 
 class TestMcpServerConfig:
     def test_builds_remote_server_entry_with_oauth_token_env_header(self):
@@ -266,4 +276,4 @@ class TestWriteToolConfigStaleProviderCleanup:
             oc_mod.write_tool_config(state, "claude-sonnet", token="tok")
 
         written = json.loads(config_file.read_text())
-        assert written["model"] == "claude-sonnet"
+        assert written["model"] == "databricks-anthropic/claude-sonnet"

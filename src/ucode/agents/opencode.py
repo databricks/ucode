@@ -42,6 +42,22 @@ PROVIDER_KEYS: list[list[str]] = [
 ]
 
 
+def _resolve_model_selector(model: str, opencode_models: dict[str, list[str]]) -> str:
+    """Return an OpenCode model selector in provider/model form when possible."""
+    if model.startswith("databricks-anthropic/") or model.startswith("databricks-google/"):
+        return model
+
+    anthropic_models = opencode_models.get("anthropic") or []
+    if model in anthropic_models:
+        return f"databricks-anthropic/{model}"
+
+    gemini_models = opencode_models.get("gemini") or []
+    if model in gemini_models:
+        return f"databricks-google/{model}"
+
+    return model
+
+
 def render_overlay(
     model: str,
     token: str,
@@ -79,7 +95,7 @@ def render_overlay(
         }
         keys.append(["provider", "databricks-google"])
 
-    overlay: dict = {"model": model}
+    overlay: dict = {"model": _resolve_model_selector(model, opencode_models)}
     if providers:
         overlay["provider"] = providers
     return overlay, keys
