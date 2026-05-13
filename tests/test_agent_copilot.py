@@ -21,22 +21,22 @@ class TestCopilotSpec:
 
 
 class TestRenderEnvOverlay:
-    def test_provider_type_is_openai(self):
+    def test_sets_openai_base_url(self):
         env = copilot.render_env_overlay(WS, "claude-sonnet-4-6", "tok")
-        assert env["COPILOT_PROVIDER_TYPE"] == "openai"
+        assert env["OPENAI_BASE_URL"] == f"{WS}/ai-gateway/mlflow/v1"
 
-    def test_base_url_points_at_mlflow_gateway(self):
+    def test_does_not_use_legacy_provider_base_url_var(self):
         env = copilot.render_env_overlay(WS, "m", "t")
-        assert env["COPILOT_PROVIDER_BASE_URL"] == f"{WS}/ai-gateway/mlflow/v1"
+        assert "COPILOT_PROVIDER_BASE_URL" not in env
 
     def test_sets_model(self):
         env = copilot.render_env_overlay(WS, "claude-sonnet-4-6", "tok")
         assert env["COPILOT_MODEL"] == "claude-sonnet-4-6"
 
-    def test_uses_bearer_token_env_var(self):
+    def test_uses_openai_api_key_env_var(self):
         env = copilot.render_env_overlay(WS, "m", "tok123")
-        assert env["COPILOT_PROVIDER_BEARER_TOKEN"] == "tok123"
-        assert "COPILOT_PROVIDER_API_KEY" not in env
+        assert env["OPENAI_API_KEY"] == "tok123"
+        assert "COPILOT_PROVIDER_BEARER_TOKEN" not in env
 
     def test_sets_offline_true(self):
         env = copilot.render_env_overlay(WS, "m", "t")
@@ -50,8 +50,8 @@ class TestBuildRuntimeEnv:
 
     def test_overrides_copilot_vars(self):
         env = copilot.build_runtime_env(WS, "m", "tok")
-        assert env["COPILOT_PROVIDER_TYPE"] == "openai"
-        assert env["COPILOT_PROVIDER_BEARER_TOKEN"] == "tok"
+        assert env["OPENAI_BASE_URL"] == f"{WS}/ai-gateway/mlflow/v1"
+        assert env["OPENAI_API_KEY"] == "tok"
 
     def test_sets_oauth_token_for_mcp(self):
         env = copilot.build_runtime_env(WS, "m", "tok")
@@ -163,10 +163,9 @@ class TestDefaultModel:
 class TestManagedKeys:
     def test_includes_required_vars(self):
         for key in (
-            "COPILOT_PROVIDER_TYPE",
-            "COPILOT_PROVIDER_BASE_URL",
+            "OPENAI_BASE_URL",
+            "OPENAI_API_KEY",
             "COPILOT_MODEL",
-            "COPILOT_PROVIDER_BEARER_TOKEN",
             "COPILOT_OFFLINE",
             "OAUTH_TOKEN",
         ):

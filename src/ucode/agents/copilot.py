@@ -1,7 +1,7 @@
 """GitHub Copilot CLI agent: writes ~/.copilot/.env and injects BYOK env vars at launch.
 
-Copilot CLI's BYOK config (COPILOT_PROVIDER_*) is documented as env-var only —
-the CLI does not auto-load ~/.copilot/.env. We still write the file so users can
+Copilot CLI's BYOK config is env-var only — the CLI does not auto-load
+~/.copilot/.env. We still write the file so users can
 inspect what's configured (`cat ~/.copilot/.env`) and to give `revert` something
 to clean up; the values are also injected directly into the child process's
 environment at launch.
@@ -51,12 +51,17 @@ SPEC: ToolSpec = {
 }
 
 MANAGED_KEYS: list[str] = [
-    "COPILOT_PROVIDER_TYPE",
-    "COPILOT_PROVIDER_BASE_URL",
+    "OPENAI_BASE_URL",
+    "OPENAI_API_KEY",
     "COPILOT_MODEL",
-    "COPILOT_PROVIDER_BEARER_TOKEN",
     "COPILOT_OFFLINE",
     "OAUTH_TOKEN",
+]
+LEGACY_ENV_KEYS = [
+    "COPILOT_PROVIDER_TYPE",
+    "COPILOT_PROVIDER_BASE_URL",
+    "COPILOT_PROVIDER_BEARER_TOKEN",
+    "COPILOT_PROVIDER_API_KEY",
 ]
 
 
@@ -74,10 +79,10 @@ def default_model(state: dict) -> str | None:
 
 def render_env_overlay(workspace: str, model: str, token: str) -> dict[str, str]:
     return {
-        "COPILOT_PROVIDER_TYPE": "openai",
-        "COPILOT_PROVIDER_BASE_URL": build_copilot_base_url(workspace),
+        # Current Copilot CLI releases read the generic OpenAI BYOK env vars.
+        "OPENAI_BASE_URL": build_copilot_base_url(workspace),
+        "OPENAI_API_KEY": token,
         "COPILOT_MODEL": model,
-        "COPILOT_PROVIDER_BEARER_TOKEN": token,
         "COPILOT_OFFLINE": "true",
         "OAUTH_TOKEN": token,
     }
@@ -123,6 +128,8 @@ def write_tool_config(
         token = get_databricks_token(state["workspace"])
     overlay = render_env_overlay(state["workspace"], model, token)
     existing = parse_dotenv(COPILOT_ENV_PATH)
+    for key in LEGACY_ENV_KEYS:
+        existing.pop(key, None)
     existing.update(overlay)
     write_dotenv(COPILOT_ENV_PATH, existing)
     state = mark_tool_managed(state, "copilot", MANAGED_KEYS)
