@@ -83,7 +83,7 @@ def configure_shared_state(
     with spinner("Verifying AI Gateway V2..."):
         token = get_databricks_token(workspace)
         ensure_ai_gateway_v2(workspace, token)
-    print_success("AI Gateway V2 detected")
+    print_success("Unity AI Gateway detected")
 
     with spinner("Fetching available models..."):
         claude_models = (
@@ -297,8 +297,7 @@ def _launch_tool(tool_name: str, ctx: typer.Context) -> None:
         state = ensure_provider_state(tool)
         state, resolved_model = resolve_launch_model(tool, state, None)
         state = configure_tool(tool, state, resolved_model)
-        print_section("Launching")
-        print_kv("Tool", TOOL_SPECS[tool]["display"])
+        print_section(f"ucode with {TOOL_SPECS[tool]['display']}")
         if resolved_model:
             print_kv("Model", resolved_model)
         print_kv("Base URL", str(state["base_urls"][tool]))

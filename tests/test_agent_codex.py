@@ -53,7 +53,7 @@ class TestRenderOverlay:
     def test_auth_refresh_interval(self):
         overlay = codex.render_overlay(WS)
         auth = overlay["model_providers"]["Databricks"]["auth"]
-        assert auth["refresh_interval_ms"] == 1_800_000
+        assert auth["refresh_interval_ms"] == 900_000
 
 
 class TestCodexDefaultModel:

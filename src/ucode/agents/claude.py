@@ -45,7 +45,7 @@ def render_overlay(
         "ANTHROPIC_BASE_URL": base_url,
         "ANTHROPIC_CUSTOM_HEADERS": "x-databricks-use-coding-agent-mode: true",
         "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1",
-        "CLAUDE_CODE_API_KEY_HELPER_TTL_MS": "1800000",
+        "CLAUDE_CODE_API_KEY_HELPER_TTL_MS": "900000",
     }
     if claude_models:
         if claude_models.get("opus"):

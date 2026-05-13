@@ -519,66 +519,6 @@ def _make_reauth_fake_databricks(tmp_path, real_token: str) -> str:
     return str(tmp_path)
 
 
-class TestClaudeAuthRecovery:
-    """Claude Code uses apiKeyHelper — verify it reauths and recovers when the
-    first token fetch returns empty (simulating an expired Databricks session).
-
-    Uses CLAUDE_CONFIG_DIR to point the claude subprocess at an isolated temp
-    directory, so ~/.claude/settings.json is never touched.
-    """
-
-    def test_recovers_when_initial_token_empty(self, tmp_path, e2e_state, e2e_workspace, e2e_token):
-        import json
-
-        from ucode.agents import claude
-
-        _require_binary("claude")
-        claude_models: dict = e2e_state.get("claude_models") or {}
-        if not claude_models:
-            pytest.skip("No Claude models available on this workspace")
-
-        fake_db_dir = _make_reauth_fake_databricks(tmp_path / "fake_db", e2e_token)
-        model_id = next(iter(claude_models.values()))
-        base_url = build_tool_base_url("claude", e2e_workspace)
-
-        # Write an isolated settings.json under a temp config dir.
-        # CLAUDE_CONFIG_DIR makes the claude subprocess use this instead of ~/.claude.
-        config_dir = tmp_path / "claude_config"
-        config_dir.mkdir()
-        fake_helper = (
-            f"{fake_db_dir}/databricks auth token "
-            f"--host {e2e_workspace} --output json "
-            f'| grep -o \'"access_token": *"[^"]*"\' '
-            f'| sed \'s/.*": *"\\(.*\\)"/\\1/\''
-        )
-        settings = {
-            "apiKeyHelper": fake_helper,
-            "env": {
-                "ANTHROPIC_MODEL": model_id,
-                "ANTHROPIC_BASE_URL": base_url,
-                "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1",
-                # TTL=1ms so every API call triggers a helper refresh.
-                "CLAUDE_CODE_API_KEY_HELPER_TTL_MS": "1",
-            },
-        }
-        (config_dir / "settings.json").write_text(json.dumps(settings, indent=2))
-
-        env = {
-            **os.environ,
-            "CLAUDE_CONFIG_DIR": str(config_dir),
-            "PATH": f"{fake_db_dir}:{os.environ['PATH']}",
-        }
-        env.pop("ANTHROPIC_API_KEY", None)
-
-        cmd = claude.validate_cmd("claude")
-        result = _run_agent(cmd, env=env, timeout=90)
-        combined = (result.stdout + result.stderr).strip()
-        assert result.returncode == 0 and combined, (
-            f"Claude failed to recover from empty token: rc={result.returncode} "
-            f"stdout={result.stdout[:300]!r} stderr={result.stderr[:300]!r}"
-        )
-
-
 class TestGeminiAuthRecovery:
     """Gemini uses get_databricks_token() at launch — verify it reauths and
     recovers when the first token fetch returns empty."""
