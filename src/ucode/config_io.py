@@ -9,7 +9,7 @@ from typing import TypedDict
 import tomlkit
 import tomlkit.exceptions
 
-from coding_tool_gateway.ui import console
+from ucode.ui import console
 
 
 class ToolSpec(TypedDict):
@@ -20,7 +20,7 @@ class ToolSpec(TypedDict):
     backup_path: Path
 
 
-APP_DIR = Path.home() / ".coding-gateway"
+APP_DIR = Path.home() / ".ucode"
 
 _dry_run = False
 

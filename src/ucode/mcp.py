@@ -6,10 +6,10 @@ import json
 import shutil
 import subprocess
 
-from coding_tool_gateway.agents import copilot, opencode
-from coding_tool_gateway.databricks import ensure_databricks_auth, list_databricks_connections
-from coding_tool_gateway.state import load_state, save_state
-from coding_tool_gateway.ui import (
+from ucode.agents import copilot, opencode
+from ucode.databricks import ensure_databricks_auth, list_databricks_connections
+from ucode.state import load_state, save_state
+from ucode.ui import (
     console,
     label,
     muted,
@@ -285,9 +285,7 @@ def build_mcp_server_options(available_external_names: list[str]) -> list[tuple[
 
 
 def prompt_for_manual_external_mcp_connection() -> str | None:
-    values = prompt_for_mcp_setup_fields(
-        [("MCP server name", "(e.g. confluence-mcp, jira-mcp)")]
-    )
+    values = prompt_for_mcp_setup_fields([("MCP server name", "(e.g. confluence-mcp, jira-mcp)")])
     if values is None:
         return None
     server_name = values[0]
@@ -356,7 +354,7 @@ def configure_mcp_command() -> int:
     state = load_state()
     workspace = state.get("workspace")
     if not workspace:
-        raise RuntimeError("Workspace is not configured. Run `coding-gateway configure` first.")
+        raise RuntimeError("Workspace is not configured. Run `ucode configure` first.")
 
     clients = available_mcp_clients()
     if not clients:
@@ -373,7 +371,7 @@ def configure_mcp_command() -> int:
     print_note(f"Workspace: {workspace}")
     print_note(
         "Databricks MCP servers are written to installed coding tool user MCP configs. "
-        f"Auth uses `{MCP_AUTH_TOKEN_ENV_VAR}`, which coding-gateway sets before launching tools."
+        f"Auth uses `{MCP_AUTH_TOKEN_ENV_VAR}`, which ucode sets before launching tools."
     )
     configured_client_names = ", ".join(str(MCP_CLIENTS[client]["display"]) for client in clients)
     print_note(f"Configuring MCP clients: {configured_client_names}")
@@ -420,9 +418,7 @@ def configure_mcp_command() -> int:
             entry_name = "databricks-sql"
 
         elif selection == UC_FUNCTIONS_VALUE:
-            values = prompt_for_mcp_setup_fields(
-                [("Catalog name", None), ("Schema name", None)]
-            )
+            values = prompt_for_mcp_setup_fields([("Catalog name", None), ("Schema name", None)])
             if values is None:
                 continue
             catalog, schema = values

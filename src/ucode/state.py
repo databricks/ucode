@@ -1,11 +1,11 @@
-"""Persistent state for coding-gateway (per-workspace, versioned)."""
+"""Persistent state for ucode (per-workspace, versioned)."""
 
 from __future__ import annotations
 
 import json
 
-from coding_tool_gateway.config_io import APP_DIR, is_dry_run
-from coding_tool_gateway.databricks import build_shared_base_urls
+from ucode.config_io import APP_DIR, is_dry_run
+from ucode.databricks import build_shared_base_urls
 
 STATE_PATH = APP_DIR / "state.json"
 STATE_VERSION = 3

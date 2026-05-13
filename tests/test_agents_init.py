@@ -6,7 +6,7 @@ import subprocess
 
 import pytest
 
-from coding_tool_gateway.agents import (
+from ucode.agents import (
     DEFAULT_TOOL,
     TOOL_SPECS,
     check_gateway_endpoint,
@@ -143,7 +143,7 @@ class TestResolveLaunchModel:
 
 class TestInstallToolBinary:
     def test_non_strict_returns_false_when_npm_missing(self, monkeypatch):
-        monkeypatch.setattr("coding_tool_gateway.agents.shutil.which", lambda _: None)
+        monkeypatch.setattr("ucode.agents.shutil.which", lambda _: None)
 
         assert install_tool_binary("opencode", strict=False) is False
 
@@ -156,13 +156,13 @@ class TestInstallToolBinary:
         def fake_run(*args, **kwargs):
             raise subprocess.CalledProcessError(1, args[0])
 
-        monkeypatch.setattr("coding_tool_gateway.agents.shutil.which", fake_which)
-        monkeypatch.setattr("coding_tool_gateway.agents.subprocess.run", fake_run)
+        monkeypatch.setattr("ucode.agents.shutil.which", fake_which)
+        monkeypatch.setattr("ucode.agents.subprocess.run", fake_run)
 
         assert install_tool_binary("opencode", strict=False) is False
 
     def test_ensure_tool_binary_available_raises_when_missing(self, monkeypatch):
-        monkeypatch.setattr("coding_tool_gateway.agents.shutil.which", lambda _: None)
+        monkeypatch.setattr("ucode.agents.shutil.which", lambda _: None)
 
         with pytest.raises(RuntimeError, match="OpenCode is not installed"):
             ensure_tool_binary_available("opencode")

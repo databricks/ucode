@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from coding_tool_gateway.agents import gemini
+from ucode.agents import gemini
 
 WS = "https://example.databricks.com"
 
@@ -104,17 +104,15 @@ class TestGeminiManagedKeys:
 
 class TestWriteToolConfigSetsAuthType:
     def test_writes_settings_json_with_gemini_api_key_auth(self, tmp_path, monkeypatch):
-        import coding_tool_gateway.config_io as config_io_mod
+        import ucode.config_io as config_io_mod
 
         settings_path = tmp_path / "settings.json"
         monkeypatch.setattr(gemini, "GEMINI_ENV_PATH", tmp_path / ".env")
         monkeypatch.setattr(gemini, "GEMINI_SETTINGS_PATH", settings_path)
         monkeypatch.setattr(gemini, "GEMINI_BACKUP_PATH", tmp_path / "backup")
         monkeypatch.setattr(config_io_mod, "APP_DIR", tmp_path)
-        monkeypatch.setattr("coding_tool_gateway.state.save_state", lambda s: None)
-        monkeypatch.setattr(
-            "coding_tool_gateway.agents.gemini.get_databricks_token", lambda ws: "fake-token"
-        )
+        monkeypatch.setattr("ucode.state.save_state", lambda s: None)
+        monkeypatch.setattr("ucode.agents.gemini.get_databricks_token", lambda ws: "fake-token")
 
         gemini.write_tool_config({"workspace": WS}, "some-model")
 
@@ -122,7 +120,7 @@ class TestWriteToolConfigSetsAuthType:
         assert settings["security"]["auth"]["selectedType"] == "gemini-api-key"
 
     def test_preserves_existing_settings_json_keys(self, tmp_path, monkeypatch):
-        import coding_tool_gateway.config_io as config_io_mod
+        import ucode.config_io as config_io_mod
 
         settings_path = tmp_path / "settings.json"
         settings_path.write_text(json.dumps({"theme": "dark", "otherKey": 123}))
@@ -130,10 +128,8 @@ class TestWriteToolConfigSetsAuthType:
         monkeypatch.setattr(gemini, "GEMINI_SETTINGS_PATH", settings_path)
         monkeypatch.setattr(gemini, "GEMINI_BACKUP_PATH", tmp_path / "backup")
         monkeypatch.setattr(config_io_mod, "APP_DIR", tmp_path)
-        monkeypatch.setattr("coding_tool_gateway.state.save_state", lambda s: None)
-        monkeypatch.setattr(
-            "coding_tool_gateway.agents.gemini.get_databricks_token", lambda ws: "fake-token"
-        )
+        monkeypatch.setattr("ucode.state.save_state", lambda s: None)
+        monkeypatch.setattr("ucode.agents.gemini.get_databricks_token", lambda ws: "fake-token")
 
         gemini.write_tool_config({"workspace": WS}, "some-model")
 

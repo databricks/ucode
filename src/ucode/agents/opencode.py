@@ -8,7 +8,7 @@ import subprocess
 import threading
 from pathlib import Path
 
-from coding_tool_gateway.config_io import (
+from ucode.config_io import (
     APP_DIR,
     ToolSpec,
     backup_existing_file,
@@ -16,12 +16,12 @@ from coding_tool_gateway.config_io import (
     read_json_safe,
     write_json_file,
 )
-from coding_tool_gateway.databricks import (
+from ucode.databricks import (
     TOKEN_REFRESH_INTERVAL_SECONDS,
     build_opencode_base_urls,
     get_databricks_token,
 )
-from coding_tool_gateway.state import mark_tool_managed, save_state
+from ucode.state import mark_tool_managed, save_state
 
 OPENCODE_CONFIG_DIR = Path.home() / ".config" / "opencode"
 OPENCODE_CONFIG_PATH = OPENCODE_CONFIG_DIR / "opencode.json"

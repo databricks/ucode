@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from coding_tool_gateway.agents import copilot
+from ucode.agents import copilot
 
 WS = "https://example.databricks.com"
 
@@ -71,8 +71,8 @@ class TestMcpServerConfig:
         }
 
     def test_writes_mcp_server_without_clobbering_existing_config(self, tmp_path, monkeypatch):
-        import coding_tool_gateway.agents.copilot as cp_mod
-        import coding_tool_gateway.config_io as config_io_mod
+        import ucode.agents.copilot as cp_mod
+        import ucode.config_io as config_io_mod
 
         monkeypatch.setattr(config_io_mod, "APP_DIR", tmp_path)
         config_file = tmp_path / "mcp-config.json"
@@ -107,8 +107,8 @@ class TestMcpServerConfig:
         }
 
     def test_reports_replaced_mcp_server(self, tmp_path, monkeypatch):
-        import coding_tool_gateway.agents.copilot as cp_mod
-        import coding_tool_gateway.config_io as config_io_mod
+        import ucode.agents.copilot as cp_mod
+        import ucode.config_io as config_io_mod
 
         monkeypatch.setattr(config_io_mod, "APP_DIR", tmp_path)
         config_file = tmp_path / "mcp-config.json"

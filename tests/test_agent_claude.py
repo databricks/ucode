@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 
-from coding_tool_gateway.agents import claude
+from ucode.agents import claude
 
 WS = "https://example.databricks.com"
 

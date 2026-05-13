@@ -111,39 +111,6 @@ wheels = [
 ]
 
 [[package]]
-name = "coding-gateway"
-version = "0.1.0"
-source = { editable = "." }
-dependencies = [
-    { name = "databricks-sql-connector" },
-    { name = "questionary" },
-    { name = "tomlkit" },
-    { name = "typer" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "pytest" },
-    { name = "ruff" },
-    { name = "ty" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "databricks-sql-connector", specifier = ">=3.6.0" },
-    { name = "questionary", specifier = ">=2.0.0" },
-    { name = "tomlkit", specifier = ">=0.13.0" },
-    { name = "typer", specifier = ">=0.12.0" },
-]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "pytest", specifier = ">=9.0.3" },
-    { name = "ruff", specifier = ">=0.15.12" },
-    { name = "ty" },
-]
-
-[[package]]
 name = "colorama"
 version = "0.4.6"
 source = { registry = "https://pypi-proxy.dev.databricks.com/simple" }
@@ -631,6 +598,39 @@ source = { registry = "https://pypi-proxy.dev.databricks.com/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/19/f5/cd531b2d15a671a40c0f66cf06bc3570a12cd56eef98960068ebbad1bf5a/tzdata-2026.1.tar.gz", hash = "sha256:67658a1903c75917309e753fdc349ac0efd8c27db7a0cb406a25be4840f87f98", size = 197639, upload-time = "2026-04-03T11:25:22.002Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b0/70/d460bd685a170790ec89317e9bd33047988e4bce507b831f5db771e142de/tzdata-2026.1-py2.py3-none-any.whl", hash = "sha256:4b1d2be7ac37ceafd7327b961aa3a54e467efbdb563a23655fbfe0d39cfc42a9", size = 348952, upload-time = "2026-04-03T11:25:20.313Z" },
+]
+
+[[package]]
+name = "ucode"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "databricks-sql-connector" },
+    { name = "questionary" },
+    { name = "tomlkit" },
+    { name = "typer" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "ruff" },
+    { name = "ty" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "databricks-sql-connector", specifier = ">=3.6.0" },
+    { name = "questionary", specifier = ">=2.0.0" },
+    { name = "tomlkit", specifier = ">=0.13.0" },
+    { name = "typer", specifier = ">=0.12.0" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest", specifier = ">=9.0.3" },
+    { name = "ruff", specifier = ">=0.15.12" },
+    { name = "ty" },
 ]
 
 [[package]]

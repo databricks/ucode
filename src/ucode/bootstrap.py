@@ -1,9 +1,9 @@
-"""Best-effort runtime/bootstrap installer for coding-gateway dependencies."""
+"""Best-effort runtime/bootstrap installer for ucode dependencies."""
 
 from __future__ import annotations
 
-from coding_tool_gateway.agents import TOOL_SPECS, ensure_bootstrap_dependencies
-from coding_tool_gateway.ui import print_err
+from ucode.agents import TOOL_SPECS, ensure_bootstrap_dependencies
+from ucode.ui import print_err
 
 
 def main() -> int:
@@ -11,7 +11,7 @@ def main() -> int:
         for tool in TOOL_SPECS:
             ensure_bootstrap_dependencies(tool)
     except RuntimeError as exc:
-        print_err(f"coding-gateway bootstrap failed: {exc}")
+        print_err(f"ucode bootstrap failed: {exc}")
         return 1
     return 0
 

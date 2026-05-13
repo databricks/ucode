@@ -6,7 +6,7 @@ from datetime import timedelta
 
 import pytest
 
-from coding_tool_gateway.ui import (
+from ucode.ui import (
     format_duration,
     format_token_count,
     normalize_workspace_url,

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta
 
-from coding_tool_gateway.usage import (
+from ucode.usage import (
     USAGE_BREAKDOWN_DAYS,
     USAGE_SUMMARY_DAYS,
     build_current_user_query,

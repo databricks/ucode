@@ -20,7 +20,7 @@ import subprocess
 import threading
 from pathlib import Path
 
-from coding_tool_gateway.config_io import (
+from ucode.config_io import (
     APP_DIR,
     ToolSpec,
     backup_existing_file,
@@ -29,12 +29,12 @@ from coding_tool_gateway.config_io import (
     write_dotenv,
     write_json_file,
 )
-from coding_tool_gateway.databricks import (
+from ucode.databricks import (
     TOKEN_REFRESH_INTERVAL_SECONDS,
     build_copilot_base_url,
     get_databricks_token,
 )
-from coding_tool_gateway.state import mark_tool_managed, save_state
+from ucode.state import mark_tool_managed, save_state
 
 COPILOT_CONFIG_DIR = Path.home() / ".copilot"
 COPILOT_ENV_PATH = COPILOT_CONFIG_DIR / ".env"

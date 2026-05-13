@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from unittest.mock import patch
 
-from coding_tool_gateway.agents import opencode
+from ucode.agents import opencode
 
 WS = "https://example.databricks.com"
 
@@ -110,8 +110,8 @@ class TestMcpServerConfig:
         }
 
     def test_writes_mcp_server_without_clobbering_existing_config(self, tmp_path, monkeypatch):
-        import coding_tool_gateway.agents.opencode as oc_mod
-        import coding_tool_gateway.config_io as config_io_mod
+        import ucode.agents.opencode as oc_mod
+        import ucode.config_io as config_io_mod
 
         monkeypatch.setattr(config_io_mod, "APP_DIR", tmp_path)
         config_file = tmp_path / "opencode.json"
@@ -146,8 +146,8 @@ class TestMcpServerConfig:
         }
 
     def test_reports_replaced_mcp_server(self, tmp_path, monkeypatch):
-        import coding_tool_gateway.agents.opencode as oc_mod
-        import coding_tool_gateway.config_io as config_io_mod
+        import ucode.agents.opencode as oc_mod
+        import ucode.config_io as config_io_mod
 
         monkeypatch.setattr(config_io_mod, "APP_DIR", tmp_path)
         config_file = tmp_path / "opencode.json"
@@ -204,8 +204,8 @@ class TestOpencodeValidateCmd:
 
 class TestWriteToolConfigStaleProviderCleanup:
     def test_stale_providers_removed_before_merge(self, tmp_path, monkeypatch):
-        import coding_tool_gateway.agents.opencode as oc_mod
-        import coding_tool_gateway.config_io as config_io_mod
+        import ucode.agents.opencode as oc_mod
+        import ucode.config_io as config_io_mod
 
         monkeypatch.setattr(config_io_mod, "APP_DIR", tmp_path)
         config_file = tmp_path / "opencode.json"
@@ -230,8 +230,8 @@ class TestWriteToolConfigStaleProviderCleanup:
         }
 
         with (
-            patch("coding_tool_gateway.agents.opencode.get_databricks_token", return_value="tok"),
-            patch("coding_tool_gateway.agents.opencode.save_state"),
+            patch("ucode.agents.opencode.get_databricks_token", return_value="tok"),
+            patch("ucode.agents.opencode.save_state"),
         ):
             oc_mod.write_tool_config(state, "claude-sonnet", token="tok")
 
@@ -243,8 +243,8 @@ class TestWriteToolConfigStaleProviderCleanup:
         assert providers.get("other-provider") == {"keep": True}
 
     def test_config_written_with_correct_model(self, tmp_path, monkeypatch):
-        import coding_tool_gateway.agents.opencode as oc_mod
-        import coding_tool_gateway.config_io as config_io_mod
+        import ucode.agents.opencode as oc_mod
+        import ucode.config_io as config_io_mod
 
         monkeypatch.setattr(config_io_mod, "APP_DIR", tmp_path)
         config_file = tmp_path / "opencode.json"
@@ -260,8 +260,8 @@ class TestWriteToolConfigStaleProviderCleanup:
         }
 
         with (
-            patch("coding_tool_gateway.agents.opencode.get_databricks_token", return_value="tok"),
-            patch("coding_tool_gateway.agents.opencode.save_state"),
+            patch("ucode.agents.opencode.get_databricks_token", return_value="tok"),
+            patch("ucode.agents.opencode.save_state"),
         ):
             oc_mod.write_tool_config(state, "claude-sonnet", token="tok")
 

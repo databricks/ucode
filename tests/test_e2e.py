@@ -1,7 +1,7 @@
 """End-to-end integration tests that require a live Databricks workspace.
 
 Run with:
-    CODING_GATEWAY_TEST_WORKSPACE=https://your-workspace.databricks.com uv run pytest tests/test_e2e.py -v
+    UCODE_TEST_WORKSPACE=https://your-workspace.databricks.com uv run pytest tests/test_e2e.py -v
 
 All tests in this file are skipped automatically when the env var is not set.
 The agent-launch tests are also skipped per-agent/model when the binary is not
@@ -16,7 +16,7 @@ import subprocess
 
 import pytest
 
-from coding_tool_gateway.databricks import (
+from ucode.databricks import (
     build_shared_base_urls,
     build_tool_base_url,
     discover_sql_warehouse_http_path,
@@ -27,7 +27,7 @@ from coding_tool_gateway.databricks import (
     has_valid_databricks_auth,
     workspace_hostname,
 )
-from coding_tool_gateway.ui import normalize_workspace_url
+from ucode.ui import normalize_workspace_url
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -35,13 +35,13 @@ from coding_tool_gateway.ui import normalize_workspace_url
 
 
 def _ws() -> str:
-    raw = os.environ.get("CODING_GATEWAY_TEST_WORKSPACE", "").strip().rstrip("/")
+    raw = os.environ.get("UCODE_TEST_WORKSPACE", "").strip().rstrip("/")
     return normalize_workspace_url(raw) if raw else ""
 
 
 def _skip_if_no_workspace():
     if not _ws():
-        pytest.skip("Set CODING_GATEWAY_TEST_WORKSPACE=https://... to run E2E tests")
+        pytest.skip("Set UCODE_TEST_WORKSPACE=https://... to run E2E tests")
 
 
 def _run_agent(
@@ -133,9 +133,9 @@ class TestStateRoundTrip:
     def test_configure_shared_state_and_reload(
         self, tmp_path, monkeypatch, e2e_state, e2e_workspace
     ):
-        import coding_tool_gateway.config_io as config_io_mod
-        import coding_tool_gateway.state as state_mod
-        from coding_tool_gateway.state import load_state, save_state
+        import ucode.config_io as config_io_mod
+        import ucode.state as state_mod
+        from ucode.state import load_state, save_state
 
         monkeypatch.setattr(state_mod, "STATE_PATH", tmp_path / "state.json")
         monkeypatch.setattr(config_io_mod, "APP_DIR", tmp_path)
@@ -190,8 +190,8 @@ class TestCodexLaunch:
 
     def test_launch_codex_per_model(self, tmp_path, monkeypatch, e2e_state, e2e_workspace):
         """Parametrized inline — iterates over all codex models and asserts each works."""
-        import coding_tool_gateway.config_io as config_io_mod
-        from coding_tool_gateway.agents import codex
+        import ucode.config_io as config_io_mod
+        from ucode.agents import codex
 
         _require_binary("codex")
         models = self._codex_models(e2e_state)
@@ -208,7 +208,7 @@ class TestCodexLaunch:
         for model in models:
             state = {**e2e_state, "workspace": e2e_workspace}
             with pytest.MonkeyPatch().context() as mp:
-                mp.setattr("coding_tool_gateway.state.save_state", lambda s: None)
+                mp.setattr("ucode.state.save_state", lambda s: None)
                 codex.write_tool_config(state)
 
             cmd = codex.validate_cmd("codex")
@@ -228,8 +228,8 @@ class TestClaudeLaunch:
     def test_launch_claude_per_model(
         self, tmp_path, monkeypatch, e2e_state, e2e_workspace, e2e_token
     ):
-        import coding_tool_gateway.config_io as config_io_mod
-        from coding_tool_gateway.agents import claude
+        import ucode.config_io as config_io_mod
+        from ucode.agents import claude
 
         _require_binary("claude")
         claude_models: dict = e2e_state.get("claude_models") or {}
@@ -249,7 +249,7 @@ class TestClaudeLaunch:
         failures = []
         for family, model_id in claude_models.items():
             with pytest.MonkeyPatch().context() as mp:
-                mp.setattr("coding_tool_gateway.state.save_state", lambda s: None)
+                mp.setattr("ucode.state.save_state", lambda s: None)
                 claude.write_tool_config({**e2e_state, "workspace": e2e_workspace}, model_id)
 
             env = {
@@ -278,8 +278,8 @@ class TestGeminiLaunch:
     def test_launch_gemini_per_model(
         self, tmp_path, monkeypatch, e2e_state, e2e_workspace, e2e_token
     ):
-        import coding_tool_gateway.config_io as config_io_mod
-        from coding_tool_gateway.agents import gemini
+        import ucode.config_io as config_io_mod
+        from ucode.agents import gemini
 
         _require_binary("gemini")
         gemini_models: list = e2e_state.get("gemini_models") or []
@@ -294,10 +294,8 @@ class TestGeminiLaunch:
         failures = []
         for model in gemini_models:
             with pytest.MonkeyPatch().context() as mp:
-                mp.setattr("coding_tool_gateway.state.save_state", lambda s: None)
-                mp.setattr(
-                    "coding_tool_gateway.agents.gemini.get_databricks_token", lambda ws: e2e_token
-                )
+                mp.setattr("ucode.state.save_state", lambda s: None)
+                mp.setattr("ucode.agents.gemini.get_databricks_token", lambda ws: e2e_token)
                 gemini.write_tool_config(
                     {**e2e_state, "workspace": e2e_workspace}, model, token=e2e_token
                 )
@@ -327,8 +325,8 @@ class TestGeminiSettingsJsonOnFreshInstall:
     ):
         import json
 
-        import coding_tool_gateway.config_io as config_io_mod
-        from coding_tool_gateway.agents import gemini
+        import ucode.config_io as config_io_mod
+        from ucode.agents import gemini
 
         settings_path = tmp_path / "settings.json"
         monkeypatch.setattr(config_io_mod, "APP_DIR", tmp_path)
@@ -340,7 +338,7 @@ class TestGeminiSettingsJsonOnFreshInstall:
         model = gemini_models[0] if gemini_models else "some-model"
 
         with pytest.MonkeyPatch().context() as mp:
-            mp.setattr("coding_tool_gateway.state.save_state", lambda s: None)
+            mp.setattr("ucode.state.save_state", lambda s: None)
             gemini.write_tool_config(
                 {**e2e_state, "workspace": e2e_workspace}, model, token=e2e_token
             )
@@ -367,8 +365,8 @@ class TestOpencodeLaunch:
     def test_launch_opencode_per_model(
         self, tmp_path, monkeypatch, e2e_state, e2e_workspace, e2e_token
     ):
-        import coding_tool_gateway.config_io as config_io_mod
-        from coding_tool_gateway.agents import opencode
+        import ucode.config_io as config_io_mod
+        from ucode.agents import opencode
 
         _require_binary("opencode")
         models = self._all_models(e2e_state)
@@ -388,10 +386,8 @@ class TestOpencodeLaunch:
                 config_path.unlink()
 
             with pytest.MonkeyPatch().context() as mp:
-                mp.setattr("coding_tool_gateway.state.save_state", lambda s: None)
-                mp.setattr(
-                    "coding_tool_gateway.agents.opencode.get_databricks_token", lambda ws: e2e_token
-                )
+                mp.setattr("ucode.state.save_state", lambda s: None)
+                mp.setattr("ucode.agents.opencode.get_databricks_token", lambda ws: e2e_token)
                 opencode.write_tool_config(
                     {**e2e_state, "workspace": e2e_workspace},
                     model,
@@ -445,8 +441,8 @@ class TestCopilotLaunch:
     def test_launch_copilot_per_model(
         self, tmp_path, monkeypatch, e2e_state, e2e_workspace, e2e_token
     ):
-        import coding_tool_gateway.config_io as config_io_mod
-        from coding_tool_gateway.agents import copilot
+        import ucode.config_io as config_io_mod
+        from ucode.agents import copilot
 
         _require_binary("copilot")
         models = self._all_models(e2e_state)
@@ -462,9 +458,9 @@ class TestCopilotLaunch:
         failures = []
         for family, model in models:
             with pytest.MonkeyPatch().context() as mp:
-                mp.setattr("coding_tool_gateway.state.save_state", lambda s: None)
+                mp.setattr("ucode.state.save_state", lambda s: None)
                 mp.setattr(
-                    "coding_tool_gateway.agents.copilot.get_databricks_token",
+                    "ucode.agents.copilot.get_databricks_token",
                     lambda ws: e2e_token,
                 )
                 copilot.write_tool_config(
@@ -534,7 +530,7 @@ class TestClaudeAuthRecovery:
     def test_recovers_when_initial_token_empty(self, tmp_path, e2e_state, e2e_workspace, e2e_token):
         import json
 
-        from coding_tool_gateway.agents import claude
+        from ucode.agents import claude
 
         _require_binary("claude")
         claude_models: dict = e2e_state.get("claude_models") or {}
@@ -590,8 +586,8 @@ class TestGeminiAuthRecovery:
     def test_recovers_when_initial_token_empty(
         self, tmp_path, monkeypatch, e2e_state, e2e_workspace, e2e_token
     ):
-        import coding_tool_gateway.config_io as config_io_mod
-        from coding_tool_gateway.agents import gemini
+        import ucode.config_io as config_io_mod
+        from ucode.agents import gemini
 
         _require_binary("gemini")
         gemini_models: list = e2e_state.get("gemini_models") or []
@@ -607,7 +603,7 @@ class TestGeminiAuthRecovery:
         fake_db_dir = _make_reauth_fake_databricks(tmp_path / "fake_db", e2e_token)
 
         with pytest.MonkeyPatch().context() as mp:
-            mp.setattr("coding_tool_gateway.state.save_state", lambda s: None)
+            mp.setattr("ucode.state.save_state", lambda s: None)
             mp.setenv("PATH", f"{fake_db_dir}:{os.environ['PATH']}")
             # get_databricks_token will fail first, reauth, then return e2e_token
             _, recovered_token = gemini.write_tool_config(

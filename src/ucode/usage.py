@@ -8,14 +8,14 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta
 from typing import cast
 
-from coding_tool_gateway.databricks import (
+from ucode.databricks import (
     discover_sql_warehouse_http_path,
     ensure_databricks_auth,
     get_databricks_token,
     run_usage_query,
 )
-from coding_tool_gateway.state import load_state
-from coding_tool_gateway.ui import (
+from ucode.state import load_state
+from ucode.ui import (
     console,
     format_duration,
     format_token_count,
@@ -265,12 +265,12 @@ def render_usage_summary(
 
 def usage() -> int:
     # Late import to avoid circular import (agents → state, but usage uses TOOL_SPECS for displays).
-    from coding_tool_gateway.agents import TOOL_SPECS
+    from ucode.agents import TOOL_SPECS
 
     state = load_state()
     workspace = state.get("workspace")
     if not workspace:
-        raise RuntimeError("Workspace is not configured. Run `coding-gateway configure` first.")
+        raise RuntimeError("Workspace is not configured. Run `ucode configure` first.")
 
     ensure_databricks_auth(workspace)
     with spinner("Retrieving Databricks access token..."):

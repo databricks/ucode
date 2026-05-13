@@ -14,7 +14,7 @@ from urllib import error as urllib_error
 from urllib import request as urllib_request
 from urllib.parse import urlparse
 
-from coding_tool_gateway.ui import (
+from ucode.ui import (
     normalize_workspace_url,
     print_kv,
     print_note,

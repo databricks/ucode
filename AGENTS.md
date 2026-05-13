@@ -2,19 +2,19 @@
 
 ## Project
 
-`coding-gateway` is a Python CLI that configures and launches coding agents through Databricks AI Gateway.
+`ucode` is a Python CLI that configures and launches coding agents through Databricks AI Gateway.
 
-The package code lives in `src/coding_tool_gateway/`.
+The package code lives in `src/ucode/`.
 Tests live in `tests/`.
 
 ## Commands
 
 - Run the full test suite with `uv run pytest`.
 - Run focused tests with `uv run pytest tests/<file>.py`.
-- Run e2e tests with `CODING_GATEWAY_TEST_WORKSPACE=<db_workspace_url> uv run pytest tests/test_e2e.py -v`.
+- Run e2e tests with `UCODE_TEST_WORKSPACE=<db_workspace_url> uv run pytest tests/test_e2e.py -v`.
 - Run lint with `uv run ruff check .`.
-- Run the CLI from the current checkout with `uv run coding-gateway ...`.
-- Reinstall the local checkout as the `coding-gateway` tool with `uv tool install --reinstall .`.
+- Run the CLI from the current checkout with `uv run ucode ...`.
+- Reinstall the local checkout as the `ucode` tool with `uv tool install --reinstall .`.
 
 ## Development
 

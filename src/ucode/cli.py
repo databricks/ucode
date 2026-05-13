@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CLI entry point for coding-gateway."""
+"""CLI entry point for ucode."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from typing import Annotated
 import typer
 from rich.panel import Panel
 
-from coding_tool_gateway.agents import (
+from ucode.agents import (
     TOOL_SPECS,
     configure_all_tools,
     configure_single_tool,
@@ -22,11 +22,11 @@ from coding_tool_gateway.agents import (
     validate_all_tools,
     validate_tool,
 )
-from coding_tool_gateway.agents import (
+from ucode.agents import (
     launch as launch_agent,
 )
-from coding_tool_gateway.config_io import restore_file, set_dry_run
-from coding_tool_gateway.databricks import (
+from ucode.config_io import restore_file, set_dry_run
+from ucode.databricks import (
     build_shared_base_urls,
     ensure_ai_gateway_v2,
     ensure_databricks_auth,
@@ -39,9 +39,9 @@ from coding_tool_gateway.databricks import (
     normalize_workspace_url,
     run_databricks_login,
 )
-from coding_tool_gateway.mcp import configure_mcp_command
-from coding_tool_gateway.state import STATE_PATH, clear_state, load_state, save_state
-from coding_tool_gateway.ui import (
+from ucode.mcp import configure_mcp_command
+from ucode.state import STATE_PATH, clear_state, load_state, save_state
+from ucode.ui import (
     console,
     heading,
     print_err,
@@ -54,7 +54,7 @@ from coding_tool_gateway.ui import (
     spinner,
     status_badge,
 )
-from coding_tool_gateway.usage import usage as usage_report
+from ucode.usage import usage as usage_report
 
 
 def _prompt_for_configuration(tool: str | None = None) -> str:
@@ -124,7 +124,35 @@ def configure_shared_state(
     return state
 
 
-def configure_workspace_command() -> int:
+def configure_workspace_command(tool: str | None = None) -> int:
+    if tool is not None:
+        workspace = _prompt_for_configuration(tool)
+        state = configure_shared_state(workspace, tools=[tool], force_login=True)
+        state = configure_single_tool(tool, state)
+        spec = TOOL_SPECS[tool]
+        console.print(
+            Panel(
+                f"[bold]Workspace:[/bold] [cyan]{state['workspace']}[/cyan]\n"
+                f"[bold]{spec['display']}:[/bold] [green]configured[/green]",
+                title="Configuration Complete",
+                style="green",
+                expand=False,
+            )
+        )
+        with spinner(f"Validating {spec['display']}..."):
+            ok, err = validate_tool(tool)
+        if ok:
+            print_success(f"{spec['display']} is working")
+        else:
+            print_err(f"{spec['display']}: {err}")
+            managed = bool(state.get("managed_configs", {}).get(tool))
+            restore_file(spec["config_path"], spec["backup_path"], managed)
+            available_tools = [t for t in (state.get("available_tools") or []) if t != tool]
+            state["available_tools"] = available_tools
+            save_state(state)
+            raise RuntimeError(f"{spec['display']} validation failed — config reverted.")
+        return 0
+
     workspace = _prompt_for_configuration()
     state = configure_shared_state(workspace, force_login=True)
     state = configure_all_tools(state)
@@ -133,8 +161,8 @@ def configure_workspace_command() -> int:
     summary_lines = [
         f"[bold]Workspace:[/bold] [cyan]{state['workspace']}[/cyan]",
     ]
-    for tool, spec in TOOL_SPECS.items():
-        if tool in available_tools:
+    for tool_name, spec in TOOL_SPECS.items():
+        if tool_name in available_tools:
             summary_lines.append(f"[bold]{spec['display']}:[/bold] [green]configured[/green]")
         else:
             summary_lines.append(f"[bold]{spec['display']}:[/bold] [dim]not available[/dim]")
@@ -157,7 +185,7 @@ def status() -> int:
     workspace = state.get("workspace")
     managed_configs = state.get("managed_configs") or {}
 
-    console.print(heading("coding-gateway status"))
+    console.print(heading("ucode status"))
     console.print(
         f"  {status_badge('Configured', 'ok') if workspace else status_badge('Not Configured', 'warn')}"
     )
@@ -180,13 +208,13 @@ def status() -> int:
 
     print_heading("MCP Servers")
     print_note("Run each tool's MCP list command to see configured MCP servers.")
-    print_note("Run `coding-gateway configure mcp` to add Databricks MCP servers.")
+    print_note("Run `ucode configure mcp` to add Databricks MCP servers.")
 
     print_heading("State")
     print_kv("State file", str(STATE_PATH) if STATE_PATH.exists() else "missing")
-    print_note("Use `coding-gateway configure` to update workspace settings or tool models.")
-    print_note("Use `coding-gateway configure mcp` to add Databricks MCP servers to coding tools.")
-    print_note("Use `coding-gateway revert` to clear managed configs and restore prior files.")
+    print_note("Use `ucode configure` to update workspace settings or tool models.")
+    print_note("Use `ucode configure mcp` to add Databricks MCP servers to coding tools.")
+    print_note("Use `ucode revert` to clear managed configs and restore prior files.")
     return 0
 
 
@@ -206,7 +234,7 @@ def revert() -> int:
     print_kv("Workspace", state.get("workspace") or "none")
     for tool, spec in TOOL_SPECS.items():
         print_kv(f"{spec['display']} config", "restored" if results[tool] else "unchanged")
-    print_success("coding-gateway state cleared")
+    print_success("ucode state cleared")
     return 0
 
 
@@ -327,6 +355,13 @@ def configure(
     dry_run: Annotated[
         bool, typer.Option("--dry-run", help="Print config files without writing them.")
     ] = False,
+    agent: Annotated[
+        str | None,
+        typer.Option(
+            "--agent",
+            help="Configure only the named agent (e.g. claude, codex, gemini, opencode, copilot).",
+        ),
+    ] = None,
 ) -> None:
     """Configure workspace URL and AI Gateway."""
     if ctx.invoked_subcommand is not None:
@@ -334,9 +369,14 @@ def configure(
     set_dry_run(dry_run)
     try:
         install_databricks_cli()
-        for t in TOOL_SPECS:
-            install_tool_binary(t, strict=False)
-        configure_workspace_command()
+        if agent is not None:
+            tool = normalize_tool(agent)
+            install_tool_binary(tool, strict=True)
+            configure_workspace_command(tool)
+        else:
+            for t in TOOL_SPECS:
+                install_tool_binary(t, strict=False)
+            configure_workspace_command()
     except RuntimeError as exc:
         print_err(str(exc))
         raise typer.Exit(1) from None
@@ -370,7 +410,7 @@ def status_cmd() -> None:
 
 @app.command("revert")
 def revert_cmd() -> None:
-    """Clear coding-gateway state and restore backed-up agent config files."""
+    """Clear ucode state and restore backed-up agent config files."""
     try:
         revert()
     except RuntimeError as exc:
@@ -387,6 +427,28 @@ def usage_cmd() -> None:
     except RuntimeError as exc:
         print_err(str(exc))
         raise typer.Exit(1) from None
+
+
+@app.command("upgrade")
+def upgrade_cmd() -> None:
+    """Upgrade ucode to the latest version from GitHub."""
+    import subprocess
+
+    git_url = "git+https://github.com/databricks/ucode"
+    print_section("Upgrade")
+    print_kv("Source", git_url)
+    try:
+        subprocess.run(
+            ["uv", "tool", "install", "--reinstall", git_url],
+            check=True,
+        )
+    except FileNotFoundError:
+        print_err("`uv` was not found on PATH. Install uv to upgrade ucode.")
+        raise typer.Exit(1) from None
+    except subprocess.CalledProcessError as exc:
+        print_err(f"Upgrade failed (exit code {exc.returncode}).")
+        raise typer.Exit(1) from None
+    print_success("ucode upgraded")
 
 
 def main() -> None:

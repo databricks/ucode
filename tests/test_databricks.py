@@ -8,8 +8,8 @@ import subprocess
 
 import pytest
 
-import coding_tool_gateway.databricks as db_mod
-from coding_tool_gateway.databricks import (
+import ucode.databricks as db_mod
+from ucode.databricks import (
     AI_GATEWAY_V2_DOCS_URL,
     build_auth_shell_command,
     build_databricks_cli_env,
@@ -45,7 +45,7 @@ class TestBuildDatabricksCliEnv:
         assert env["DATABRICKS_HOST"] == WS
 
     def test_scrubs_token_vars(self):
-        import coding_tool_gateway.databricks as db_mod
+        import ucode.databricks as db_mod
 
         for var in db_mod.SCRUBBED_DATABRICKS_ENV_VARS:
             env = build_databricks_cli_env(WS)
@@ -259,8 +259,8 @@ class TestEnsureAiGatewayV2:
         from urllib.error import HTTPError
 
         exc = HTTPError(url="", code=404, msg="Not Found", hdrs=MagicMock(), fp=None)
-        with patch("coding_tool_gateway.databricks.urllib_request.urlopen", side_effect=exc):
-            from coding_tool_gateway.databricks import ensure_ai_gateway_v2
+        with patch("ucode.databricks.urllib_request.urlopen", side_effect=exc):
+            from ucode.databricks import ensure_ai_gateway_v2
 
             with pytest.raises(RuntimeError, match=AI_GATEWAY_V2_DOCS_URL):
                 ensure_ai_gateway_v2(WS, "fake-token")
@@ -270,10 +270,10 @@ class TestEnsureAiGatewayV2:
         from urllib.error import URLError
 
         with patch(
-            "coding_tool_gateway.databricks.urllib_request.urlopen",
+            "ucode.databricks.urllib_request.urlopen",
             side_effect=URLError("connection refused"),
         ):
-            from coding_tool_gateway.databricks import ensure_ai_gateway_v2
+            from ucode.databricks import ensure_ai_gateway_v2
 
             with pytest.raises(RuntimeError, match=AI_GATEWAY_V2_DOCS_URL):
                 ensure_ai_gateway_v2(WS, "fake-token")
@@ -284,8 +284,8 @@ class TestEnsureAiGatewayV2:
 
         # 405 Method Not Allowed → still means v2 is there (method mismatch, not missing route)
         exc = HTTPError(url="", code=405, msg="Method Not Allowed", hdrs=MagicMock(), fp=None)
-        with patch("coding_tool_gateway.databricks.urllib_request.urlopen", side_effect=exc):
-            from coding_tool_gateway.databricks import ensure_ai_gateway_v2
+        with patch("ucode.databricks.urllib_request.urlopen", side_effect=exc):
+            from ucode.databricks import ensure_ai_gateway_v2
 
             ensure_ai_gateway_v2(WS, "fake-token")  # should not raise
 
@@ -295,7 +295,7 @@ class TestEnsureAiGatewayV2:
         mock_resp = MagicMock()
         mock_resp.__enter__ = lambda s: s
         mock_resp.__exit__ = MagicMock(return_value=False)
-        with patch("coding_tool_gateway.databricks.urllib_request.urlopen", return_value=mock_resp):
-            from coding_tool_gateway.databricks import ensure_ai_gateway_v2
+        with patch("ucode.databricks.urllib_request.urlopen", return_value=mock_resp):
+            from ucode.databricks import ensure_ai_gateway_v2
 
             ensure_ai_gateway_v2(WS, "fake-token")  # should not raise

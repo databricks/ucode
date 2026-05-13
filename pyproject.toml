@@ -3,7 +3,7 @@ requires = ["uv_build>=0.11.0"]
 build-backend = "uv_build"
 
 [project]
-name = "coding-gateway"
+name = "ucode"
 version = "0.1.0"
 description = "Bootstrap Codex against a Databricks workspace with minimal setup."
 readme = "README.md"
@@ -16,10 +16,10 @@ dependencies = [
 ]
 
 [project.scripts]
-coding-gateway = "coding_tool_gateway.cli:main"
+ucode = "ucode.cli:main"
 
 [tool.uv.build-backend]
-module-name = "coding_tool_gateway"
+module-name = "ucode"
 
 [dependency-groups]
 dev = [

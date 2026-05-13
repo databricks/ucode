@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from coding_tool_gateway.config_io import (
+from ucode.config_io import (
     APP_DIR,
     ToolSpec,
     backup_existing_file,
@@ -13,12 +13,12 @@ from coding_tool_gateway.config_io import (
     read_json_safe,
     write_json_file,
 )
-from coding_tool_gateway.databricks import (
+from ucode.databricks import (
     build_auth_shell_command,
     build_tool_base_url,
     get_databricks_token,
 )
-from coding_tool_gateway.state import mark_tool_managed, save_state
+from ucode.state import mark_tool_managed, save_state
 
 CLAUDE_CONFIG_DIR = Path.home() / ".claude"
 CLAUDE_SETTINGS_PATH = CLAUDE_CONFIG_DIR / "settings.json"

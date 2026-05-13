@@ -184,7 +184,7 @@ def prompt_for_workspace(
     them — `ui.py` stays Databricks-agnostic. Returns a normalized URL.
     """
     console.print()
-    console.print(Panel(description, title="coding-gateway Setup", style="bold blue", expand=False))
+    console.print(Panel(description, title="ucode Setup", style="bold blue", expand=False))
 
     if profiles:
         choices = [questionary.Choice(title=host, value=host) for host, _ in profiles]

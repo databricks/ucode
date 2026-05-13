@@ -8,7 +8,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from coding_tool_gateway import mcp
+from ucode import mcp
 
 WS = "https://example.databricks.com"
 

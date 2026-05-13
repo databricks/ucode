@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 
-from coding_tool_gateway.agents import codex
+from ucode.agents import codex
 
 WS = "https://example.databricks.com"
 

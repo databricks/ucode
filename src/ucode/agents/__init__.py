@@ -16,13 +16,13 @@ import json
 import shutil
 import subprocess
 
-from coding_tool_gateway.config_io import ToolSpec
-from coding_tool_gateway.databricks import (
+from ucode.config_io import ToolSpec
+from ucode.databricks import (
     ensure_databricks_auth,
     install_databricks_cli,
 )
-from coding_tool_gateway.state import load_state, save_state
-from coding_tool_gateway.ui import (
+from ucode.state import load_state, save_state
+from ucode.ui import (
     console,
     print_err,
     print_section,
@@ -110,7 +110,7 @@ def ensure_tool_binary_available(tool: str) -> None:
     raise RuntimeError(
         f"{spec['display']} is not installed (`{binary}` was not found on PATH). "
         f"Install it with `npm install -g {spec['package']}` or run "
-        f"`coding-gateway configure` to try automatic installation."
+        f"`ucode configure` to try automatic installation."
     )
 
 
@@ -133,8 +133,7 @@ def resolve_launch_model(
     model = explicit_model or default_model_for_tool(tool, state)
     if not model:
         raise RuntimeError(
-            f"No models available for {tool}. "
-            f"Run `coding-gateway configure` to set up your workspace."
+            f"No models available for {tool}. Run `ucode configure` to set up your workspace."
         )
     return state, model
 
@@ -227,12 +226,12 @@ def ensure_provider_state(tool: str) -> dict:
     state = load_state()
     workspace = state.get("workspace")
     if not workspace:
-        raise RuntimeError("No workspace configured. Run `coding-gateway configure` first.")
+        raise RuntimeError("No workspace configured. Run `ucode configure` first.")
     available_tools = state.get("available_tools") or []
     if tool not in available_tools:
         raise RuntimeError(
             f"{TOOL_SPECS[tool]['display']} is not available on this workspace. "
-            f"Run `coding-gateway configure` to set up your agents."
+            f"Run `ucode configure` to set up your agents."
         )
     ensure_databricks_auth(workspace)
     return state
@@ -278,7 +277,7 @@ def validate_tool(tool: str) -> tuple[bool, str]:
 def validate_all_tools(state: dict) -> None:
     from rich.panel import Panel  # local to avoid bumping module-level deps
 
-    from coding_tool_gateway.config_io import restore_file
+    from ucode.config_io import restore_file
 
     console.print()
     console.print(
@@ -315,6 +314,6 @@ def validate_all_tools(state: dict) -> None:
             spec = TOOL_SPECS[tool]
             lines.append(
                 f"[green]✓[/green] [bold]{spec['display']}[/bold] — "
-                f"run with [cyan]coding-gateway --agent {tool}[/cyan]"
+                f"run with [cyan]ucode --agent {tool}[/cyan]"
             )
         console.print(Panel("\n".join(lines), title="Ready", style="green", expand=False))

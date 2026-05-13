@@ -6,18 +6,18 @@ import os
 
 import pytest
 
-from coding_tool_gateway.databricks import (
+from ucode.databricks import (
     build_shared_base_urls,
     fetch_ai_gateway_claude_models,
     fetch_codex_models,
     fetch_gemini_models,
     get_databricks_token,
 )
-from coding_tool_gateway.ui import normalize_workspace_url
+from ucode.ui import normalize_workspace_url
 
 
 def _workspace() -> str:
-    ws = os.environ.get("CODING_GATEWAY_TEST_WORKSPACE", "").strip().rstrip("/")
+    ws = os.environ.get("UCODE_TEST_WORKSPACE", "").strip().rstrip("/")
     return normalize_workspace_url(ws) if ws else ""
 
 
@@ -25,7 +25,7 @@ def _workspace() -> str:
 def e2e_workspace():
     ws = _workspace()
     if not ws:
-        pytest.skip("Set CODING_GATEWAY_TEST_WORKSPACE=https://... to run E2E tests")
+        pytest.skip("Set UCODE_TEST_WORKSPACE=https://... to run E2E tests")
     return ws
 
 

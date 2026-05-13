@@ -1,6 +1,6 @@
-# Databricks Coding Gateway
+# ucode
 
-`coding-gateway` is a lightweight launcher for running Codex, Claude Code, Gemini CLI, OpenCode, and GitHub Copilot CLI through Databricks.
+`ucode` is a lightweight launcher for running Codex, Claude Code, Gemini CLI, OpenCode, and GitHub Copilot CLI through Databricks.
 
 ## Requirements
 
@@ -10,7 +10,7 @@
 ## Installation
 
 ```bash
-uv tool install git+https://github.com/databricks/coding-gateway
+uv tool install git+https://github.com/databricks/ucode
 ```
 
 ---
@@ -20,20 +20,20 @@ uv tool install git+https://github.com/databricks/coding-gateway
 Just run the tool you want:
 
 ```bash
-coding-gateway codex      # OpenAI Codex
-coding-gateway claude     # Claude Code
-coding-gateway gemini     # Gemini CLI
-coding-gateway opencode   # OpenCode
-coding-gateway copilot    # GitHub Copilot CLI
+ucode codex      # OpenAI Codex
+ucode claude     # Claude Code
+ucode gemini     # Gemini CLI
+ucode opencode   # OpenCode
+ucode copilot    # GitHub Copilot CLI
 ```
 
-On first launch, `coding-gateway` will prompt for your Databricks workspace URL, authenticate, and configure that tool automatically. Subsequent launches go straight to the agent.
+On first launch, `ucode` will prompt for your Databricks workspace URL, authenticate, and configure that tool automatically. Subsequent launches go straight to the agent.
 
 Pass flags directly to the underlying tool:
 
 ```bash
-coding-gateway claude -r          # resume last session
-coding-gateway codex --full-auto
+ucode claude -r          # resume last session
+ucode codex --full-auto
 ```
 
 All agents route through Databricks AI Gateway using your workspace credentials — no API keys required.
@@ -41,13 +41,13 @@ All agents route through Databricks AI Gateway using your workspace credentials 
 To configure all tools at once:
 
 ```bash
-coding-gateway configure
+ucode configure
 ```
 
 ### MCP servers (optional)
 
 ```bash
-coding-gateway configure mcp
+ucode configure mcp
 ```
 
 Add Databricks MCP servers to installed MCP-capable tools: Codex, Claude Code, Gemini CLI, OpenCode, and GitHub Copilot CLI.
@@ -59,7 +59,7 @@ Options are shown in this order:
 - Custom MCP server URL
 
 Discovered external MCP connections are listed directly. MCP auth uses a Databricks token that
-`coding-gateway` sets when launching each tool.
+`ucode` sets when launching each tool.
 
 ---
 
@@ -67,14 +67,14 @@ Discovered external MCP connections are listed directly. MCP auth uses a Databri
 
 | Command | Description |
 |---------|-------------|
-| `coding-gateway status` | Show current workspace, base URLs, managed config files, and selected models |
-| `coding-gateway usage` | Show AI Gateway usage summary |
-| `coding-gateway revert` | Clear saved state and restore backed-up config files |
-| `coding-gateway configure --dry-run` | Preview config files without writing them |
+| `ucode status` | Show current workspace, base URLs, managed config files, and selected models |
+| `ucode usage` | Show AI Gateway usage summary |
+| `ucode revert` | Clear saved state and restore backed-up config files |
+| `ucode configure --dry-run` | Preview config files without writing them |
 
 ## Managed Local Files
 
-`coding-gateway` manages these files:
+`ucode` manages these files:
 
 | File | Tool |
 |------|------|
@@ -84,7 +84,7 @@ Discovered external MCP connections are listed directly. MCP auth uses a Databri
 | `~/.config/opencode/opencode.json` | OpenCode |
 | `~/.copilot/.env` | GitHub Copilot CLI |
 
-Existing files are backed up before being overwritten. `coding-gateway revert` restores backups.
+Existing files are backed up before being overwritten. `ucode revert` restores backups.
 
 
 ## Documentation
@@ -101,8 +101,8 @@ Contributions are welcome.
 ### Getting started
 
 ```bash
-git clone https://github.com/databricks/coding-gateway
-cd coding-gateway
+git clone https://github.com/databricks/ucode
+cd ucode
 uv sync
 ```
 
@@ -120,15 +120,15 @@ uv sync
 4. For end-to-end testing against a real workspace:
 
    ```bash
-   CODING_GATEWAY_TEST_WORKSPACE=<db_workspace_url> uv run pytest tests/test_e2e.py -v
+   UCODE_TEST_WORKSPACE=<db_workspace_url> uv run pytest tests/test_e2e.py -v
    ```
 
 5. Open a pull request against `main`.
 
 ### Adding a new agent
 
-- Add `src/coding_tool_gateway/agents/<name>.py` with at least `write_tool_config`, `launch`, `default_model`, and `validate_cmd`.
-- Register it in `src/coding_tool_gateway/agents/__init__.py`.
+- Add `src/ucode/agents/<name>.py` with at least `write_tool_config`, `launch`, `default_model`, and `validate_cmd`.
+- Register it in `src/ucode/agents/__init__.py`.
 - Add focused tests under `tests/`.
 
 ## Security

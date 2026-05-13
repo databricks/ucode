@@ -7,7 +7,7 @@ from unittest.mock import patch
 import pytest
 from typer.testing import CliRunner
 
-from coding_tool_gateway.cli import app
+from ucode.cli import app
 
 runner = CliRunner()
 
@@ -18,13 +18,13 @@ TOOLS = ["codex", "claude", "gemini", "opencode"]
 def no_state_writes():
     """Prevent any test from writing to the real state file on disk."""
     with (
-        patch("coding_tool_gateway.state.save_state"),
-        patch("coding_tool_gateway.cli.save_state"),
-        patch("coding_tool_gateway.agents.__init__.save_state"),
-        patch("coding_tool_gateway.agents.codex.save_state"),
-        patch("coding_tool_gateway.agents.claude.save_state"),
-        patch("coding_tool_gateway.agents.gemini.save_state"),
-        patch("coding_tool_gateway.agents.opencode.save_state"),
+        patch("ucode.state.save_state"),
+        patch("ucode.cli.save_state"),
+        patch("ucode.agents.__init__.save_state"),
+        patch("ucode.agents.codex.save_state"),
+        patch("ucode.agents.claude.save_state"),
+        patch("ucode.agents.gemini.save_state"),
+        patch("ucode.agents.opencode.save_state"),
     ):
         yield
 
@@ -73,21 +73,21 @@ def _patch_launch(tool: str):
     the auto-configure path is skipped entirely.
     """
     return [
-        patch("coding_tool_gateway.cli.ensure_bootstrap_dependencies"),
-        patch("coding_tool_gateway.cli.load_state", return_value=MINIMAL_STATE),
+        patch("ucode.cli.ensure_bootstrap_dependencies"),
+        patch("ucode.cli.load_state", return_value=MINIMAL_STATE),
         patch(
-            "coding_tool_gateway.cli.ensure_provider_state",
+            "ucode.cli.ensure_provider_state",
             return_value=MINIMAL_STATE,
         ),
         patch(
-            "coding_tool_gateway.cli.resolve_launch_model",
+            "ucode.cli.resolve_launch_model",
             return_value=(MINIMAL_STATE, "databricks-claude-sonnet-4"),
         ),
         patch(
-            "coding_tool_gateway.cli.configure_tool",
+            "ucode.cli.configure_tool",
             return_value=MINIMAL_STATE,
         ),
-        patch("coding_tool_gateway.cli.launch_agent"),
+        patch("ucode.cli.launch_agent"),
     ]
 
 
@@ -121,19 +121,19 @@ class TestAutoConfigureOnFirstRun:
         empty_state = {}
         configured_state = {**MINIMAL_STATE}
         with (
-            patch("coding_tool_gateway.cli.ensure_bootstrap_dependencies"),
-            patch("coding_tool_gateway.cli.load_state", return_value=empty_state),
-            patch("coding_tool_gateway.cli._auto_configure_tool") as mock_auto,
+            patch("ucode.cli.ensure_bootstrap_dependencies"),
+            patch("ucode.cli.load_state", return_value=empty_state),
+            patch("ucode.cli._auto_configure_tool") as mock_auto,
             patch(
-                "coding_tool_gateway.cli.ensure_provider_state",
+                "ucode.cli.ensure_provider_state",
                 return_value=configured_state,
             ),
             patch(
-                "coding_tool_gateway.cli.resolve_launch_model",
+                "ucode.cli.resolve_launch_model",
                 return_value=(configured_state, "databricks-claude-sonnet-4"),
             ),
-            patch("coding_tool_gateway.cli.configure_tool", return_value=configured_state),
-            patch("coding_tool_gateway.cli.launch_agent"),
+            patch("ucode.cli.configure_tool", return_value=configured_state),
+            patch("ucode.cli.launch_agent"),
         ):
             result = runner.invoke(app, ["claude"])
         assert result.exit_code == 0, result.output
@@ -143,19 +143,19 @@ class TestAutoConfigureOnFirstRun:
         """Auto-configure runs when workspace exists but the tool wasn't configured."""
         state_without_tool = {**MINIMAL_STATE, "available_tools": ["codex"]}
         with (
-            patch("coding_tool_gateway.cli.ensure_bootstrap_dependencies"),
-            patch("coding_tool_gateway.cli.load_state", return_value=state_without_tool),
-            patch("coding_tool_gateway.cli._auto_configure_tool") as mock_auto,
+            patch("ucode.cli.ensure_bootstrap_dependencies"),
+            patch("ucode.cli.load_state", return_value=state_without_tool),
+            patch("ucode.cli._auto_configure_tool") as mock_auto,
             patch(
-                "coding_tool_gateway.cli.ensure_provider_state",
+                "ucode.cli.ensure_provider_state",
                 return_value=MINIMAL_STATE,
             ),
             patch(
-                "coding_tool_gateway.cli.resolve_launch_model",
+                "ucode.cli.resolve_launch_model",
                 return_value=(MINIMAL_STATE, "databricks-claude-sonnet-4"),
             ),
-            patch("coding_tool_gateway.cli.configure_tool", return_value=MINIMAL_STATE),
-            patch("coding_tool_gateway.cli.launch_agent"),
+            patch("ucode.cli.configure_tool", return_value=MINIMAL_STATE),
+            patch("ucode.cli.launch_agent"),
         ):
             result = runner.invoke(app, ["claude"])
         assert result.exit_code == 0, result.output
@@ -164,19 +164,19 @@ class TestAutoConfigureOnFirstRun:
     def test_skipped_when_already_configured(self):
         """Auto-configure is skipped when workspace and tool are already set up."""
         with (
-            patch("coding_tool_gateway.cli.ensure_bootstrap_dependencies"),
-            patch("coding_tool_gateway.cli.load_state", return_value=MINIMAL_STATE),
-            patch("coding_tool_gateway.cli._auto_configure_tool") as mock_auto,
+            patch("ucode.cli.ensure_bootstrap_dependencies"),
+            patch("ucode.cli.load_state", return_value=MINIMAL_STATE),
+            patch("ucode.cli._auto_configure_tool") as mock_auto,
             patch(
-                "coding_tool_gateway.cli.ensure_provider_state",
+                "ucode.cli.ensure_provider_state",
                 return_value=MINIMAL_STATE,
             ),
             patch(
-                "coding_tool_gateway.cli.resolve_launch_model",
+                "ucode.cli.resolve_launch_model",
                 return_value=(MINIMAL_STATE, "databricks-claude-sonnet-4"),
             ),
-            patch("coding_tool_gateway.cli.configure_tool", return_value=MINIMAL_STATE),
-            patch("coding_tool_gateway.cli.launch_agent"),
+            patch("ucode.cli.configure_tool", return_value=MINIMAL_STATE),
+            patch("ucode.cli.launch_agent"),
         ):
             runner.invoke(app, ["claude"])
         mock_auto.assert_not_called()
@@ -222,3 +222,61 @@ class TestPassthroughArgs:
             runner.invoke(app, ["claude"])
         forwarded = mock_launch.call_args[0][2]
         assert forwarded == []
+
+
+class TestConfigureAgentFlag:
+    def test_no_flag_calls_configure_all(self):
+        with (
+            patch("ucode.cli.install_databricks_cli"),
+            patch("ucode.cli.install_tool_binary"),
+            patch("ucode.cli.configure_workspace_command") as mock_cfg,
+        ):
+            result = runner.invoke(app, ["configure"])
+        assert result.exit_code == 0, result.output
+        mock_cfg.assert_called_once_with()
+
+    def test_agent_flag_calls_configure_with_tool(self):
+        with (
+            patch("ucode.cli.install_databricks_cli"),
+            patch("ucode.cli.install_tool_binary"),
+            patch("ucode.cli.configure_workspace_command") as mock_cfg,
+        ):
+            result = runner.invoke(app, ["configure", "--agent", "claude"])
+        assert result.exit_code == 0, result.output
+        mock_cfg.assert_called_once_with("claude")
+
+    def test_agent_flag_normalizes_alias(self):
+        with (
+            patch("ucode.cli.install_databricks_cli"),
+            patch("ucode.cli.install_tool_binary"),
+            patch("ucode.cli.configure_workspace_command") as mock_cfg,
+        ):
+            result = runner.invoke(app, ["configure", "--agent", "claude-code"])
+        assert result.exit_code == 0, result.output
+        mock_cfg.assert_called_once_with("claude")
+
+    def test_upgrade_runs_uv_tool_install(self):
+        with patch("subprocess.run") as mock_run:
+            result = runner.invoke(app, ["upgrade"])
+        assert result.exit_code == 0, result.output
+        mock_run.assert_called_once()
+        cmd = mock_run.call_args[0][0]
+        assert cmd[:3] == ["uv", "tool", "install"]
+        assert "--reinstall" in cmd
+        assert any("github.com/databricks/ucode" in s for s in cmd)
+
+    def test_upgrade_handles_uv_missing(self):
+        with patch("subprocess.run", side_effect=FileNotFoundError):
+            result = runner.invoke(app, ["upgrade"])
+        assert result.exit_code != 0
+        assert "uv" in result.output.lower()
+
+    def test_agent_flag_rejects_unknown(self):
+        with (
+            patch("ucode.cli.install_databricks_cli"),
+            patch("ucode.cli.install_tool_binary"),
+            patch("ucode.cli.configure_workspace_command") as mock_cfg,
+        ):
+            result = runner.invoke(app, ["configure", "--agent", "bogus"])
+        assert result.exit_code != 0
+        mock_cfg.assert_not_called()
