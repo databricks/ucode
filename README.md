@@ -1,4 +1,4 @@
-# ucode
+# Unity AI Gateway Coding CLI (ucode)
 
 `ucode` is a lightweight launcher for running Codex, Claude Code, Gemini CLI, OpenCode, and GitHub Copilot CLI through Databricks.
 
