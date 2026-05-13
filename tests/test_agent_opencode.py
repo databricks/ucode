@@ -33,6 +33,26 @@ class TestRenderOverlay:
         overlay, _ = opencode.render_overlay("claude-sonnet", "tok", _base_urls(), {})
         assert overlay["model"] == "claude-sonnet"
 
+    def test_qualifies_anthropic_model_for_default_selection(self):
+        models = {"anthropic": ["claude-sonnet"], "gemini": []}
+        overlay, _ = opencode.render_overlay("claude-sonnet", "tok", _base_urls(), models)
+        assert overlay["model"] == "databricks-anthropic/claude-sonnet"
+
+    def test_qualifies_gemini_model_for_default_selection(self):
+        models = {"anthropic": [], "gemini": ["gemini-2"]}
+        overlay, _ = opencode.render_overlay("gemini-2", "tok", _base_urls(), models)
+        assert overlay["model"] == "databricks-google/gemini-2"
+
+    def test_keeps_explicit_provider_qualified_model(self):
+        models = {"anthropic": ["claude-sonnet"], "gemini": []}
+        overlay, _ = opencode.render_overlay(
+            "databricks-anthropic/claude-sonnet",
+            "tok",
+            _base_urls(),
+            models,
+        )
+        assert overlay["model"] == "databricks-anthropic/claude-sonnet"
+
     def test_anthropic_provider_added_when_models_present(self):
         models = {"anthropic": ["claude-sonnet"], "gemini": []}
         overlay, _ = opencode.render_overlay("claude-sonnet", "tok", _base_urls(), models)
@@ -177,11 +197,11 @@ class TestBuildRuntimeEnv:
 class TestOpencodeDefaultModel:
     def test_prefers_anthropic(self):
         state = {"opencode_models": {"anthropic": ["claude-sonnet"], "gemini": ["gemini-2"]}}
-        assert opencode.default_model(state) == "claude-sonnet"
+        assert opencode.default_model(state) == "databricks-anthropic/claude-sonnet"
 
     def test_falls_back_to_gemini(self):
         state = {"opencode_models": {"anthropic": [], "gemini": ["gemini-2"]}}
-        assert opencode.default_model(state) == "gemini-2"
+        assert opencode.default_model(state) == "databricks-google/gemini-2"
 
     def test_returns_none_when_empty(self):
         assert opencode.default_model({}) is None
@@ -266,4 +286,4 @@ class TestWriteToolConfigStaleProviderCleanup:
             oc_mod.write_tool_config(state, "claude-sonnet", token="tok")
 
         written = json.loads(config_file.read_text())
-        assert written["model"] == "claude-sonnet"
+        assert written["model"] == "databricks-anthropic/claude-sonnet"

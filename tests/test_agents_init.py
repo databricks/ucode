@@ -115,11 +115,11 @@ class TestDefaultModelForTool:
 
     def test_opencode_prefers_anthropic(self):
         state = {"opencode_models": {"anthropic": ["claude-sonnet"], "gemini": ["gemini-2"]}}
-        assert default_model_for_tool("opencode", state) == "claude-sonnet"
+        assert default_model_for_tool("opencode", state) == "databricks-anthropic/claude-sonnet"
 
     def test_opencode_falls_back_to_gemini(self):
         state = {"opencode_models": {"gemini": ["gemini-2"]}}
-        assert default_model_for_tool("opencode", state) == "gemini-2"
+        assert default_model_for_tool("opencode", state) == "databricks-google/gemini-2"
 
 
 class TestResolveLaunchModel:

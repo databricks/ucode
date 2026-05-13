@@ -41,6 +41,27 @@ PROVIDER_KEYS: list[list[str]] = [
     ["provider", "databricks-google"],
 ]
 
+PROVIDER_IDS = {
+    "anthropic": "databricks-anthropic",
+    "gemini": "databricks-google",
+}
+
+
+def qualify_model(model: str, opencode_models: dict[str, list[str]]) -> str:
+    """Return OpenCode's required provider-qualified model id when possible."""
+    if "/" in model:
+        return model
+
+    anthropic_models = opencode_models.get("anthropic") or []
+    if model in anthropic_models:
+        return f"{PROVIDER_IDS['anthropic']}/{model}"
+
+    gemini_models = opencode_models.get("gemini") or []
+    if model in gemini_models:
+        return f"{PROVIDER_IDS['gemini']}/{model}"
+
+    return model
+
 
 def render_overlay(
     model: str,
@@ -50,6 +71,7 @@ def render_overlay(
 ) -> tuple[dict, list[list[str]]]:
     """Return (overlay, managed_key_paths) for opencode.json."""
     auth_headers = {"Authorization": f"Bearer {token}"}
+    qualified_model = qualify_model(model, opencode_models)
 
     anthropic_models = opencode_models.get("anthropic") or []
     gemini_models = opencode_models.get("gemini") or []
@@ -79,7 +101,7 @@ def render_overlay(
         }
         keys.append(["provider", "databricks-google"])
 
-    overlay: dict = {"model": model}
+    overlay: dict = {"model": qualified_model}
     if providers:
         overlay["provider"] = providers
     return overlay, keys
@@ -142,9 +164,9 @@ def default_model(state: dict) -> str | None:
     opencode_models = state.get("opencode_models") or {}
     anthropic = opencode_models.get("anthropic") or []
     if anthropic:
-        return anthropic[0]
+        return qualify_model(anthropic[0], opencode_models)
     gemini = opencode_models.get("gemini") or []
-    return gemini[0] if gemini else None
+    return qualify_model(gemini[0], opencode_models) if gemini else None
 
 
 def _refresh_token_once(state: dict) -> str:
