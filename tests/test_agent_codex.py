@@ -75,6 +75,12 @@ class TestCodexValidateCmd:
         cmd = codex.validate_cmd("codex")
         assert len(cmd) > 2
 
+    def test_skips_git_repo_check(self):
+        # Validation runs in arbitrary cwd (e.g., ~/Documents); without this
+        # flag Codex refuses to run outside a trusted/git directory.
+        cmd = codex.validate_cmd("codex")
+        assert "--skip-git-repo-check" in cmd
+
 
 class TestCodexLaunch:
     def test_sets_oauth_token_before_exec(self, monkeypatch):
