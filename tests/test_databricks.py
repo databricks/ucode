@@ -11,11 +11,14 @@ import pytest
 import ucode.databricks as db_mod
 from ucode.databricks import (
     AI_GATEWAY_V2_DOCS_URL,
+    MIN_DATABRICKS_CLI_VERSION,
+    _parse_databricks_cli_version,
     build_auth_shell_command,
     build_databricks_cli_env,
     build_opencode_base_urls,
     build_shared_base_urls,
     build_tool_base_url,
+    ensure_databricks_cli_version,
     get_databricks_token,
     list_databricks_connections,
     workspace_hostname,
@@ -43,13 +46,6 @@ class TestBuildDatabricksCliEnv:
     def test_sets_databricks_host(self):
         env = build_databricks_cli_env(WS)
         assert env["DATABRICKS_HOST"] == WS
-
-    def test_scrubs_token_vars(self):
-        import ucode.databricks as db_mod
-
-        for var in db_mod.SCRUBBED_DATABRICKS_ENV_VARS:
-            env = build_databricks_cli_env(WS)
-            assert var not in env
 
 
 class TestBuildToolBaseUrl:
@@ -105,13 +101,9 @@ class TestBuildAuthShellCommand:
 
     def test_parses_access_token(self):
         cmd = build_auth_shell_command(WS)
-        assert "access_token" in cmd
-        assert "grep" in cmd
-        assert "sed" in cmd
-
-    def test_unsets_scrubbed_vars(self):
-        cmd = build_auth_shell_command(WS)
-        assert "DATABRICKS_TOKEN" in cmd
+        assert "jq" in cmd
+        assert ".access_token" in cmd
+        assert "--force-refresh" in cmd
 
     def test_returns_token_when_auth_succeeds(self, tmp_path):
         # Fake databricks binary that always returns a valid token JSON.
@@ -128,38 +120,6 @@ class TestBuildAuthShellCommand:
             env={**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}"},
         )
         assert result.stdout.strip() == "good-token"
-
-    def test_reauths_and_retries_when_token_empty(self, tmp_path):
-        # Fake databricks binary: returns empty token on `auth token`, succeeds on retry
-        # after `auth login` is called. Uses a call-count file to track invocations.
-        call_count = tmp_path / "calls"
-        call_count.write_text("0")
-        fake = tmp_path / "databricks"
-        fake.write_text(
-            "#!/bin/sh\n"
-            f"count=$(cat {call_count})\n"
-            f"echo $((count + 1)) > {call_count}\n"
-            "# auth login is a no-op\n"
-            'case "$*" in\n'
-            '  *"auth login"*) exit 0 ;;\n'
-            "esac\n"
-            "# first auth token call returns empty; second returns a real token\n"
-            'if [ "$count" -eq 0 ]; then\n'
-            '  echo \'{"access_token": "", "token_type": "Bearer"}\'\n'
-            "else\n"
-            '  echo \'{"access_token": "refreshed-token", "token_type": "Bearer"}\'\n'
-            "fi\n"
-        )
-        fake.chmod(0o755)
-        cmd = build_auth_shell_command(WS)
-        result = subprocess.run(
-            ["sh", "-c", cmd],
-            capture_output=True,
-            text=True,
-            env={**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}"},
-        )
-        assert result.stdout.strip() == "refreshed-token"
-        assert int(call_count.read_text()) >= 3  # auth token, auth login, auth token
 
 
 class TestGetDatabricksToken:
@@ -299,3 +259,54 @@ class TestEnsureAiGatewayV2:
             from ucode.databricks import ensure_ai_gateway_v2
 
             ensure_ai_gateway_v2(WS, "fake-token")  # should not raise
+
+
+class TestParseDatabricksCliVersion:
+    def test_parses_standard_format(self):
+        assert _parse_databricks_cli_version("Databricks CLI v0.299.2") == (0, 299, 2)
+
+    def test_parses_without_v_prefix(self):
+        assert _parse_databricks_cli_version("Databricks CLI 0.298.0") == (0, 298, 0)
+
+    def test_returns_none_on_garbage(self):
+        assert _parse_databricks_cli_version("not a version") is None
+
+
+class TestEnsureDatabricksCliVersion:
+    def _fake_databricks(self, tmp_path, version_output: str) -> dict:
+        fake = tmp_path / "databricks"
+        fake.write_text(f"#!/bin/sh\necho '{version_output}'\n")
+        fake.chmod(0o755)
+        return {**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}"}
+
+    def test_passes_when_version_meets_minimum(self, tmp_path, monkeypatch):
+        env = self._fake_databricks(tmp_path, "Databricks CLI v0.298.0")
+        monkeypatch.setattr("os.environ", env)
+        ensure_databricks_cli_version()  # should not raise
+
+    def test_passes_when_version_exceeds_minimum(self, tmp_path, monkeypatch):
+        env = self._fake_databricks(tmp_path, "Databricks CLI v0.299.2")
+        monkeypatch.setattr("os.environ", env)
+        ensure_databricks_cli_version()
+
+    def test_raises_when_version_too_old(self, tmp_path, monkeypatch):
+        env = self._fake_databricks(tmp_path, "Databricks CLI v0.297.0")
+        monkeypatch.setattr("os.environ", env)
+        required = ".".join(str(n) for n in MIN_DATABRICKS_CLI_VERSION)
+        with pytest.raises(RuntimeError, match=f"v{required} or newer"):
+            ensure_databricks_cli_version()
+
+    def test_error_includes_upgrade_command(self, tmp_path, monkeypatch):
+        env = self._fake_databricks(tmp_path, "Databricks CLI v0.100.0")
+        monkeypatch.setattr("os.environ", env)
+        with pytest.raises(RuntimeError) as excinfo:
+            ensure_databricks_cli_version()
+        # Either curl|sh, wget, or powershell — depending on host. All flow through
+        # the install script URL, so assert on that.
+        assert "setup-cli" in str(excinfo.value)
+
+    def test_raises_when_version_unparseable(self, tmp_path, monkeypatch):
+        env = self._fake_databricks(tmp_path, "completely broken output")
+        monkeypatch.setattr("os.environ", env)
+        with pytest.raises(RuntimeError, match="Could not parse"):
+            ensure_databricks_cli_version()

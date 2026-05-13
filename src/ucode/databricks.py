@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import platform
+import re
 import shutil
 import subprocess
 from typing import cast
@@ -31,15 +32,8 @@ WINDOWS_DATABRICKS_INSTALL_URL = (
     "https://raw.githubusercontent.com/databricks/setup-cli/main/install.ps1"
 )
 AI_GATEWAY_V2_DOCS_URL = "https://docs.databricks.com/aws/en/ai-gateway/overview-beta"
+MIN_DATABRICKS_CLI_VERSION = (0, 298, 0)
 TOKEN_REFRESH_INTERVAL_SECONDS = 1800
-SCRUBBED_DATABRICKS_ENV_VARS = (
-    "DATABRICKS_TOKEN",
-    "DATABRICKS_CLIENT_ID",
-    "DATABRICKS_CLIENT_SECRET",
-    "DATABRICKS_USERNAME",
-    "DATABRICKS_PASSWORD",
-    "DATABRICKS_AUTH_TYPE",
-)
 
 
 def run(
@@ -64,8 +58,6 @@ def run(
 def build_databricks_cli_env(workspace: str) -> dict[str, str]:
     env = os.environ.copy()
     env["DATABRICKS_HOST"] = workspace
-    for key in SCRUBBED_DATABRICKS_ENV_VARS:
-        env.pop(key, None)
     return env
 
 
@@ -76,8 +68,53 @@ def workspace_hostname(workspace: str) -> str:
     return parsed.hostname
 
 
+def _databricks_upgrade_command() -> str:
+    if platform.system() == "Windows":
+        return f'powershell -Command "irm {WINDOWS_DATABRICKS_INSTALL_URL} | iex"'
+    if shutil.which("wget") and not shutil.which("curl"):
+        return f"wget -qO- {UNIX_DATABRICKS_INSTALL_URL} | sh"
+    return f"curl -fsSL {UNIX_DATABRICKS_INSTALL_URL} | sh"
+
+
+def _parse_databricks_cli_version(output: str) -> tuple[int, int, int] | None:
+    # Example output: "Databricks CLI v0.299.2"
+    match = re.search(r"v?(\d+)\.(\d+)\.(\d+)", output)
+    if not match:
+        return None
+    return (int(match.group(1)), int(match.group(2)), int(match.group(3)))
+
+
+def ensure_databricks_cli_version() -> None:
+    try:
+        result = run(
+            ["databricks", "--version"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError("Failed to read Databricks CLI version.") from exc
+
+    raw = result.stdout or result.stderr or ""
+    output = (raw if isinstance(raw, str) else raw.decode(errors="replace")).strip()
+    version = _parse_databricks_cli_version(output)
+    if version is None:
+        raise RuntimeError(
+            f"Could not parse Databricks CLI version from `databricks --version` output: {output!r}"
+        )
+    if version < MIN_DATABRICKS_CLI_VERSION:
+        current = ".".join(str(n) for n in version)
+        required = ".".join(str(n) for n in MIN_DATABRICKS_CLI_VERSION)
+        raise RuntimeError(
+            f"Databricks CLI v{current} is too old (need v{required} or newer). "
+            f"Upgrade with:\n    {_databricks_upgrade_command()}"
+        )
+
+
 def install_databricks_cli() -> None:
     if shutil.which("databricks"):
+        ensure_databricks_cli_version()
         return
 
     system = platform.system()
@@ -113,6 +150,7 @@ def install_databricks_cli() -> None:
         raise RuntimeError(
             "Databricks CLI install completed, but `databricks` is still not on PATH."
         )
+    ensure_databricks_cli_version()
 
 
 def has_valid_databricks_auth(workspace: str) -> bool:
@@ -299,20 +337,9 @@ def list_databricks_connections(workspace: str) -> list[dict]:
 
 
 def build_auth_shell_command(workspace: str) -> str:
-    unset_prefix = " ".join(f"-u {key}" for key in SCRUBBED_DATABRICKS_ENV_VARS)
-    # grep+sed are POSIX — no python3 or jq dependency required on the user's machine.
-    parse_token = 'grep -o \'"access_token": *"[^"]*"\' | sed \'s/.*": *"\\(.*\\)"/\\1/\''
-    get_token = (
-        f"env {unset_prefix} databricks auth token --host {workspace} --output json | {parse_token}"
-    )
-    # If the token comes back empty (expired session), re-authenticate and retry once.
     return (
-        f"token=$({get_token} 2>/dev/null); "
-        f'if [ -z "$token" ]; then '
-        f"env {unset_prefix} databricks auth login --host {workspace} --no-browser 2>/dev/null; "
-        f"token=$({get_token}); "
-        f"fi; "
-        f'echo "$token"'
+        f"databricks auth token --host {workspace} --force-refresh --output json "
+        f"| jq -r '.access_token'"
     )
 
 

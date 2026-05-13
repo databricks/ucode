@@ -54,7 +54,7 @@ def render_overlay(workspace: str) -> dict:
                     "command": "sh",
                     "args": ["-c", auth_command],
                     "timeout_ms": 5000,
-                    "refresh_interval_ms": 1800000,
+                    "refresh_interval_ms": 900000,
                 },
             }
         },
