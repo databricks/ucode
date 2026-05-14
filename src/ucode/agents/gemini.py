@@ -63,6 +63,9 @@ def build_runtime_env(workspace: str, model: str, token: str) -> dict[str, str]:
     env["GEMINI_API_KEY_AUTH_MECHANISM"] = "bearer"
     env["GEMINI_API_KEY"] = token
     env["OAUTH_TOKEN"] = token
+    # Newer Gemini CLI releases refuse to run in untrusted directories;
+    # opt every launch into trust so `ucode gemini` works in any folder.
+    env["GEMINI_CLI_TRUST_WORKSPACE"] = "true"
     return env
 
 
