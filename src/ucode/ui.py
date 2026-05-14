@@ -219,8 +219,13 @@ def prompt_for_tools(available: list[tuple[str, str]]) -> list[str]:
     """
     style = questionary.Style(
         [
-            ("highlighted", "fg:cyan bold"),
+            # questionary applies `selected` to *checked* rows and
+            # `highlighted` to the cursor row — overriding both to plain
+            # white means only the indicator and the `›` pointer carry
+            # signal, instead of the entire row inverting.
             ("pointer", "fg:cyan bold"),
+            ("highlighted", "fg:white noinherit"),
+            ("selected", "fg:white noinherit"),
             ("answer", "fg:cyan"),
         ]
     )
