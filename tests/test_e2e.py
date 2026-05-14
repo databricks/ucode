@@ -290,6 +290,10 @@ class TestGeminiLaunch:
         monkeypatch.setattr(gemini, "GEMINI_ENV_PATH", tmp_path / ".env")
         monkeypatch.setattr(gemini, "GEMINI_SETTINGS_PATH", tmp_path / "settings.json")
         monkeypatch.setattr(gemini, "GEMINI_BACKUP_PATH", tmp_path / "gemini-env.backup")
+        # Run from tmp_path so Gemini sees an untrusted folder — that mirrors
+        # what users hit on a fresh checkout and exercises the trust + .env
+        # discovery code paths that previously broke validation.
+        monkeypatch.chdir(tmp_path)
 
         failures = []
         for model in gemini_models:
