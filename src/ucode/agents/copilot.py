@@ -1,7 +1,7 @@
 """GitHub Copilot CLI agent: writes ~/.copilot/.env and injects BYOK env vars at launch.
 
-Copilot CLI's BYOK config is env-var only — the CLI does not auto-load
-~/.copilot/.env. We still write the file so users can
+Copilot CLI's BYOK config (COPILOT_PROVIDER_*) is documented as env-var only —
+the CLI does not auto-load ~/.copilot/.env. We still write the file so users can
 inspect what's configured (`cat ~/.copilot/.env`) and to give `revert` something
 to clean up; the values are also injected directly into the child process's
 environment at launch.
@@ -51,16 +51,16 @@ SPEC: ToolSpec = {
 }
 
 MANAGED_KEYS: list[str] = [
-    "OPENAI_BASE_URL",
-    "OPENAI_API_KEY",
+    "COPILOT_PROVIDER_TYPE",
+    "COPILOT_PROVIDER_BASE_URL",
     "COPILOT_MODEL",
+    "COPILOT_PROVIDER_BEARER_TOKEN",
     "COPILOT_OFFLINE",
     "OAUTH_TOKEN",
 ]
 LEGACY_ENV_KEYS = [
-    "COPILOT_PROVIDER_TYPE",
-    "COPILOT_PROVIDER_BASE_URL",
-    "COPILOT_PROVIDER_BEARER_TOKEN",
+    "OPENAI_BASE_URL",
+    "OPENAI_API_KEY",
     "COPILOT_PROVIDER_API_KEY",
 ]
 
@@ -79,10 +79,10 @@ def default_model(state: dict) -> str | None:
 
 def render_env_overlay(workspace: str, model: str, token: str) -> dict[str, str]:
     return {
-        # Current Copilot CLI releases read the generic OpenAI BYOK env vars.
-        "OPENAI_BASE_URL": build_copilot_base_url(workspace),
-        "OPENAI_API_KEY": token,
+        "COPILOT_PROVIDER_TYPE": "openai",
+        "COPILOT_PROVIDER_BASE_URL": build_copilot_base_url(workspace),
         "COPILOT_MODEL": model,
+        "COPILOT_PROVIDER_BEARER_TOKEN": token,
         "COPILOT_OFFLINE": "true",
         "OAUTH_TOKEN": token,
     }
