@@ -193,12 +193,12 @@ def status() -> int:
     print_heading("Provider")
     print_kv("Workspace URL", workspace or "not configured")
 
-    print_heading("Tools")
+    print_heading("Coding Agents")
     for tool, spec in TOOL_SPECS.items():
         base_url = state.get("base_urls", {}).get(tool, "not configured")
         managed = bool(managed_configs.get(tool))
         config_path = spec["config_path"]
-        print_kv("Tool", spec["display"])
+        print_kv("Coding Agent", spec["display"])
         if tool != "codex":
             print_kv("Model", default_model_for_tool(tool, state) or "not available")
         print_kv("Base URL", base_url)

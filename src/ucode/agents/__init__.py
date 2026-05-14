@@ -314,6 +314,6 @@ def validate_all_tools(state: dict) -> None:
             spec = TOOL_SPECS[tool]
             lines.append(
                 f"[green]✓[/green] [bold]{spec['display']}[/bold] — "
-                f"run with [cyan]ucode --agent {tool}[/cyan]"
+                f"run with [cyan]ucode {tool}[/cyan]"
             )
         console.print(Panel("\n".join(lines), title="Ready", style="green", expand=False))
