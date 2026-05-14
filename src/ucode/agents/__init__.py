@@ -195,7 +195,33 @@ def configure_single_tool(tool: str, state: dict) -> dict:
     return state
 
 
+def configure_selected_tools(state: dict, tools: list[str]) -> dict:
+    """Configure the given tools. Caller is responsible for ensuring each tool
+    is available on the workspace.
+
+    Merges newly-configured tools into state['available_tools'] rather than
+    replacing it, so a previously-configured tool the user didn't pick this
+    run is preserved.
+    """
+    for tool in tools:
+        if tool == "codex":
+            state = configure_tool("codex", state)
+        else:
+            state, model = resolve_launch_model(tool, state, None)
+            state = configure_tool(tool, state, model)
+
+    existing = state.get("available_tools") or []
+    state["available_tools"] = sorted(set(existing) | set(tools))
+    save_state(state)
+    return state
+
+
 def configure_all_tools(state: dict) -> dict:
+    """Discover available tools on the workspace and configure all of them.
+
+    Thin wrapper retained for callers that want the legacy "configure
+    everything that works" behavior.
+    """
     available_tools: list[str] = []
     unavailable_tools: list[str] = []
 
@@ -210,16 +236,7 @@ def configure_all_tools(state: dict) -> dict:
     for tool in unavailable_tools:
         print_err(f"{TOOL_SPECS[tool]['display']} is not available on this workspace")
 
-    for tool in available_tools:
-        if tool == "codex":
-            state = configure_tool("codex", state)
-        else:
-            state, model = resolve_launch_model(tool, state, None)
-            state = configure_tool(tool, state, model)
-
-    state["available_tools"] = available_tools
-    save_state(state)
-    return state
+    return configure_selected_tools(state, available_tools)
 
 
 def ensure_provider_state(tool: str) -> dict:

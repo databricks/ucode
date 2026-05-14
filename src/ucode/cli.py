@@ -10,7 +10,8 @@ from rich.panel import Panel
 
 from ucode.agents import (
     TOOL_SPECS,
-    configure_all_tools,
+    check_gateway_endpoint,
+    configure_selected_tools,
     configure_single_tool,
     configure_tool,
     ensure_bootstrap_dependencies,
@@ -49,6 +50,7 @@ from ucode.ui import (
     print_note,
     print_section,
     print_success,
+    prompt_for_tools,
     prompt_for_workspace,
     spinner,
     status_badge,
@@ -154,17 +156,31 @@ def configure_workspace_command(tool: str | None = None) -> int:
 
     workspace = _prompt_for_configuration()
     state = configure_shared_state(workspace, force_login=True)
-    state = configure_all_tools(state)
 
-    available_tools = state.get("available_tools") or []
-    summary_lines = [
-        f"[bold]Workspace:[/bold] [cyan]{state['workspace']}[/cyan]",
-    ]
-    for tool_name, spec in TOOL_SPECS.items():
-        if tool_name in available_tools:
-            summary_lines.append(f"[bold]{spec['display']}:[/bold] [green]configured[/green]")
-        else:
-            summary_lines.append(f"[bold]{spec['display']}:[/bold] [dim]not available[/dim]")
+    available_on_workspace: list[str] = []
+    for tool_name in TOOL_SPECS:
+        with spinner(f"Checking {TOOL_SPECS[tool_name]['display']} availability..."):
+            if check_gateway_endpoint(state, tool_name):
+                available_on_workspace.append(tool_name)
+
+    if not available_on_workspace:
+        print_err("No coding agents are available on this workspace.")
+        return 1
+
+    picked = prompt_for_tools([(t, TOOL_SPECS[t]["display"]) for t in available_on_workspace])
+    if not picked:
+        print_note("No coding agents selected — nothing to configure.")
+        return 0
+
+    for tool_name in picked:
+        install_tool_binary(tool_name, strict=False)
+
+    state = configure_selected_tools(state, picked)
+
+    summary_lines = [f"[bold]Workspace:[/bold] [cyan]{state['workspace']}[/cyan]"]
+    for tool_name in picked:
+        spec = TOOL_SPECS[tool_name]
+        summary_lines.append(f"[bold]{spec['display']}:[/bold] [green]configured[/green]")
     console.print(
         Panel(
             "\n".join(summary_lines),
@@ -174,8 +190,10 @@ def configure_workspace_command(tool: str | None = None) -> int:
         )
     )
 
-    if available_tools:
-        validate_all_tools(state)
+    # Limit validation to just-configured tools so we don't re-validate
+    # previously-configured tools the user didn't touch this run.
+    validate_state = {**state, "available_tools": picked}
+    validate_all_tools(validate_state)
     return 0
 
 
@@ -370,8 +388,8 @@ def configure(
             install_tool_binary(tool, strict=True)
             configure_workspace_command(tool)
         else:
-            for t in TOOL_SPECS:
-                install_tool_binary(t, strict=False)
+            # Tool binaries are installed after the user picks which agents
+            # they want, in configure_workspace_command.
             configure_workspace_command()
     except RuntimeError as exc:
         print_err(str(exc))

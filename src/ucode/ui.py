@@ -210,6 +210,35 @@ def prompt_for_workspace(
             print_err(str(exc))
 
 
+def prompt_for_tools(available: list[tuple[str, str]]) -> list[str]:
+    """Multi-select picker for coding agents.
+
+    `available` is [(tool_id, display_name), ...]. Returns the chosen tool_ids.
+    All options are checked by default so hitting Enter selects everything.
+    Returns [] if the user submits an empty selection.
+    """
+    style = questionary.Style(
+        [
+            ("highlighted", "fg:cyan bold"),
+            ("pointer", "fg:cyan bold"),
+            ("answer", "fg:cyan"),
+        ]
+    )
+    choices = [
+        questionary.Choice(title=display, value=tool_id, checked=True)
+        for tool_id, display in available
+    ]
+    answer = questionary.checkbox(
+        "Select coding agents to configure:",
+        choices=choices,
+        style=style,
+        pointer="›",
+        qmark="",
+        instruction="(space to toggle, enter to confirm)",
+    ).ask()
+    return list(answer) if answer else []
+
+
 def prompt_yes_no(prompt: str) -> bool:
     while True:
         response = console.input(f"{label(prompt)} {muted('[y/n]')} {muted('›')} ").strip().lower()

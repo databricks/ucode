@@ -10,6 +10,7 @@ from ucode.agents import (
     DEFAULT_TOOL,
     TOOL_SPECS,
     check_gateway_endpoint,
+    configure_selected_tools,
     default_model_for_tool,
     ensure_tool_binary_available,
     install_tool_binary,
@@ -166,3 +167,39 @@ class TestInstallToolBinary:
 
         with pytest.raises(RuntimeError, match="OpenCode is not installed"):
             ensure_tool_binary_available("opencode")
+
+
+class TestConfigureSelectedTools:
+    def test_merges_with_existing_available_tools(self, monkeypatch):
+        """Configuring a new tool should not drop previously-configured tools
+        from state['available_tools']."""
+        monkeypatch.setattr("ucode.agents.configure_tool", lambda tool, state, model=None: state)
+        monkeypatch.setattr("ucode.agents.save_state", lambda s: None)
+
+        state = {
+            "workspace": "https://x.databricks.com",
+            "available_tools": ["codex", "claude"],
+            "claude_models": {"sonnet": "s4"},
+        }
+        result = configure_selected_tools(state, ["claude"])
+        assert set(result["available_tools"]) == {"codex", "claude"}
+
+    def test_adds_new_tool_to_available_tools(self, monkeypatch):
+        monkeypatch.setattr("ucode.agents.configure_tool", lambda tool, state, model=None: state)
+        monkeypatch.setattr("ucode.agents.save_state", lambda s: None)
+
+        state = {
+            "workspace": "https://x.databricks.com",
+            "available_tools": ["codex"],
+            "claude_models": {"sonnet": "s4"},
+        }
+        result = configure_selected_tools(state, ["claude"])
+        assert set(result["available_tools"]) == {"codex", "claude"}
+
+    def test_empty_selection_preserves_existing(self, monkeypatch):
+        monkeypatch.setattr("ucode.agents.configure_tool", lambda tool, state, model=None: state)
+        monkeypatch.setattr("ucode.agents.save_state", lambda s: None)
+
+        state = {"workspace": "https://x.databricks.com", "available_tools": ["codex"]}
+        result = configure_selected_tools(state, [])
+        assert result["available_tools"] == ["codex"]
