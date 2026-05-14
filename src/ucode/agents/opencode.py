@@ -105,10 +105,12 @@ def write_tool_config(
     state: dict,
     model: str,
     token: str | None = None,
+    *,
+    force_refresh: bool = False,
 ) -> tuple[dict, str]:
     backup_existing_file(OPENCODE_CONFIG_PATH, OPENCODE_BACKUP_PATH)
     if token is None:
-        token = get_databricks_token(state["workspace"])
+        token = get_databricks_token(state["workspace"], force_refresh=force_refresh)
     opencode_base_urls = state.get("base_urls", {}).get("opencode") or build_opencode_base_urls(
         state["workspace"]
     )
@@ -163,18 +165,18 @@ def default_model(state: dict) -> str | None:
     return gemini[0] if gemini else None
 
 
-def _refresh_token_once(state: dict) -> str:
+def _refresh_token_once(state: dict, *, force_refresh: bool = False) -> str:
     model = default_model(state)
     if not model:
         raise RuntimeError("No OpenCode model is configured.")
-    _, token = write_tool_config(state, model)
+    _, token = write_tool_config(state, model, force_refresh=force_refresh)
     return token
 
 
 def _refresh_forever(state: dict, stop_event: threading.Event) -> None:
     while not stop_event.wait(TOKEN_REFRESH_INTERVAL_SECONDS):
         try:
-            _refresh_token_once(state)
+            _refresh_token_once(state, force_refresh=True)
         except RuntimeError:
             continue
 

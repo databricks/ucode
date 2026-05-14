@@ -1,6 +1,6 @@
 # Unity AI Gateway Coding CLI (ucode)
 
-`ucode` is a lightweight launcher for running Codex, Claude Code, Gemini CLI, OpenCode, and GitHub Copilot CLI through Databricks.
+`ucode` is a lightweight launcher for running Codex, Claude Code, Gemini CLI, OpenCode, GitHub Copilot CLI, and Pi through Databricks.
 
 ## Requirements
 
@@ -25,6 +25,7 @@ ucode claude     # Claude Code
 ucode gemini     # Gemini CLI
 ucode opencode   # OpenCode
 ucode copilot    # GitHub Copilot CLI
+ucode pi         # Pi
 ```
 
 On first launch, `ucode` will prompt for your Databricks workspace URL, authenticate, and configure that tool automatically. Subsequent launches go straight to the agent.
@@ -83,6 +84,7 @@ Discovered external MCP connections are listed directly. MCP auth uses a Databri
 | `~/.gemini/.env` | Gemini CLI |
 | `~/.config/opencode/opencode.json` | OpenCode |
 | `~/.copilot/.env` | GitHub Copilot CLI |
+| `~/.pi/agent/models.json` | Pi |
 
 Existing files are backed up before being overwritten. `ucode revert` restores backups.
 

@@ -70,13 +70,18 @@ def _patch_launch(tool: str):
     """Return a context-manager stack that makes _launch_tool a no-op.
 
     load_state returns MINIMAL_STATE (workspace + tool already configured) so
-    the auto-configure path is skipped entirely.
+    the auto-configure path is skipped entirely. configure_shared_state is
+    also stubbed to avoid the launch-time refetch hitting the network.
     """
     return [
         patch("ucode.cli.ensure_bootstrap_dependencies"),
         patch("ucode.cli.load_state", return_value=MINIMAL_STATE),
         patch(
             "ucode.cli.ensure_provider_state",
+            return_value=MINIMAL_STATE,
+        ),
+        patch(
+            "ucode.cli.configure_shared_state",
             return_value=MINIMAL_STATE,
         ),
         patch(
@@ -101,7 +106,8 @@ class TestSubcommandRouting:
             patches[2],
             patches[3],
             patches[4],
-            patches[5] as mock_launch,
+            patches[5],
+            patches[6] as mock_launch,
         ):
             result = runner.invoke(app, [tool])
         assert result.exit_code == 0, result.output
@@ -124,6 +130,7 @@ class TestAutoConfigureOnFirstRun:
             patch("ucode.cli.ensure_bootstrap_dependencies"),
             patch("ucode.cli.load_state", return_value=empty_state),
             patch("ucode.cli._auto_configure_tool") as mock_auto,
+            patch("ucode.cli.configure_shared_state", return_value=MINIMAL_STATE),
             patch(
                 "ucode.cli.ensure_provider_state",
                 return_value=configured_state,
@@ -146,6 +153,7 @@ class TestAutoConfigureOnFirstRun:
             patch("ucode.cli.ensure_bootstrap_dependencies"),
             patch("ucode.cli.load_state", return_value=state_without_tool),
             patch("ucode.cli._auto_configure_tool") as mock_auto,
+            patch("ucode.cli.configure_shared_state", return_value=MINIMAL_STATE),
             patch(
                 "ucode.cli.ensure_provider_state",
                 return_value=MINIMAL_STATE,
@@ -167,6 +175,7 @@ class TestAutoConfigureOnFirstRun:
             patch("ucode.cli.ensure_bootstrap_dependencies"),
             patch("ucode.cli.load_state", return_value=MINIMAL_STATE),
             patch("ucode.cli._auto_configure_tool") as mock_auto,
+            patch("ucode.cli.configure_shared_state", return_value=MINIMAL_STATE),
             patch(
                 "ucode.cli.ensure_provider_state",
                 return_value=MINIMAL_STATE,
@@ -202,7 +211,8 @@ class TestPassthroughArgs:
             patches[2],
             patches[3],
             patches[4],
-            patches[5] as mock_launch,
+            patches[5],
+            patches[6] as mock_launch,
         ):
             result = runner.invoke(app, [tool, *extra_args])
         assert result.exit_code == 0, result.output
@@ -217,7 +227,8 @@ class TestPassthroughArgs:
             patches[2],
             patches[3],
             patches[4],
-            patches[5] as mock_launch,
+            patches[5],
+            patches[6] as mock_launch,
         ):
             runner.invoke(app, ["claude"])
         forwarded = mock_launch.call_args[0][2]

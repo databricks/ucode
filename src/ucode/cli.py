@@ -89,20 +89,23 @@ def configure_shared_state(
     with spinner("Fetching available models..."):
         claude_models = (
             fetch_ai_gateway_claude_models(workspace, token)
-            if fetch_all or "claude" in tools or "opencode" in tools or "copilot" in tools
+            if fetch_all
+            or "claude" in tools
+            or "opencode" in tools
+            or "copilot" in tools
+            or "pi" in tools
             else {}
         )
         gemini_models = (
             fetch_gemini_models(workspace, token)
-            if fetch_all or "gemini" in tools or "opencode" in tools
+            if fetch_all or "gemini" in tools or "opencode" in tools or "pi" in tools
             else []
         )
         codex_models = (
             fetch_codex_models(workspace, token)
-            if fetch_all or "codex" in tools or "copilot" in tools
+            if fetch_all or "codex" in tools or "copilot" in tools or "pi" in tools
             else []
         )
-
     opencode_models: dict[str, list[str]] = {}
     if claude_models:
         opencode_models["anthropic"] = list(claude_models.values())
@@ -113,11 +116,11 @@ def configure_shared_state(
     state = load_state()
     state["workspace"] = workspace
     state["base_urls"] = build_shared_base_urls(workspace)
-    if fetch_all or "claude" in tools or "opencode" in tools or "copilot" in tools:
+    if fetch_all or "claude" in tools or "opencode" in tools or "copilot" in tools or "pi" in tools:
         state["claude_models"] = claude_models
-    if fetch_all or "gemini" in tools or "opencode" in tools:
+    if fetch_all or "gemini" in tools or "opencode" in tools or "pi" in tools:
         state["gemini_models"] = gemini_models
-    if fetch_all or "codex" in tools or "copilot" in tools:
+    if fetch_all or "codex" in tools or "copilot" in tools or "pi" in tools:
         state["codex_models"] = codex_models
     if fetch_all or "opencode" in tools:
         state["opencode_models"] = opencode_models
@@ -310,13 +313,17 @@ def _launch_tool(tool_name: str, ctx: typer.Context) -> None:
         if not existing.get("workspace") or tool not in (existing.get("available_tools") or []):
             _auto_configure_tool(tool)
         state = ensure_provider_state(tool)
+        # Re-fetch model lists on every launch so newly-added Databricks
+        # endpoints show up without a manual `ucode configure` (and so that
+        # tools like pi which read multiple model bundles never run on
+        # stale state from before a tool added a new bundle).
+        state = configure_shared_state(state["workspace"], tools=[tool])
         state, resolved_model = resolve_launch_model(tool, state, None)
         state = configure_tool(tool, state, resolved_model)
         print_section(f"ucode with {TOOL_SPECS[tool]['display']}")
         if resolved_model:
             print_kv("Model", resolved_model)
-        print_kv("Base URL", str(state["base_urls"][tool]))
-        if tool in ("gemini", "opencode", "copilot"):
+        if tool in ("gemini", "opencode", "copilot", "pi"):
             print_note(
                 f"{TOOL_SPECS[tool]['display']} token refresh is managed automatically "
                 f"every 30 minutes while the session is running."
@@ -363,6 +370,12 @@ def copilot_cmd(ctx: typer.Context) -> None:
     _launch_tool("copilot", ctx)
 
 
+@app.command("pi", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
+def pi_cmd(ctx: typer.Context) -> None:
+    """Launch Pi coding agent via Databricks."""
+    _launch_tool("pi", ctx)
+
+
 @configure_app.callback(invoke_without_command=True)
 def configure(
     ctx: typer.Context,
@@ -373,7 +386,7 @@ def configure(
         str | None,
         typer.Option(
             "--agent",
-            help="Configure only the named agent (e.g. claude, codex, gemini, opencode, copilot).",
+            help="Configure only the named agent (e.g. claude, codex, gemini, opencode, copilot, pi).",
         ),
     ] = None,
 ) -> None:

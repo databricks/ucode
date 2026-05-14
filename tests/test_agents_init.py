@@ -21,7 +21,7 @@ from ucode.agents import (
 
 class TestToolSpecs:
     def test_all_tools_present(self):
-        assert set(TOOL_SPECS) == {"codex", "claude", "gemini", "opencode", "copilot"}
+        assert set(TOOL_SPECS) == {"codex", "claude", "gemini", "opencode", "copilot", "pi"}
 
     def test_each_spec_has_required_keys(self):
         required = {"binary", "package", "display", "config_path", "backup_path"}
@@ -44,6 +44,7 @@ class TestNormalizeTool:
             ("gemini-cli", "gemini"),
             ("opencode", "opencode"),
             ("copilot", "copilot"),
+            ("pi", "pi"),
             ("CODEX", "codex"),
             ("  Claude  ", "claude"),
         ],
@@ -87,6 +88,18 @@ class TestCheckGatewayEndpoint:
     def test_copilot_unavailable_when_no_models(self):
         assert check_gateway_endpoint({}, "copilot") is False
 
+    def test_pi_available_with_claude(self):
+        assert check_gateway_endpoint({"claude_models": {"sonnet": "s4"}}, "pi") is True
+
+    def test_pi_available_with_codex(self):
+        assert check_gateway_endpoint({"codex_models": ["m"]}, "pi") is True
+
+    def test_pi_available_with_gemini(self):
+        assert check_gateway_endpoint({"gemini_models": ["gemini-2"]}, "pi") is True
+
+    def test_pi_unavailable_when_no_models(self):
+        assert check_gateway_endpoint({}, "pi") is False
+
 
 class TestDefaultModelForTool:
     def test_codex_always_none(self):
@@ -121,6 +134,21 @@ class TestDefaultModelForTool:
     def test_opencode_falls_back_to_gemini(self):
         state = {"opencode_models": {"gemini": ["gemini-2"]}}
         assert default_model_for_tool("opencode", state) == "gemini-2"
+
+    def test_pi_prefers_claude_opus(self):
+        state = {"claude_models": {"opus": "o4", "sonnet": "s4"}, "codex_models": ["c"]}
+        assert default_model_for_tool("pi", state) == "o4"
+
+    def test_pi_falls_back_to_codex(self):
+        state = {"claude_models": {}, "codex_models": ["c1"]}
+        assert default_model_for_tool("pi", state) == "c1"
+
+    def test_pi_falls_back_to_gemini(self):
+        state = {"claude_models": {}, "codex_models": [], "gemini_models": ["gemini-2"]}
+        assert default_model_for_tool("pi", state) == "gemini-2"
+
+    def test_pi_returns_none_when_no_models(self):
+        assert default_model_for_tool("pi", {}) is None
 
 
 class TestResolveLaunchModel:

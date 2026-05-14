@@ -1,4 +1,4 @@
-"""Shared fixtures for E2E tests."""
+"""Shared fixtures for E2E tests + global state-isolation guard."""
 
 from __future__ import annotations
 
@@ -14,6 +14,22 @@ from ucode.databricks import (
     get_databricks_token,
 )
 from ucode.ui import normalize_workspace_url
+
+
+@pytest.fixture(autouse=True)
+def _isolate_ucode_state(tmp_path, monkeypatch):
+    """Redirect ucode's state file and APP_DIR to a per-test tmp dir.
+
+    Defense in depth: even if an individual test forgets to patch save_state,
+    it can never touch the developer's real ~/.ucode/state.json.
+    """
+    import ucode.config_io as config_io_mod
+    import ucode.state as state_mod
+
+    state_dir = tmp_path / ".ucode"
+    state_dir.mkdir()
+    monkeypatch.setattr(state_mod, "STATE_PATH", state_dir / "state.json")
+    monkeypatch.setattr(config_io_mod, "APP_DIR", state_dir)
 
 
 def _workspace() -> str:
