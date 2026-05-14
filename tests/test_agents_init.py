@@ -91,13 +91,13 @@ class TestDefaultModelForTool:
     def test_codex_always_none(self):
         assert default_model_for_tool("codex", {}) is None
 
-    def test_claude_prefers_sonnet(self):
+    def test_claude_prefers_opus(self):
         state = {"claude_models": {"sonnet": "s4", "opus": "o4", "haiku": "h4"}}
-        assert default_model_for_tool("claude", state) == "s4"
-
-    def test_claude_falls_back_to_opus(self):
-        state = {"claude_models": {"opus": "o4"}}
         assert default_model_for_tool("claude", state) == "o4"
+
+    def test_claude_falls_back_to_sonnet(self):
+        state = {"claude_models": {"sonnet": "s4"}}
+        assert default_model_for_tool("claude", state) == "s4"
 
     def test_claude_falls_back_to_haiku(self):
         state = {"claude_models": {"haiku": "h4"}}

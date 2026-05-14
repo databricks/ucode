@@ -11,7 +11,6 @@ import pytest
 import ucode.databricks as db_mod
 from ucode.databricks import (
     AI_GATEWAY_V2_DOCS_URL,
-    MIN_DATABRICKS_CLI_VERSION,
     _parse_databricks_cli_version,
     build_auth_shell_command,
     build_databricks_cli_env,
@@ -295,7 +294,11 @@ class TestEnsureDatabricksCliVersion:
         env = self._fake_databricks(tmp_path, "Databricks CLI v0.297.0")
         monkeypatch.setattr("os.environ", env)
         upgraded = []
-        monkeypatch.setattr(db_mod, "_run_databricks_cli_installer", lambda brew_subcommand="install": upgraded.append(brew_subcommand))
+        monkeypatch.setattr(
+            db_mod,
+            "_run_databricks_cli_installer",
+            lambda brew_subcommand="install": upgraded.append(brew_subcommand),
+        )
         # Stop the recursive re-check after upgrade
         call_count = [0]
         original = db_mod.ensure_databricks_cli_version

@@ -73,13 +73,13 @@ class TestRenderOverlay:
 
 
 class TestClaudeDefaultModel:
-    def test_prefers_sonnet(self):
+    def test_prefers_opus(self):
         state = {"claude_models": {"sonnet": "s4", "opus": "o4", "haiku": "h4"}}
-        assert claude.default_model(state) == "s4"
-
-    def test_falls_back_to_opus(self):
-        state = {"claude_models": {"opus": "o4", "haiku": "h4"}}
         assert claude.default_model(state) == "o4"
+
+    def test_falls_back_to_sonnet(self):
+        state = {"claude_models": {"sonnet": "s4", "haiku": "h4"}}
+        assert claude.default_model(state) == "s4"
 
     def test_falls_back_to_haiku(self):
         state = {"claude_models": {"haiku": "h4"}}
