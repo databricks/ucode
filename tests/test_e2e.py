@@ -120,7 +120,7 @@ class TestUrlBuilders:
 
     def test_shared_base_urls_all_tools(self, e2e_workspace):
         urls = build_shared_base_urls(e2e_workspace)
-        for tool in ("codex", "claude", "gemini", "opencode", "copilot"):
+        for tool in ("codex", "claude", "gemini", "opencode", "copilot", "pi"):
             assert tool in urls
 
 
@@ -176,7 +176,7 @@ class TestConfigureSubset:
         """Redirect every agent's config path into tmp_path so the test
         doesn't touch the developer's real ~/.codex, ~/.claude, etc."""
         import ucode.config_io as config_io_mod
-        from ucode.agents import claude, codex, copilot, gemini, opencode
+        from ucode.agents import claude, codex, copilot, gemini, opencode, pi
 
         monkeypatch.setattr(config_io_mod, "APP_DIR", tmp_path)
 
@@ -197,6 +197,9 @@ class TestConfigureSubset:
 
         monkeypatch.setattr(copilot, "COPILOT_ENV_PATH", tmp_path / ".copilot-env")
         monkeypatch.setattr(copilot, "COPILOT_BACKUP_PATH", tmp_path / "copilot.backup")
+
+        monkeypatch.setattr(pi, "PI_CONFIG_PATH", tmp_path / "pi-models.json")
+        monkeypatch.setattr(pi, "PI_BACKUP_PATH", tmp_path / "pi-models.backup.json")
 
         return codex_dir / "config.toml"
 
@@ -227,6 +230,7 @@ class TestConfigureSubset:
         assert not (tmp_path / ".gemini-env").exists(), "gemini env should NOT exist"
         assert not (tmp_path / "opencode.json").exists(), "opencode config should NOT exist"
         assert not (tmp_path / ".copilot-env").exists(), "copilot env should NOT exist"
+        assert not (tmp_path / "pi-models.json").exists(), "pi config should NOT exist"
 
         state = load_state()
         assert state["available_tools"] == ["codex"]
@@ -608,6 +612,72 @@ class TestCopilotLaunch:
                 )
 
         assert not failures, "Copilot launch failures:\n" + "\n".join(failures)
+
+
+class TestPiLaunch:
+    """Run pi against every available model across all four providers.
+
+    Pi has dedicated providers per family (claude, codex, gemini, oss); this
+    test exercises each one end-to-end through the validation path.
+    """
+
+    def _all_models(self, e2e_state: dict) -> list[tuple[str, str]]:
+        out: list[tuple[str, str]] = []
+        claude_models: dict = e2e_state.get("claude_models") or {}
+        for family, model_id in claude_models.items():
+            if model_id:
+                out.append((f"claude-{family}", model_id))
+        for model in e2e_state.get("codex_models") or []:
+            out.append(("codex", model))
+        for model in e2e_state.get("gemini_models") or []:
+            out.append(("gemini", model))
+        return out
+
+    def test_launch_pi_per_model(self, tmp_path, monkeypatch, e2e_state, e2e_workspace, e2e_token):
+        import ucode.config_io as config_io_mod
+        from ucode.agents import pi
+
+        _require_binary("pi")
+        models = self._all_models(e2e_state)
+        if not models:
+            pytest.skip("No Pi-compatible models available on this workspace")
+
+        monkeypatch.setattr(config_io_mod, "APP_DIR", tmp_path)
+        # Pi reads models.json from PI_CODING_AGENT_DIR (default ~/.pi/agent).
+        # Point both pi (via env) and our writer (via PI_CONFIG_PATH) at the
+        # same tmp dir so the spawned `pi` subprocess sees what we wrote.
+        pi_dir = tmp_path / "pi-agent"
+        pi_dir.mkdir()
+        config_path = pi_dir / "models.json"
+        backup_path = tmp_path / "pi-models.backup.json"
+        monkeypatch.setattr(pi, "PI_CONFIG_PATH", config_path)
+        monkeypatch.setattr(pi, "PI_BACKUP_PATH", backup_path)
+
+        failures = []
+        for family, model in models:
+            if config_path.exists():
+                config_path.unlink()
+
+            with pytest.MonkeyPatch().context() as mp:
+                mp.setattr("ucode.state.save_state", lambda s: None)
+                mp.setattr("ucode.agents.pi.get_databricks_token", lambda ws: e2e_token)
+                pi.write_tool_config(
+                    {**e2e_state, "workspace": e2e_workspace},
+                    model,
+                    token=e2e_token,
+                )
+
+            env = {**pi.build_runtime_env(e2e_token), "PI_CODING_AGENT_DIR": str(pi_dir)}
+            cmd = pi.validate_cmd("pi")
+            result = _run_agent(cmd, env=env, timeout=120)
+            combined = (result.stdout + result.stderr).strip()
+            if result.returncode != 0 or not combined:
+                failures.append(
+                    f"family={family} model={model} rc={result.returncode} "
+                    f"stdout={result.stdout[:300]!r} stderr={result.stderr[:300]!r}"
+                )
+
+        assert not failures, "Pi launch failures:\n" + "\n".join(failures)
 
 
 # ---------------------------------------------------------------------------

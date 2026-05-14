@@ -18,7 +18,6 @@ import subprocess
 
 from ucode.config_io import ToolSpec
 from ucode.databricks import (
-    ensure_databricks_auth,
     install_databricks_cli,
 )
 from ucode.state import load_state, save_state
@@ -31,7 +30,7 @@ from ucode.ui import (
     spinner,
 )
 
-from . import claude, codex, copilot, gemini, opencode
+from . import claude, codex, copilot, gemini, opencode, pi
 
 _MODULES = {
     "codex": codex,
@@ -39,6 +38,7 @@ _MODULES = {
     "gemini": gemini,
     "opencode": opencode,
     "copilot": copilot,
+    "pi": pi,
 }
 
 TOOL_SPECS: dict[str, ToolSpec] = {name: module.SPEC for name, module in _MODULES.items()}
@@ -51,6 +51,7 @@ TOOL_ALIASES = {
     "gemini-cli": "gemini",
     "opencode": "opencode",
     "copilot": "copilot",
+    "pi": "pi",
 }
 
 DEFAULT_TOOL = "codex"
@@ -61,9 +62,30 @@ def normalize_tool(tool: str) -> str:
     normalized = TOOL_ALIASES.get(tool.strip().lower())
     if not normalized:
         raise RuntimeError(
-            f"Unsupported tool '{tool}'. Use one of: codex, claude, gemini, opencode, copilot."
+            f"Unsupported tool '{tool}'. Use one of: codex, claude, gemini, opencode, copilot, pi."
         )
     return normalized
+
+
+def _check_npm_registry_reachable() -> tuple[bool, str]:
+    """Probe the configured npm registry. Returns (ok, registry_url)."""
+    try:
+        registry = subprocess.run(
+            ["npm", "config", "get", "registry"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        ).stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        registry = ""
+    try:
+        result = subprocess.run(
+            ["npm", "ping"], check=False, capture_output=True, text=True, timeout=8
+        )
+        return result.returncode == 0, registry
+    except (OSError, subprocess.TimeoutExpired):
+        return False, registry
 
 
 def install_tool_binary(tool: str, *, strict: bool = True) -> bool:
@@ -82,7 +104,23 @@ def install_tool_binary(tool: str, *, strict: bool = True) -> bool:
         return False
 
     print_section("Bootstrap")
-    print_warning(f"`{binary}` was not found. Installing {spec['display']}...")
+    print_warning(f"`{binary}` was not found.")
+
+    with spinner("Checking npm registry reachability..."):
+        ok, registry = _check_npm_registry_reachable()
+    if not ok:
+        registry_label = registry or "the configured npm registry"
+        message = (
+            f"Cannot reach {registry_label} (`npm ping` failed). "
+            f"Check your network or npm registry config, then retry."
+        )
+        if strict:
+            raise RuntimeError(message)
+        print_warning(f"{message} Continuing without it.")
+        return False
+
+    print_warning(f"Installing {spec['display']}...")
+
     try:
         subprocess.run(["npm", "install", "-g", package], check=True, timeout=300)
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
@@ -151,9 +189,11 @@ def configure_tool(tool: str, state: dict, model: str | None = None) -> dict:
             result = gemini.write_tool_config(state, model)
         elif tool == "copilot":
             result = copilot.write_tool_config(state, model)
+        elif tool == "pi":
+            result = pi.write_tool_config(state, model)
         else:
             result = opencode.write_tool_config(state, model)
-    # gemini/opencode/copilot return (state, token); codex/claude return state
+    # gemini/opencode/copilot/pi return (state, token); codex/claude return state
     if isinstance(result, tuple):
         return result[0]
     return result
@@ -175,6 +215,12 @@ def check_gateway_endpoint(state: dict, tool: str) -> bool:
         return bool(state.get("gemini_models"))
     if tool == "copilot":
         return bool(state.get("claude_models")) or bool(state.get("codex_models"))
+    if tool == "pi":
+        return (
+            bool(state.get("claude_models"))
+            or bool(state.get("codex_models"))
+            or bool(state.get("gemini_models"))
+        )
     return False
 
 
@@ -240,6 +286,8 @@ def configure_all_tools(state: dict) -> dict:
 
 
 def ensure_provider_state(tool: str) -> dict:
+    """Validate that workspace + tool are configured. Caller is expected to
+    handle auth (typically via `configure_shared_state` immediately after)."""
     state = load_state()
     workspace = state.get("workspace")
     if not workspace:
@@ -250,7 +298,6 @@ def ensure_provider_state(tool: str) -> dict:
             f"{TOOL_SPECS[tool]['display']} is not available on this workspace. "
             f"Run `ucode configure` to set up your agents."
         )
-    ensure_databricks_auth(workspace)
     return state
 
 

@@ -21,7 +21,7 @@ from ucode.agents import (
 
 class TestToolSpecs:
     def test_all_tools_present(self):
-        assert set(TOOL_SPECS) == {"codex", "claude", "gemini", "opencode", "copilot"}
+        assert set(TOOL_SPECS) == {"codex", "claude", "gemini", "opencode", "copilot", "pi"}
 
     def test_each_spec_has_required_keys(self):
         required = {"binary", "package", "display", "config_path", "backup_path"}
@@ -44,6 +44,7 @@ class TestNormalizeTool:
             ("gemini-cli", "gemini"),
             ("opencode", "opencode"),
             ("copilot", "copilot"),
+            ("pi", "pi"),
             ("CODEX", "codex"),
             ("  Claude  ", "claude"),
         ],
@@ -87,6 +88,18 @@ class TestCheckGatewayEndpoint:
     def test_copilot_unavailable_when_no_models(self):
         assert check_gateway_endpoint({}, "copilot") is False
 
+    def test_pi_available_with_claude(self):
+        assert check_gateway_endpoint({"claude_models": {"sonnet": "s4"}}, "pi") is True
+
+    def test_pi_available_with_codex(self):
+        assert check_gateway_endpoint({"codex_models": ["m"]}, "pi") is True
+
+    def test_pi_available_with_gemini(self):
+        assert check_gateway_endpoint({"gemini_models": ["gemini-2"]}, "pi") is True
+
+    def test_pi_unavailable_when_no_models(self):
+        assert check_gateway_endpoint({}, "pi") is False
+
 
 class TestDefaultModelForTool:
     def test_codex_always_none(self):
@@ -122,6 +135,21 @@ class TestDefaultModelForTool:
         state = {"opencode_models": {"gemini": ["gemini-2"]}}
         assert default_model_for_tool("opencode", state) == "gemini-2"
 
+    def test_pi_prefers_claude_opus(self):
+        state = {"claude_models": {"opus": "o4", "sonnet": "s4"}, "codex_models": ["c"]}
+        assert default_model_for_tool("pi", state) == "o4"
+
+    def test_pi_falls_back_to_codex(self):
+        state = {"claude_models": {}, "codex_models": ["c1"]}
+        assert default_model_for_tool("pi", state) == "c1"
+
+    def test_pi_falls_back_to_gemini(self):
+        state = {"claude_models": {}, "codex_models": [], "gemini_models": ["gemini-2"]}
+        assert default_model_for_tool("pi", state) == "gemini-2"
+
+    def test_pi_returns_none_when_no_models(self):
+        assert default_model_for_tool("pi", {}) is None
+
 
 class TestResolveLaunchModel:
     def test_codex_always_returns_none_model(self):
@@ -154,13 +182,67 @@ class TestInstallToolBinary:
                 return "/usr/bin/npm"
             return None
 
-        def fake_run(*args, **kwargs):
-            raise subprocess.CalledProcessError(1, args[0])
+        def fake_run(args, **kwargs):
+            cmd = args[1] if len(args) > 1 else ""
+            if cmd == "config":
+                return subprocess.CompletedProcess(args, 0, stdout="https://registry.npmjs.org/\n")
+            if cmd == "ping":
+                return subprocess.CompletedProcess(args, 0, stdout="")
+            if cmd == "install":
+                raise subprocess.CalledProcessError(1, args)
+            raise AssertionError(f"unexpected npm subcommand: {cmd}")
 
         monkeypatch.setattr("ucode.agents.shutil.which", fake_which)
         monkeypatch.setattr("ucode.agents.subprocess.run", fake_run)
 
         assert install_tool_binary("opencode", strict=False) is False
+
+    def test_strict_raises_when_registry_unreachable(self, monkeypatch):
+        def fake_which(binary: str) -> str | None:
+            if binary == "npm":
+                return "/usr/bin/npm"
+            return None
+
+        def fake_run(args, **kwargs):
+            cmd = args[1] if len(args) > 1 else ""
+            if cmd == "config":
+                return subprocess.CompletedProcess(
+                    args, 0, stdout="https://corp.registry.example/\n"
+                )
+            if cmd == "ping":
+                return subprocess.CompletedProcess(args, 1, stdout="", stderr="ENETUNREACH")
+            raise AssertionError(f"npm install must not run when registry probe fails: {cmd}")
+
+        monkeypatch.setattr("ucode.agents.shutil.which", fake_which)
+        monkeypatch.setattr("ucode.agents.subprocess.run", fake_run)
+
+        with pytest.raises(RuntimeError, match="corp.registry.example"):
+            install_tool_binary("opencode", strict=True)
+
+    def test_non_strict_returns_false_when_registry_unreachable(self, monkeypatch):
+        def fake_which(binary: str) -> str | None:
+            if binary == "npm":
+                return "/usr/bin/npm"
+            return None
+
+        install_called = False
+
+        def fake_run(args, **kwargs):
+            nonlocal install_called
+            cmd = args[1] if len(args) > 1 else ""
+            if cmd == "config":
+                return subprocess.CompletedProcess(args, 0, stdout="\n")
+            if cmd == "ping":
+                return subprocess.CompletedProcess(args, 1, stdout="", stderr="")
+            if cmd == "install":
+                install_called = True
+            return subprocess.CompletedProcess(args, 0)
+
+        monkeypatch.setattr("ucode.agents.shutil.which", fake_which)
+        monkeypatch.setattr("ucode.agents.subprocess.run", fake_run)
+
+        assert install_tool_binary("opencode", strict=False) is False
+        assert install_called is False, "install must be skipped when ping fails"
 
     def test_ensure_tool_binary_available_raises_when_missing(self, monkeypatch):
         monkeypatch.setattr("ucode.agents.shutil.which", lambda _: None)

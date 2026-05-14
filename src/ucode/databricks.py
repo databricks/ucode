@@ -530,12 +530,33 @@ def build_tool_base_url(tool: str, workspace: str) -> str:
         raise RuntimeError(
             "Copilot has multiple base URLs — use build_copilot_base_urls() instead."
         )
+    if tool == "pi":
+        raise RuntimeError("Pi has multiple base URLs — use build_pi_base_urls() instead.")
     raise RuntimeError(f"Unsupported tool '{tool}'.")
 
 
 def build_opencode_base_urls(workspace: str) -> dict[str, str]:
     return {
         "anthropic": build_tool_base_url("claude", workspace) + "/v1",
+        "gemini": build_tool_base_url("gemini", workspace) + "/v1beta",
+    }
+
+
+def build_pi_base_urls(workspace: str) -> dict[str, str]:
+    # Pi speaks each model family's native API dialect to its dedicated gateway
+    # path (verified end-to-end). Each `api` type appends its own path suffix:
+    #
+    # - anthropic-messages       appends `/v1/messages`
+    # - openai-responses         appends `/responses`
+    # - google-generative-ai     appends `/v1beta/models/{id}:streamGenerateContent`
+    # - openai-completions       appends `/chat/completions`
+    #
+    # So the baseUrls below stop just before the suffix Pi will tack on.
+    # Compat flags applied per-provider in agents/pi.py; required for `oss`
+    # only (MLflow rejects `store` and `tools[].function.strict`).
+    return {
+        "claude": build_tool_base_url("claude", workspace),
+        "openai": build_tool_base_url("codex", workspace),
         "gemini": build_tool_base_url("gemini", workspace) + "/v1beta",
     }
 
@@ -555,5 +576,6 @@ def build_shared_base_urls(workspace: str) -> dict[str, str | dict[str, str]]:
         "gemini": build_tool_base_url("gemini", workspace),
         "opencode": build_opencode_base_urls(workspace),
         "copilot": build_copilot_base_url(workspace),
+        "pi": build_pi_base_urls(workspace),
     }
     return urls

@@ -111,7 +111,7 @@ class TestWriteToolConfigSetsAuthType:
         monkeypatch.setattr(gemini, "GEMINI_SETTINGS_PATH", settings_path)
         monkeypatch.setattr(gemini, "GEMINI_BACKUP_PATH", tmp_path / "backup")
         monkeypatch.setattr(config_io_mod, "APP_DIR", tmp_path)
-        monkeypatch.setattr("ucode.state.save_state", lambda s: None)
+        monkeypatch.setattr("ucode.agents.gemini.save_state", lambda s: None)
         monkeypatch.setattr("ucode.agents.gemini.get_databricks_token", lambda ws: "fake-token")
 
         gemini.write_tool_config({"workspace": WS}, "some-model")
@@ -128,7 +128,7 @@ class TestWriteToolConfigSetsAuthType:
         monkeypatch.setattr(gemini, "GEMINI_SETTINGS_PATH", settings_path)
         monkeypatch.setattr(gemini, "GEMINI_BACKUP_PATH", tmp_path / "backup")
         monkeypatch.setattr(config_io_mod, "APP_DIR", tmp_path)
-        monkeypatch.setattr("ucode.state.save_state", lambda s: None)
+        monkeypatch.setattr("ucode.agents.gemini.save_state", lambda s: None)
         monkeypatch.setattr("ucode.agents.gemini.get_databricks_token", lambda ws: "fake-token")
 
         gemini.write_tool_config({"workspace": WS}, "some-model")
