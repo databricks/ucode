@@ -289,21 +289,25 @@ class TestEnsureDatabricksCliVersion:
         monkeypatch.setattr("os.environ", env)
         ensure_databricks_cli_version()
 
-    def test_raises_when_version_too_old(self, tmp_path, monkeypatch):
+    def test_auto_upgrades_when_version_too_old(self, tmp_path, monkeypatch):
+        import ucode.databricks as db_mod
+
         env = self._fake_databricks(tmp_path, "Databricks CLI v0.297.0")
         monkeypatch.setattr("os.environ", env)
-        required = ".".join(str(n) for n in MIN_DATABRICKS_CLI_VERSION)
-        with pytest.raises(RuntimeError, match=f"v{required} or newer"):
-            ensure_databricks_cli_version()
+        upgraded = []
+        monkeypatch.setattr(db_mod, "_run_databricks_cli_installer", lambda brew_subcommand="install": upgraded.append(brew_subcommand))
+        # Stop the recursive re-check after upgrade
+        call_count = [0]
+        original = db_mod.ensure_databricks_cli_version
 
-    def test_error_includes_upgrade_command(self, tmp_path, monkeypatch):
-        env = self._fake_databricks(tmp_path, "Databricks CLI v0.100.0")
-        monkeypatch.setattr("os.environ", env)
-        with pytest.raises(RuntimeError) as excinfo:
-            ensure_databricks_cli_version()
-        # Either curl|sh, wget, or powershell — depending on host. All flow through
-        # the install script URL, so assert on that.
-        assert "setup-cli" in str(excinfo.value)
+        def once(*a, **kw):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                original()
+
+        monkeypatch.setattr(db_mod, "ensure_databricks_cli_version", once)
+        once()
+        assert upgraded == ["upgrade"]
 
     def test_raises_when_version_unparseable(self, tmp_path, monkeypatch):
         env = self._fake_databricks(tmp_path, "completely broken output")

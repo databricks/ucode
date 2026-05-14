@@ -68,20 +68,32 @@ def workspace_hostname(workspace: str) -> str:
     return parsed.hostname
 
 
-def _databricks_upgrade_command() -> str:
-    if platform.system() == "Windows":
-        return f'powershell -Command "irm {WINDOWS_DATABRICKS_INSTALL_URL} | iex"'
-    if shutil.which("wget") and not shutil.which("curl"):
-        return f"wget -qO- {UNIX_DATABRICKS_INSTALL_URL} | sh"
-    return f"curl -fsSL {UNIX_DATABRICKS_INSTALL_URL} | sh"
-
-
 def _parse_databricks_cli_version(output: str) -> tuple[int, int, int] | None:
     # Example output: "Databricks CLI v0.299.2"
     match = re.search(r"v?(\d+)\.(\d+)\.(\d+)", output)
     if not match:
         return None
     return (int(match.group(1)), int(match.group(2)), int(match.group(3)))
+
+
+def _run_databricks_cli_installer(brew_subcommand: str = "install") -> None:
+    system = platform.system()
+    try:
+        if system == "Windows":
+            run(
+                ["powershell", "-Command", f"irm {WINDOWS_DATABRICKS_INSTALL_URL} | iex"],
+                timeout=240,
+            )
+        elif system == "Darwin" and shutil.which("brew"):
+            run(["brew", brew_subcommand, "databricks"], timeout=240)
+        elif shutil.which("curl"):
+            run(["sh", "-c", f"curl -fsSL {UNIX_DATABRICKS_INSTALL_URL} | sudo sh"], timeout=240)
+        elif shutil.which("wget"):
+            run(["sh", "-c", f"wget -qO- {UNIX_DATABRICKS_INSTALL_URL} | sudo sh"], timeout=240)
+        else:
+            raise RuntimeError("Neither curl nor wget is available.")
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, RuntimeError) as exc:
+        raise RuntimeError("Failed to install/upgrade Databricks CLI automatically.") from exc
 
 
 def ensure_databricks_cli_version() -> None:
@@ -106,10 +118,11 @@ def ensure_databricks_cli_version() -> None:
     if version < MIN_DATABRICKS_CLI_VERSION:
         current = ".".join(str(n) for n in version)
         required = ".".join(str(n) for n in MIN_DATABRICKS_CLI_VERSION)
-        raise RuntimeError(
-            f"Databricks CLI v{current} is too old (need v{required} or newer). "
-            f"Upgrade with:\n    {_databricks_upgrade_command()}"
+        print_warning(
+            f"Databricks CLI v{current} is too old (need v{required} or newer). Upgrading..."
         )
+        _run_databricks_cli_installer(brew_subcommand="upgrade")
+        ensure_databricks_cli_version()
 
 
 def install_databricks_cli() -> None:
@@ -117,34 +130,9 @@ def install_databricks_cli() -> None:
         ensure_databricks_cli_version()
         return
 
-    system = platform.system()
     print_section("Bootstrap")
     print_warning("`databricks` was not found. Installing Databricks CLI...")
-
-    try:
-        if system == "Windows":
-            run(
-                [
-                    "powershell",
-                    "-Command",
-                    f"irm {WINDOWS_DATABRICKS_INSTALL_URL} | iex",
-                ],
-                timeout=240,
-            )
-        elif shutil.which("curl"):
-            run(
-                ["sh", "-c", f"curl -fsSL {UNIX_DATABRICKS_INSTALL_URL} | sh"],
-                timeout=240,
-            )
-        elif shutil.which("wget"):
-            run(
-                ["sh", "-c", f"wget -qO- {UNIX_DATABRICKS_INSTALL_URL} | sh"],
-                timeout=240,
-            )
-        else:
-            raise RuntimeError("Neither curl nor wget is available.")
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, RuntimeError) as exc:
-        raise RuntimeError("Failed to install Databricks CLI automatically.") from exc
+    _run_databricks_cli_installer(brew_subcommand="install")
 
     if not shutil.which("databricks"):
         raise RuntimeError(
