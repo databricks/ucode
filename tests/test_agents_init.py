@@ -182,67 +182,13 @@ class TestInstallToolBinary:
                 return "/usr/bin/npm"
             return None
 
-        def fake_run(args, **kwargs):
-            cmd = args[1] if len(args) > 1 else ""
-            if cmd == "config":
-                return subprocess.CompletedProcess(args, 0, stdout="https://registry.npmjs.org/\n")
-            if cmd == "ping":
-                return subprocess.CompletedProcess(args, 0, stdout="")
-            if cmd == "install":
-                raise subprocess.CalledProcessError(1, args)
-            raise AssertionError(f"unexpected npm subcommand: {cmd}")
+        def fake_run(*args, **kwargs):
+            raise subprocess.CalledProcessError(1, args[0])
 
         monkeypatch.setattr("ucode.agents.shutil.which", fake_which)
         monkeypatch.setattr("ucode.agents.subprocess.run", fake_run)
 
         assert install_tool_binary("opencode", strict=False) is False
-
-    def test_strict_raises_when_registry_unreachable(self, monkeypatch):
-        def fake_which(binary: str) -> str | None:
-            if binary == "npm":
-                return "/usr/bin/npm"
-            return None
-
-        def fake_run(args, **kwargs):
-            cmd = args[1] if len(args) > 1 else ""
-            if cmd == "config":
-                return subprocess.CompletedProcess(
-                    args, 0, stdout="https://corp.registry.example/\n"
-                )
-            if cmd == "ping":
-                return subprocess.CompletedProcess(args, 1, stdout="", stderr="ENETUNREACH")
-            raise AssertionError(f"npm install must not run when registry probe fails: {cmd}")
-
-        monkeypatch.setattr("ucode.agents.shutil.which", fake_which)
-        monkeypatch.setattr("ucode.agents.subprocess.run", fake_run)
-
-        with pytest.raises(RuntimeError, match="corp.registry.example"):
-            install_tool_binary("opencode", strict=True)
-
-    def test_non_strict_returns_false_when_registry_unreachable(self, monkeypatch):
-        def fake_which(binary: str) -> str | None:
-            if binary == "npm":
-                return "/usr/bin/npm"
-            return None
-
-        install_called = False
-
-        def fake_run(args, **kwargs):
-            nonlocal install_called
-            cmd = args[1] if len(args) > 1 else ""
-            if cmd == "config":
-                return subprocess.CompletedProcess(args, 0, stdout="\n")
-            if cmd == "ping":
-                return subprocess.CompletedProcess(args, 1, stdout="", stderr="")
-            if cmd == "install":
-                install_called = True
-            return subprocess.CompletedProcess(args, 0)
-
-        monkeypatch.setattr("ucode.agents.shutil.which", fake_which)
-        monkeypatch.setattr("ucode.agents.subprocess.run", fake_run)
-
-        assert install_tool_binary("opencode", strict=False) is False
-        assert install_called is False, "install must be skipped when ping fails"
 
     def test_ensure_tool_binary_available_raises_when_missing(self, monkeypatch):
         monkeypatch.setattr("ucode.agents.shutil.which", lambda _: None)

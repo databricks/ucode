@@ -67,27 +67,6 @@ def normalize_tool(tool: str) -> str:
     return normalized
 
 
-def _check_npm_registry_reachable() -> tuple[bool, str]:
-    """Probe the configured npm registry. Returns (ok, registry_url)."""
-    try:
-        registry = subprocess.run(
-            ["npm", "config", "get", "registry"],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        ).stdout.strip()
-    except (OSError, subprocess.TimeoutExpired):
-        registry = ""
-    try:
-        result = subprocess.run(
-            ["npm", "ping"], check=False, capture_output=True, text=True, timeout=8
-        )
-        return result.returncode == 0, registry
-    except (OSError, subprocess.TimeoutExpired):
-        return False, registry
-
-
 def install_tool_binary(tool: str, *, strict: bool = True) -> bool:
     spec = TOOL_SPECS[tool]
     binary = spec["binary"]
@@ -104,23 +83,7 @@ def install_tool_binary(tool: str, *, strict: bool = True) -> bool:
         return False
 
     print_section("Bootstrap")
-    print_warning(f"`{binary}` was not found.")
-
-    with spinner("Checking npm registry reachability..."):
-        ok, registry = _check_npm_registry_reachable()
-    if not ok:
-        registry_label = registry or "the configured npm registry"
-        message = (
-            f"Cannot reach {registry_label} (`npm ping` failed). "
-            f"Check your network or npm registry config, then retry."
-        )
-        if strict:
-            raise RuntimeError(message)
-        print_warning(f"{message} Continuing without it.")
-        return False
-
-    print_warning(f"Installing {spec['display']}...")
-
+    print_warning(f"`{binary}` was not found. Installing {spec['display']}...")
     try:
         subprocess.run(["npm", "install", "-g", package], check=True, timeout=300)
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
