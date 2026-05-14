@@ -268,6 +268,16 @@ app = typer.Typer(
 )
 configure_app = typer.Typer(add_completion=False, no_args_is_help=False)
 app.add_typer(configure_app, name="configure", help="Configure workspace and tool settings.")
+mcp_app = typer.Typer(add_completion=False, no_args_is_help=True)
+app.add_typer(mcp_app, name="mcp", help="MCP servers exposed by ucode.")
+
+
+@mcp_app.command("web-search")
+def mcp_web_search_cmd() -> None:
+    """Run the web_search MCP server over stdio. Invoked as a subprocess by Claude Code."""
+    from ucode.mcp_web_search import serve
+
+    serve()
 
 
 def _auto_configure_tool(tool: str) -> None:

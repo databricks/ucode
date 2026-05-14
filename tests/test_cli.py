@@ -121,6 +121,18 @@ class TestSubcommandRouting:
         assert result.exit_code != 0
 
 
+class TestMcpSubcommands:
+    def test_web_search_subcommand_help(self):
+        result = runner.invoke(app, ["mcp", "web-search", "--help"])
+        assert result.exit_code == 0
+        assert "Usage:" in result.output
+
+    def test_mcp_group_lists_web_search(self):
+        result = runner.invoke(app, ["mcp", "--help"])
+        assert result.exit_code == 0
+        assert "web-search" in result.output
+
+
 class TestAutoConfigureOnFirstRun:
     def test_triggers_when_no_workspace(self):
         """Auto-configure runs when state has no workspace."""

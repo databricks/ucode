@@ -72,6 +72,56 @@ class TestRenderOverlay:
         assert len(env_keys) > 0
 
 
+class TestRenderOverlayWebSearchDisable:
+    def test_settings_overlay_never_includes_mcp_servers(self):
+        # MCP servers belong in ~/.claude.json, not settings.json.
+        overlay, _ = claude.render_overlay(WS, "s4", disable_web_search=True)
+        assert "mcpServers" not in overlay
+
+    def test_disables_builtin_websearch_when_requested(self):
+        overlay, _ = claude.render_overlay(WS, "s4", disable_web_search=True)
+        assert overlay["disabledTools"] == ["WebSearch"]
+
+    def test_no_disable_when_not_requested(self):
+        overlay, _ = claude.render_overlay(WS, "s4", disable_web_search=False)
+        assert "disabledTools" not in overlay
+
+    def test_managed_keys_include_disabled_tools_when_set(self):
+        _, keys = claude.render_overlay(WS, "s4", disable_web_search=True)
+        assert ["disabledTools"] in keys
+
+    def test_managed_keys_omit_disabled_tools_when_not_set(self):
+        _, keys = claude.render_overlay(WS, "s4", disable_web_search=False)
+        assert ["disabledTools"] not in keys
+
+
+class TestWebSearchMcpEntry:
+    def test_entry_shape(self):
+        entry = claude._web_search_mcp_entry(WS, "databricks-gpt-5")
+        assert entry["type"] == "stdio"
+        assert entry["args"] == ["mcp", "web-search"]
+        assert entry["env"]["DATABRICKS_HOST"] == WS
+        assert entry["env"]["UCODE_WEB_SEARCH_MODEL"] == "databricks-gpt-5"
+        assert isinstance(entry["command"], str) and entry["command"]
+
+
+class TestResolveWebSearchModel:
+    def test_uses_explicit_override(self):
+        assert claude._resolve_web_search_model({"web_search_model": "explicit"}) == "explicit"
+
+    def test_falls_back_to_first_codex_model(self):
+        state = {"codex_models": ["m1", "m2"]}
+        assert claude._resolve_web_search_model(state) == "m1"
+
+    def test_returns_none_when_no_codex_models(self):
+        assert claude._resolve_web_search_model({}) is None
+        assert claude._resolve_web_search_model({"codex_models": []}) is None
+
+    def test_override_wins_over_codex_models(self):
+        state = {"web_search_model": "winner", "codex_models": ["loser"]}
+        assert claude._resolve_web_search_model(state) == "winner"
+
+
 class TestClaudeDefaultModel:
     def test_prefers_opus(self):
         state = {"claude_models": {"sonnet": "s4", "opus": "o4", "haiku": "h4"}}
@@ -104,6 +154,82 @@ class TestClaudeValidateCmd:
         assert "--max-turns" in cmd
         idx = cmd.index("--max-turns")
         assert cmd[idx + 1] == "1"
+
+
+class TestWriteToolConfigMcpRegistration:
+    def _common_patches(self, monkeypatch, calls):
+        monkeypatch.setattr(claude, "backup_existing_file", lambda *a, **kw: True)
+        monkeypatch.setattr(claude, "read_json_safe", lambda path: {})
+        monkeypatch.setattr(claude, "write_json_file", lambda path, payload: None)
+        monkeypatch.setattr(claude, "save_state", lambda state: None)
+        monkeypatch.setattr(
+            claude,
+            "_register_web_search_mcp",
+            lambda ws, model: calls.append(("register", ws, model)),
+        )
+
+    def test_registers_mcp_when_codex_model_available(self, monkeypatch):
+        calls: list = []
+        self._common_patches(monkeypatch, calls)
+        state = {"workspace": WS, "codex_models": ["databricks-gpt-5"]}
+        claude.write_tool_config(state, "databricks-claude-sonnet-4")
+        assert calls == [("register", WS, "databricks-gpt-5")]
+
+    def test_skips_registration_without_codex_model(self, monkeypatch):
+        calls: list = []
+        self._common_patches(monkeypatch, calls)
+        state = {"workspace": WS, "codex_models": []}
+        claude.write_tool_config(state, "databricks-claude-sonnet-4")
+        assert calls == []
+
+    def test_explicit_override_used_over_codex_models(self, monkeypatch):
+        calls: list = []
+        self._common_patches(monkeypatch, calls)
+        state = {
+            "workspace": WS,
+            "web_search_model": "explicit-model",
+            "codex_models": ["other-model"],
+        }
+        claude.write_tool_config(state, "databricks-claude-sonnet-4")
+        assert calls == [("register", WS, "explicit-model")]
+
+
+class TestRegisterWebSearchMcp:
+    def test_clears_existing_then_adds(self, monkeypatch):
+        import ucode.mcp as mcp_mod
+
+        removed: list[str] = []
+        added: list = []
+        monkeypatch.setattr(
+            mcp_mod, "remove_claude_mcp_server", lambda name, scope: removed.append(scope) or True
+        )
+        monkeypatch.setattr(
+            mcp_mod,
+            "add_claude_mcp_server",
+            lambda name, entry, scope=mcp_mod.MCP_USER_SCOPE: added.append((name, entry, scope)),
+        )
+        claude._register_web_search_mcp(WS, "databricks-gpt-5")
+        assert removed == list(mcp_mod.MCP_CLEANUP_SCOPES)
+        assert len(added) == 1
+        name, entry, _ = added[0]
+        assert name == "web_search"
+        assert entry["env"]["UCODE_WEB_SEARCH_MODEL"] == "databricks-gpt-5"
+
+    def test_remove_failures_are_swallowed(self, monkeypatch):
+        import ucode.mcp as mcp_mod
+
+        def boom(name, scope):
+            raise RuntimeError("nope")
+
+        added: list = []
+        monkeypatch.setattr(mcp_mod, "remove_claude_mcp_server", boom)
+        monkeypatch.setattr(
+            mcp_mod,
+            "add_claude_mcp_server",
+            lambda name, entry, scope=mcp_mod.MCP_USER_SCOPE: added.append(name),
+        )
+        claude._register_web_search_mcp(WS, "m")
+        assert added == ["web_search"]
 
 
 class TestClaudeLaunch:
