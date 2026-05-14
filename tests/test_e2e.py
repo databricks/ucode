@@ -690,6 +690,103 @@ class TestPiLaunch:
 
 
 # ---------------------------------------------------------------------------
+# Web search MCP — Databricks-backed Responses API
+# ---------------------------------------------------------------------------
+#
+# Verifies the web_search MCP path against a real workspace:
+#   1. The Responses API call with tools=[{type: web_search}] returns text.
+#   2. The MCP server subprocess answers initialize/tools/list and tools/call
+#      correctly when DATABRICKS_HOST and UCODE_WEB_SEARCH_MODEL are set.
+#
+# Skipped when the workspace has no Responses-API endpoint (codex_models
+# empty), since web_search is unavailable in that case by design.
+# ---------------------------------------------------------------------------
+
+
+def _first_codex_model(e2e_state: dict) -> str:
+    models = e2e_state.get("codex_models") or []
+    if not models:
+        pytest.skip("No Responses-API (codex) models available on this workspace")
+    return models[0]
+
+
+class TestWebSearchResponsesApi:
+    """Hit the real Databricks Codex (Responses API) endpoint with native
+    web_search and assert the model returns non-empty text."""
+
+    def test_call_responses_api_returns_text(self, monkeypatch, e2e_state, e2e_workspace):
+        from ucode import mcp_web_search
+
+        model = _first_codex_model(e2e_state)
+        monkeypatch.setenv("DATABRICKS_HOST", e2e_workspace)
+        monkeypatch.setenv("UCODE_WEB_SEARCH_MODEL", model)
+
+        payload = mcp_web_search._call_responses_api(
+            "What is today's date? Use web search to confirm."
+        )
+        assert isinstance(payload, dict)
+        text = mcp_web_search._extract_response_text(payload)
+        assert text, (
+            f"Responses API returned no text output. Full payload (truncated): {str(payload)[:500]}"
+        )
+
+
+class TestWebSearchMcpSubprocess:
+    """Drive the `ucode mcp web-search` subprocess over stdio and assert the
+    full MCP protocol works end-to-end with a real workspace."""
+
+    def test_subprocess_initialize_list_and_call(self, e2e_state, e2e_workspace):
+        if not shutil.which("ucode"):
+            pytest.skip("`ucode` binary is not on PATH")
+        model = _first_codex_model(e2e_state)
+
+        env = {
+            **os.environ,
+            "DATABRICKS_HOST": e2e_workspace,
+            "UCODE_WEB_SEARCH_MODEL": model,
+        }
+        # Three MCP requests, one per line.
+        requests = [
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}',
+            '{"jsonrpc":"2.0","id":2,"method":"tools/list"}',
+            (
+                '{"jsonrpc":"2.0","id":3,"method":"tools/call",'
+                '"params":{"name":"web_search","arguments":'
+                '{"query":"latest anthropic announcement"}}}'
+            ),
+        ]
+        proc = subprocess.run(
+            ["ucode", "mcp", "web-search"],
+            input="\n".join(requests) + "\n",
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=120,
+        )
+        assert proc.returncode == 0, (
+            f"ucode mcp web-search exited {proc.returncode}; stderr={proc.stderr[:500]!r}"
+        )
+
+        import json as _json
+
+        responses = [_json.loads(line) for line in proc.stdout.strip().splitlines()]
+        assert len(responses) == 3, f"Expected 3 responses, got {len(responses)}: {responses}"
+
+        init = responses[0]["result"]
+        assert init["serverInfo"]["name"] == "ucode-web-search"
+
+        tools = responses[1]["result"]["tools"]
+        assert any(t["name"] == "web_search" for t in tools)
+
+        call_result = responses[2]["result"]
+        assert "isError" not in call_result, (
+            f"web_search tool call returned an error: {call_result['content'][0]['text'][:300]}"
+        )
+        text = call_result["content"][0]["text"]
+        assert isinstance(text, str) and text.strip(), "tool call returned empty text"
+
+
+# ---------------------------------------------------------------------------
 # Auth recovery tests
 # ---------------------------------------------------------------------------
 #
