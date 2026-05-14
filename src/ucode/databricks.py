@@ -222,13 +222,16 @@ def ensure_databricks_auth(workspace: str) -> None:
     run_databricks_login(workspace)
 
 
-def get_databricks_token(workspace: str) -> str:
+def get_databricks_token(workspace: str, *, force_refresh: bool = False) -> str:
     env = build_databricks_cli_env(workspace)
+    cmd = ["databricks", "auth", "token", "--host", workspace, "--output", "json"]
+    if force_refresh:
+        cmd.append("--force-refresh")
 
     def _fetch() -> str:
         try:
             result = run(
-                ["databricks", "auth", "token", "--host", workspace, "--output", "json"],
+                cmd,
                 capture_output=True,
                 text=True,
                 env=env,

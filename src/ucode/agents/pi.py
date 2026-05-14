@@ -148,10 +148,12 @@ def write_tool_config(
     state: dict,
     model: str,
     token: str | None = None,
+    *,
+    force_refresh: bool = False,
 ) -> tuple[dict, str]:
     backup_existing_file(PI_CONFIG_PATH, PI_BACKUP_PATH)
     if token is None:
-        token = get_databricks_token(state["workspace"])
+        token = get_databricks_token(state["workspace"], force_refresh=force_refresh)
     pi_base_urls = state.get("base_urls", {}).get("pi") or build_pi_base_urls(state["workspace"])
     overlay, managed_keys = render_overlay(
         model,
@@ -186,18 +188,18 @@ def default_model(state: dict) -> str | None:
     return gemini_models[0] if gemini_models else None
 
 
-def _refresh_token_once(state: dict) -> str:
+def _refresh_token_once(state: dict, *, force_refresh: bool = False) -> str:
     model = default_model(state)
     if not model:
         raise RuntimeError("No Pi model is available on this workspace.")
-    _, token = write_tool_config(state, model)
+    _, token = write_tool_config(state, model, force_refresh=force_refresh)
     return token
 
 
 def _refresh_forever(state: dict, stop_event: threading.Event) -> None:
     while not stop_event.wait(TOKEN_REFRESH_INTERVAL_SECONDS):
         try:
-            _refresh_token_once(state)
+            _refresh_token_once(state, force_refresh=True)
         except RuntimeError:
             continue
 

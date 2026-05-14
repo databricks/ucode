@@ -433,7 +433,10 @@ class TestGeminiLaunch:
         for model in gemini_models:
             with pytest.MonkeyPatch().context() as mp:
                 mp.setattr("ucode.state.save_state", lambda s: None)
-                mp.setattr("ucode.agents.gemini.get_databricks_token", lambda ws: e2e_token)
+                mp.setattr(
+                    "ucode.agents.gemini.get_databricks_token",
+                    lambda ws, **kwargs: e2e_token,
+                )
                 state = {**e2e_state, "workspace": e2e_workspace}
                 gemini.write_tool_config(state, model, token=e2e_token)
                 # Exercise the real production validate flow — same code path
@@ -521,7 +524,10 @@ class TestOpencodeLaunch:
 
             with pytest.MonkeyPatch().context() as mp:
                 mp.setattr("ucode.state.save_state", lambda s: None)
-                mp.setattr("ucode.agents.opencode.get_databricks_token", lambda ws: e2e_token)
+                mp.setattr(
+                    "ucode.agents.opencode.get_databricks_token",
+                    lambda ws, **kwargs: e2e_token,
+                )
                 opencode.write_tool_config(
                     {**e2e_state, "workspace": e2e_workspace},
                     model,
@@ -660,7 +666,10 @@ class TestPiLaunch:
 
             with pytest.MonkeyPatch().context() as mp:
                 mp.setattr("ucode.state.save_state", lambda s: None)
-                mp.setattr("ucode.agents.pi.get_databricks_token", lambda ws: e2e_token)
+                mp.setattr(
+                    "ucode.agents.pi.get_databricks_token",
+                    lambda ws, **kwargs: e2e_token,
+                )
                 pi.write_tool_config(
                     {**e2e_state, "workspace": e2e_workspace},
                     model,

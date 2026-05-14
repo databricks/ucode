@@ -122,10 +122,12 @@ def write_tool_config(
     state: dict,
     model: str,
     token: str | None = None,
+    *,
+    force_refresh: bool = False,
 ) -> tuple[dict, str]:
     backup_existing_file(COPILOT_ENV_PATH, COPILOT_BACKUP_PATH)
     if token is None:
-        token = get_databricks_token(state["workspace"])
+        token = get_databricks_token(state["workspace"], force_refresh=force_refresh)
     overlay = render_env_overlay(state["workspace"], model, token)
     existing = parse_dotenv(COPILOT_ENV_PATH)
     for key in LEGACY_ENV_KEYS:
@@ -137,18 +139,18 @@ def write_tool_config(
     return state, token
 
 
-def _refresh_token_once(state: dict) -> tuple[str, str]:
+def _refresh_token_once(state: dict, *, force_refresh: bool = False) -> tuple[str, str]:
     model = default_model(state)
     if not model:
         raise RuntimeError("No Copilot model is available on this workspace.")
-    _, token = write_tool_config(state, model)
+    _, token = write_tool_config(state, model, force_refresh=force_refresh)
     return model, token
 
 
 def _refresh_forever(state: dict, stop_event: threading.Event) -> None:
     while not stop_event.wait(TOKEN_REFRESH_INTERVAL_SECONDS):
         try:
-            _refresh_token_once(state)
+            _refresh_token_once(state, force_refresh=True)
         except RuntimeError:
             continue
 
