@@ -279,7 +279,7 @@ class TestGeminiLaunch:
         self, tmp_path, monkeypatch, e2e_state, e2e_workspace, e2e_token
     ):
         import ucode.config_io as config_io_mod
-        from ucode.agents import gemini
+        from ucode.agents import gemini, validate_tool
 
         _require_binary("gemini")
         gemini_models: list = e2e_state.get("gemini_models") or []
@@ -296,19 +296,15 @@ class TestGeminiLaunch:
             with pytest.MonkeyPatch().context() as mp:
                 mp.setattr("ucode.state.save_state", lambda s: None)
                 mp.setattr("ucode.agents.gemini.get_databricks_token", lambda ws: e2e_token)
-                gemini.write_tool_config(
-                    {**e2e_state, "workspace": e2e_workspace}, model, token=e2e_token
-                )
-
-            env = gemini.build_runtime_env(e2e_workspace, model, e2e_token)
-            cmd = gemini.validate_cmd("gemini")
-            result = _run_agent(cmd, env=env, timeout=90)
-            combined = (result.stdout + result.stderr).strip()
-            if result.returncode != 0 or not combined:
-                failures.append(
-                    f"model={model} rc={result.returncode} "
-                    f"stdout={result.stdout[:300]!r} stderr={result.stderr[:300]!r}"
-                )
+                state = {**e2e_state, "workspace": e2e_workspace}
+                gemini.write_tool_config(state, model, token=e2e_token)
+                # Exercise the real production validate flow — same code path
+                # that `ucode configure` invokes after writing the config.
+                captured_state = state
+                mp.setattr("ucode.agents.load_state", lambda s=captured_state: s)
+                ok, err = validate_tool("gemini")
+            if not ok:
+                failures.append(f"model={model} err={err}")
 
         assert not failures, "Gemini launch failures:\n" + "\n".join(failures)
 
