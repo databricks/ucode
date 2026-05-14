@@ -162,6 +162,136 @@ class TestSqlWarehouseDiscovery:
 
 
 # ---------------------------------------------------------------------------
+# Configure flow with user-selected subset
+# ---------------------------------------------------------------------------
+#
+# Verifies that when the user picks a subset in the multi-select prompt,
+# only those tools get configured and previously-configured tools are
+# preserved in state["available_tools"].
+# ---------------------------------------------------------------------------
+
+
+class TestConfigureSubset:
+    def _redirect_config_paths(self, monkeypatch, tmp_path):
+        """Redirect every agent's config path into tmp_path so the test
+        doesn't touch the developer's real ~/.codex, ~/.claude, etc."""
+        import ucode.config_io as config_io_mod
+        from ucode.agents import claude, codex, copilot, gemini, opencode
+
+        monkeypatch.setattr(config_io_mod, "APP_DIR", tmp_path)
+
+        codex_dir = tmp_path / "codex_home" / ".codex"
+        codex_dir.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr(codex, "CODEX_CONFIG_PATH", codex_dir / "config.toml")
+        monkeypatch.setattr(codex, "CODEX_BACKUP_PATH", tmp_path / "codex.backup.toml")
+
+        monkeypatch.setattr(claude, "CLAUDE_SETTINGS_PATH", tmp_path / "claude-settings.json")
+        monkeypatch.setattr(claude, "CLAUDE_BACKUP_PATH", tmp_path / "claude.backup.json")
+
+        monkeypatch.setattr(gemini, "GEMINI_ENV_PATH", tmp_path / ".gemini-env")
+        monkeypatch.setattr(gemini, "GEMINI_SETTINGS_PATH", tmp_path / "gemini-settings.json")
+        monkeypatch.setattr(gemini, "GEMINI_BACKUP_PATH", tmp_path / "gemini.backup")
+
+        monkeypatch.setattr(opencode, "OPENCODE_CONFIG_PATH", tmp_path / "opencode.json")
+        monkeypatch.setattr(opencode, "OPENCODE_BACKUP_PATH", tmp_path / "opencode.backup.json")
+
+        monkeypatch.setattr(copilot, "COPILOT_ENV_PATH", tmp_path / ".copilot-env")
+        monkeypatch.setattr(copilot, "COPILOT_BACKUP_PATH", tmp_path / "copilot.backup")
+
+        return codex_dir / "config.toml"
+
+    def test_only_picks_codex_writes_only_codex_config(self, tmp_path, monkeypatch, e2e_workspace):
+        """User selects only codex → only codex's config file is written and
+        state['available_tools'] contains exactly ['codex']."""
+        import ucode.cli as cli_mod
+        import ucode.state as state_mod
+        from ucode.state import load_state
+
+        codex_path = self._redirect_config_paths(monkeypatch, tmp_path)
+        monkeypatch.setattr(state_mod, "STATE_PATH", tmp_path / "state.json")
+        # Don't actually run `databricks auth login`; the developer running
+        # this suite is already authenticated.
+        monkeypatch.setattr("ucode.databricks.run_databricks_login", lambda ws: None)
+        # Skip the workspace prompt and the multi-select picker.
+        monkeypatch.setattr(cli_mod, "_prompt_for_configuration", lambda tool=None: e2e_workspace)
+        monkeypatch.setattr(cli_mod, "prompt_for_tools", lambda available: ["codex"])
+        # Skip binary install + post-config validation; we're testing the
+        # selection plumbing, not the agent binaries themselves.
+        monkeypatch.setattr(cli_mod, "install_tool_binary", lambda tool, strict=False: True)
+        monkeypatch.setattr(cli_mod, "validate_all_tools", lambda state: None)
+
+        rc = cli_mod.configure_workspace_command()
+        assert rc == 0
+        assert codex_path.exists(), "codex config should have been written"
+        assert not (tmp_path / "claude-settings.json").exists(), "claude config should NOT exist"
+        assert not (tmp_path / ".gemini-env").exists(), "gemini env should NOT exist"
+        assert not (tmp_path / "opencode.json").exists(), "opencode config should NOT exist"
+        assert not (tmp_path / ".copilot-env").exists(), "copilot env should NOT exist"
+
+        state = load_state()
+        assert state["available_tools"] == ["codex"]
+
+    def test_rerun_with_different_pick_preserves_previous(
+        self, tmp_path, monkeypatch, e2e_workspace
+    ):
+        """First run picks codex; second run picks claude. State should end
+        up with both tools in available_tools (the un-picked codex is not
+        dropped on the second run)."""
+        import ucode.cli as cli_mod
+        import ucode.state as state_mod
+        from ucode.state import load_state
+
+        self._redirect_config_paths(monkeypatch, tmp_path)
+        monkeypatch.setattr(state_mod, "STATE_PATH", tmp_path / "state.json")
+        monkeypatch.setattr("ucode.databricks.run_databricks_login", lambda ws: None)
+        monkeypatch.setattr(cli_mod, "_prompt_for_configuration", lambda tool=None: e2e_workspace)
+        monkeypatch.setattr(cli_mod, "install_tool_binary", lambda tool, strict=False: True)
+        monkeypatch.setattr(cli_mod, "validate_all_tools", lambda state: None)
+
+        # First run: pick codex.
+        monkeypatch.setattr(cli_mod, "prompt_for_tools", lambda available: ["codex"])
+        assert cli_mod.configure_workspace_command() == 0
+        assert load_state()["available_tools"] == ["codex"]
+
+        # Claude needs to be available on this workspace for the second run
+        # to be a meaningful test.
+        from ucode.databricks import fetch_ai_gateway_claude_models, get_databricks_token
+
+        token = get_databricks_token(e2e_workspace)
+        if not fetch_ai_gateway_claude_models(e2e_workspace, token):
+            pytest.skip("No Claude models on this workspace; can't test multi-tool merge.")
+
+        # Second run: pick claude only. Codex should remain in available_tools.
+        monkeypatch.setattr(cli_mod, "prompt_for_tools", lambda available: ["claude"])
+        assert cli_mod.configure_workspace_command() == 0
+        assert set(load_state()["available_tools"]) == {"codex", "claude"}
+
+    def test_empty_pick_returns_zero_and_writes_nothing(self, tmp_path, monkeypatch, e2e_workspace):
+        """User unchecks everything in the picker → no config files are
+        written and the command exits 0."""
+        import ucode.cli as cli_mod
+        import ucode.state as state_mod
+
+        codex_path = self._redirect_config_paths(monkeypatch, tmp_path)
+        monkeypatch.setattr(state_mod, "STATE_PATH", tmp_path / "state.json")
+        monkeypatch.setattr("ucode.databricks.run_databricks_login", lambda ws: None)
+        monkeypatch.setattr(cli_mod, "_prompt_for_configuration", lambda tool=None: e2e_workspace)
+        monkeypatch.setattr(cli_mod, "prompt_for_tools", lambda available: [])
+        install_calls: list[str] = []
+        monkeypatch.setattr(
+            cli_mod,
+            "install_tool_binary",
+            lambda tool, strict=False: install_calls.append(tool) or True,
+        )
+        monkeypatch.setattr(cli_mod, "validate_all_tools", lambda state: None)
+
+        rc = cli_mod.configure_workspace_command()
+        assert rc == 0
+        assert not codex_path.exists()
+        assert install_calls == [], "no tool binaries should be installed when nothing is picked"
+
+
+# ---------------------------------------------------------------------------
 # Agent launch tests — one test per (agent, model)
 # ---------------------------------------------------------------------------
 #
