@@ -13,7 +13,6 @@ from ucode.agents import (
     configure_all_tools,
     configure_single_tool,
     configure_tool,
-    default_model_for_tool,
     ensure_bootstrap_dependencies,
     ensure_provider_state,
     install_tool_binary,
@@ -199,8 +198,6 @@ def status() -> int:
         managed = bool(managed_configs.get(tool))
         config_path = spec["config_path"]
         print_kv("Coding Agent", spec["display"])
-        if tool != "codex":
-            print_kv("Model", default_model_for_tool(tool, state) or "not available")
         print_kv("Base URL", base_url)
         print_kv("Managed by Databricks", "yes" if managed else "no")
         print_kv("Config file", str(config_path) if config_path.exists() else "missing")

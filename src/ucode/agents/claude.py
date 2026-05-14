@@ -76,7 +76,7 @@ def write_tool_config(state: dict, model: str) -> dict:
 
 def default_model(state: dict) -> str | None:
     claude_models = state.get("claude_models") or {}
-    return claude_models.get("sonnet") or claude_models.get("opus") or claude_models.get("haiku")
+    return claude_models.get("opus") or claude_models.get("sonnet") or claude_models.get("haiku")
 
 
 def launch(state: dict, tool_args: list[str]) -> None:
