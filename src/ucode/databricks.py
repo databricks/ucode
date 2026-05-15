@@ -327,6 +327,108 @@ def list_databricks_connections(workspace: str) -> list[dict]:
         raise RuntimeError("Databricks connections listing returned invalid JSON.") from exc
 
 
+def _extract_genie_spaces_page(payload: object) -> tuple[list[dict], str | None]:
+    if not isinstance(payload, dict):
+        raise RuntimeError("Databricks Genie spaces listing returned invalid JSON.")
+
+    payload_dict = cast(dict[str, object], payload)
+    raw_spaces = payload_dict.get("spaces") or []
+    if not isinstance(raw_spaces, list):
+        raise RuntimeError("Databricks Genie spaces listing returned invalid JSON.")
+
+    next_page_token = payload_dict.get("next_page_token")
+    if next_page_token is not None and not isinstance(next_page_token, str):
+        raise RuntimeError("Databricks Genie spaces listing returned invalid JSON.")
+
+    return [item for item in raw_spaces if isinstance(item, dict)], next_page_token
+
+
+def list_genie_spaces(workspace: str) -> list[dict]:
+    env = build_databricks_cli_env(workspace)
+    spaces: list[dict] = []
+    page_token: str | None = None
+    seen_page_tokens: set[str] = set()
+
+    try:
+        while True:
+            cmd = [
+                "databricks",
+                "genie",
+                "list-spaces",
+                "--page-size",
+                "100",
+                "--output",
+                "json",
+            ]
+            if page_token:
+                cmd.extend(["--page-token", page_token])
+
+            result = run(
+                cmd,
+                capture_output=True,
+                text=True,
+                env=env,
+                timeout=30,
+            )
+            payload = json.loads(result.stdout or "{}")
+            page_spaces, page_token = _extract_genie_spaces_page(payload)
+            spaces.extend(page_spaces)
+
+            if not page_token:
+                return spaces
+            if page_token in seen_page_tokens:
+                raise RuntimeError(
+                    "Databricks Genie spaces listing returned a repeated page token."
+                )
+            seen_page_tokens.add(page_token)
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(
+            "Failed to list Databricks Genie spaces via `databricks genie list-spaces`."
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("Timed out while listing Databricks Genie spaces.") from exc
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Databricks Genie spaces listing returned invalid JSON.") from exc
+
+
+def _extract_apps_payload(payload: object) -> list[dict]:
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)]
+    if isinstance(payload, dict):
+        payload_dict = cast(dict[str, object], payload)
+        raw_apps = payload_dict.get("apps") or []
+        if isinstance(raw_apps, list):
+            return [item for item in raw_apps if isinstance(item, dict)]
+    raise RuntimeError("Databricks apps listing returned invalid JSON.")
+
+
+def list_databricks_apps(workspace: str) -> list[dict]:
+    env = build_databricks_cli_env(workspace)
+    try:
+        result = run(
+            [
+                "databricks",
+                "apps",
+                "list",
+                "--limit",
+                "1000",
+                "--output",
+                "json",
+            ],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=30,
+        )
+        return _extract_apps_payload(json.loads(result.stdout or "[]"))
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError("Failed to list Databricks apps via `databricks apps list`.") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("Timed out while listing Databricks apps.") from exc
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Databricks apps listing returned invalid JSON.") from exc
+
+
 def build_auth_shell_command(workspace: str) -> str:
     return (
         f"databricks auth token --host {workspace} --force-refresh --output json "

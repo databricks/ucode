@@ -133,6 +133,108 @@ class TestMcpSubcommands:
         assert "web-search" in result.output
 
 
+class TestStatus:
+    def test_shows_mcp_list_commands(self):
+        with patch("ucode.cli.load_state", return_value=MINIMAL_STATE):
+            result = runner.invoke(app, ["status"])
+
+        assert result.exit_code == 0, result.output
+        assert "Managed by Databricks" not in result.output
+        assert "MCP list command:" in result.output
+        assert "claude mcp list" in result.output
+        assert "codex mcp list" in result.output
+        assert "gemini mcp list" in result.output
+        assert "opencode mcp list" in result.output
+        assert "copilot mcp list" not in result.output
+
+    def test_shows_mcp_servers_configured_by_ucode(self):
+        state = {
+            **MINIMAL_STATE,
+            "mcp_servers": [
+                {
+                    "name": "github-mcp",
+                    "url": "https://example.databricks.com/api/2.0/mcp/external/github-mcp",
+                    "auth": "env:OAUTH_TOKEN",
+                    "clients": ["claude", "codex"],
+                },
+                {
+                    "name": "databricks-sql",
+                    "url": "https://example.databricks.com/api/2.0/mcp/sql",
+                    "auth": "env:OAUTH_TOKEN",
+                    "clients": ["gemini"],
+                },
+            ],
+        }
+        with patch("ucode.cli.load_state", return_value=state):
+            result = runner.invoke(app, ["status"])
+
+        assert result.exit_code == 0, result.output
+        assert "github-mcp" in result.output
+        assert "MCP servers: github-mcp" in result.output
+        assert "databricks-sql" in result.output
+        assert "MCP servers: databricks-sql" in result.output
+        assert "MCP Servers" not in result.output
+        assert "MCP Server:" not in result.output
+        assert "Configured tools:" not in result.output
+
+    def test_status_treats_available_tools_as_configured_agents(self):
+        state = {
+            **MINIMAL_STATE,
+            "available_tools": ["copilot"],
+            "base_urls": {
+                **MINIMAL_STATE["base_urls"],
+                "copilot": "https://example.databricks.com/ai-gateway/copilot",
+            },
+            "mcp_servers": [
+                {
+                    "name": "databricks-sql",
+                    "url": "https://example.databricks.com/api/2.0/mcp/sql",
+                    "auth": "env:OAUTH_TOKEN",
+                    "clients": ["copilot"],
+                }
+            ],
+        }
+        with patch("ucode.cli.load_state", return_value=state):
+            result = runner.invoke(app, ["status"])
+
+        assert result.exit_code == 0, result.output
+        assert "copilot mcp list" in result.output
+        assert "MCP servers: databricks-sql" in result.output
+        assert "codex mcp list" not in result.output
+        assert "claude mcp list" not in result.output
+        assert "gemini mcp list" not in result.output
+        assert "https://example.databricks.com/ai-gateway/anthropic" not in result.output
+        assert "https://example.databricks.com/ai-gateway/gemini" not in result.output
+
+
+class TestRevert:
+    def test_reverts_mcp_configs_before_clearing_state(self):
+        state = {
+            **MINIMAL_STATE,
+            "mcp_servers": [{"name": "github-mcp", "clients": ["claude"]}],
+        }
+        reverted_mcp: list[dict] = []
+        cleared: list[bool] = []
+
+        with (
+            patch("ucode.cli.load_state", return_value=state),
+            patch("ucode.cli.restore_file", return_value=False),
+            patch(
+                "ucode.cli.revert_mcp_configs",
+                side_effect=lambda loaded_state: (
+                    reverted_mcp.append(loaded_state) or {"claude": True}
+                ),
+            ),
+            patch("ucode.cli.clear_state", side_effect=lambda: cleared.append(True)),
+        ):
+            result = runner.invoke(app, ["revert"])
+
+        assert result.exit_code == 0, result.output
+        assert reverted_mcp == [state]
+        assert cleared == [True]
+        assert "Claude Code MCP config: restored" in result.output
+
+
 class TestAutoConfigureOnFirstRun:
     def test_triggers_when_no_workspace(self):
         """Auto-configure runs when state has no workspace."""

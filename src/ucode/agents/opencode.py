@@ -156,6 +156,17 @@ def write_mcp_server_config(name: str, url: str) -> bool:
     return removed
 
 
+def remove_mcp_server_config(name: str) -> bool:
+    existing = read_json_safe(OPENCODE_CONFIG_PATH)
+    mcp_servers = existing.get("mcp")
+    if not isinstance(mcp_servers, dict) or name not in mcp_servers:
+        return False
+    mcp_servers.pop(name)
+    existing["mcp"] = mcp_servers
+    write_json_file(OPENCODE_CONFIG_PATH, existing)
+    return True
+
+
 def default_model(state: dict) -> str | None:
     opencode_models = state.get("opencode_models") or {}
     anthropic = opencode_models.get("anthropic") or []

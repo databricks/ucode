@@ -118,6 +118,17 @@ def write_mcp_server_config(name: str, url: str) -> bool:
     return removed
 
 
+def remove_mcp_server_config(name: str) -> bool:
+    existing = read_json_safe(COPILOT_MCP_CONFIG_PATH)
+    mcp_servers = existing.get("mcpServers")
+    if not isinstance(mcp_servers, dict) or name not in mcp_servers:
+        return False
+    mcp_servers.pop(name)
+    existing["mcpServers"] = mcp_servers
+    write_json_file(COPILOT_MCP_CONFIG_PATH, existing)
+    return True
+
+
 def write_tool_config(
     state: dict,
     model: str,

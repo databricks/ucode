@@ -19,7 +19,9 @@ from ucode.databricks import (
     build_tool_base_url,
     ensure_databricks_cli_version,
     get_databricks_token,
+    list_databricks_apps,
     list_databricks_connections,
+    list_genie_spaces,
     workspace_hostname,
 )
 
@@ -208,6 +210,104 @@ class TestListDatabricksConnections:
 
         with pytest.raises(RuntimeError, match="invalid JSON"):
             list_databricks_connections(WS)
+
+
+class TestListGenieSpaces:
+    def test_lists_paginated_spaces_with_workspace_env(self, monkeypatch):
+        calls: list[dict] = []
+
+        def fake_run(args, **kwargs):
+            calls.append({"args": args, "kwargs": kwargs})
+            if "--page-token" in args:
+                payload = {"spaces": [{"space_id": "space-2", "title": "Second"}]}
+            else:
+                payload = {
+                    "spaces": [{"space_id": "space-1", "title": "First"}],
+                    "next_page_token": "next-page",
+                }
+            return subprocess.CompletedProcess(args, 0, stdout=json.dumps(payload))
+
+        monkeypatch.setattr(db_mod, "run", fake_run)
+
+        assert list_genie_spaces(WS) == [
+            {"space_id": "space-1", "title": "First"},
+            {"space_id": "space-2", "title": "Second"},
+        ]
+        assert calls[0]["args"] == [
+            "databricks",
+            "genie",
+            "list-spaces",
+            "--page-size",
+            "100",
+            "--output",
+            "json",
+        ]
+        assert calls[0]["kwargs"]["env"]["DATABRICKS_HOST"] == WS
+        assert calls[1]["args"][-2:] == ["--page-token", "next-page"]
+
+    def test_raises_on_invalid_json(self, monkeypatch):
+        def fake_run(args, **kwargs):
+            return subprocess.CompletedProcess(args, 0, stdout="not-json")
+
+        monkeypatch.setattr(db_mod, "run", fake_run)
+
+        with pytest.raises(RuntimeError, match="invalid JSON"):
+            list_genie_spaces(WS)
+
+
+class TestListDatabricksApps:
+    def test_lists_apps_with_workspace_env(self, monkeypatch):
+        calls: list[dict] = []
+
+        def fake_run(args, **kwargs):
+            calls.append({"args": args, "kwargs": kwargs})
+            payload = [
+                {
+                    "name": "my-app",
+                    "url": "https://my-app.example.databricksapps.com",
+                }
+            ]
+            return subprocess.CompletedProcess(args, 0, stdout=json.dumps(payload))
+
+        monkeypatch.setattr(db_mod, "run", fake_run)
+
+        assert list_databricks_apps(WS) == [
+            {
+                "name": "my-app",
+                "url": "https://my-app.example.databricksapps.com",
+            }
+        ]
+        assert calls[0]["args"] == [
+            "databricks",
+            "apps",
+            "list",
+            "--limit",
+            "1000",
+            "--output",
+            "json",
+        ]
+        assert calls[0]["kwargs"]["env"]["DATABRICKS_HOST"] == WS
+
+    def test_accepts_object_wrapped_apps(self, monkeypatch):
+        def fake_run(args, **kwargs):
+            return subprocess.CompletedProcess(
+                args,
+                0,
+                stdout=json.dumps({"apps": [{"name": "my-app", "url": "https://example.com"}]}),
+            )
+
+        monkeypatch.setattr(db_mod, "run", fake_run)
+
+        assert list_databricks_apps(WS) == [{"name": "my-app", "url": "https://example.com"}]
+
+    def test_raises_on_invalid_json(self, monkeypatch):
+        def fake_run(args, **kwargs):
+            return subprocess.CompletedProcess(args, 0, stdout="not-json")
+
+        monkeypatch.setattr(db_mod, "run", fake_run)
+
+        with pytest.raises(RuntimeError, match="invalid JSON"):
+            list_databricks_apps(WS)
 
 
 class TestEnsureAiGatewayV2:

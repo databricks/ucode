@@ -176,6 +176,32 @@ class TestMcpServerConfig:
         written = json.loads(config_file.read_text())
         assert written["mcp"]["github"]["url"] == f"{WS}/api/2.0/mcp/external/github"
 
+    def test_removes_mcp_server_without_clobbering_others(self, tmp_path, monkeypatch):
+        import ucode.agents.opencode as oc_mod
+
+        config_file = tmp_path / "opencode.json"
+        monkeypatch.setattr(oc_mod, "OPENCODE_CONFIG_PATH", config_file)
+        config_file.write_text(
+            json.dumps(
+                {
+                    "model": "existing-model",
+                    "mcp": {
+                        "github": {"url": "old"},
+                        "jira": {"url": "keep"},
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        removed = oc_mod.remove_mcp_server_config("github")
+
+        written = json.loads(config_file.read_text())
+        assert removed is True
+        assert "github" not in written["mcp"]
+        assert written["mcp"]["jira"] == {"url": "keep"}
+        assert written["model"] == "existing-model"
+
 
 class TestBuildRuntimeEnv:
     def test_sets_oauth_token_for_mcp(self):

@@ -39,7 +39,7 @@ from ucode.databricks import (
     normalize_workspace_url,
     run_databricks_login,
 )
-from ucode.mcp import configure_mcp_command
+from ucode.mcp import MCP_CLIENTS, configure_mcp_command, revert_mcp_configs
 from ucode.state import STATE_PATH, clear_state, load_state, save_state
 from ucode.ui import (
     console,
@@ -204,6 +204,8 @@ def status() -> int:
     state = load_state()
     workspace = state.get("workspace")
     managed_configs = state.get("managed_configs") or {}
+    mcp_servers = state.get("mcp_servers") or []
+    configured_tools = set(state.get("available_tools") or managed_configs.keys())
 
     console.print(heading("ucode status"))
     console.print(
@@ -215,23 +217,36 @@ def status() -> int:
 
     print_heading("Coding Agents")
     for tool, spec in TOOL_SPECS.items():
-        base_url = state.get("base_urls", {}).get(tool, "not configured")
-        managed = bool(managed_configs.get(tool))
+        configured = tool in configured_tools
+        base_url = (
+            state.get("base_urls", {}).get(tool, "not configured")
+            if configured
+            else "not configured"
+        )
         config_path = spec["config_path"]
         print_kv("Coding Agent", spec["display"])
+        print_kv("Configured", "yes" if configured else "no")
         print_kv("Base URL", base_url)
-        print_kv("Managed by Databricks", "yes" if managed else "no")
+        if configured and tool in MCP_CLIENTS:
+            tool_mcp_servers = [
+                str(server.get("name"))
+                for server in mcp_servers
+                if tool in (server.get("clients") or []) and server.get("name")
+            ]
+            print_kv("MCP list command", str(MCP_CLIENTS[tool]["list_command"]))
+            print_kv(
+                "MCP servers",
+                ", ".join(tool_mcp_servers) if tool_mcp_servers else "none saved by ucode",
+            )
         print_kv("Config file", str(config_path) if config_path.exists() else "missing")
         console.print()
 
-    print_heading("MCP Servers")
-    print_note("Run each tool's MCP list command to see configured MCP servers.")
-    print_note("Run `ucode configure mcp` to add Databricks MCP servers.")
-
     print_heading("State")
     print_kv("State file", str(STATE_PATH) if STATE_PATH.exists() else "missing")
-    print_note("Use `ucode configure` to update workspace settings or tool models.")
-    print_note("Use `ucode configure mcp` to add Databricks MCP servers to coding tools.")
+    print_note("Use `ucode configure` to update workspace settings or configure new tools.")
+    print_note(
+        "Use `ucode configure mcp` to add Databricks MCP servers to configured coding tools."
+    )
     print_note("Use `ucode revert` to clear managed configs and restore prior files.")
     return 0
 
@@ -239,6 +254,7 @@ def status() -> int:
 def revert() -> int:
     state = load_state()
     managed_configs = state.get("managed_configs") or {}
+    mcp_results = revert_mcp_configs(state)
 
     results: dict[str, bool] = {
         tool: restore_file(
@@ -252,6 +268,11 @@ def revert() -> int:
     print_kv("Workspace", state.get("workspace") or "none")
     for tool, spec in TOOL_SPECS.items():
         print_kv(f"{spec['display']} config", "restored" if results[tool] else "unchanged")
+    for client, spec in MCP_CLIENTS.items():
+        print_kv(
+            f"{spec['display']} MCP config",
+            "restored" if mcp_results.get(client) else "unchanged",
+        )
     print_success("ucode state cleared")
     return 0
 
