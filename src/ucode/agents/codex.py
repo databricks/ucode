@@ -19,6 +19,7 @@ from ucode.databricks import (
     get_databricks_token,
 )
 from ucode.state import mark_tool_managed, save_state
+from ucode.telemetry import agent_version, ucode_version
 
 CODEX_CONFIG_DIR = Path.home() / ".codex"
 CODEX_CONFIG_PATH = CODEX_CONFIG_DIR / "config.toml"
@@ -36,6 +37,7 @@ MANAGED_KEYS: list[list[str]] = [
     ["profile"],
     ["profiles", "default", "model_provider"],
     ["model_providers", "Databricks"],
+    ["model_providers", "Databricks", "http_headers"],
 ]
 
 
@@ -50,6 +52,9 @@ def render_overlay(workspace: str) -> dict:
                 "name": "Databricks AI Gateway",
                 "base_url": base_url,
                 "wire_api": "responses",
+                "http_headers": {
+                    "User-Agent": f"ucode/{ucode_version()} codex/{agent_version('codex')}",
+                },
                 "auth": {
                     "command": "sh",
                     "args": ["-c", auth_command],

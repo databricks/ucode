@@ -20,6 +20,7 @@ from ucode.databricks import (
     get_databricks_token,
 )
 from ucode.state import mark_tool_managed, save_state
+from ucode.telemetry import agent_version, ucode_version
 
 CLAUDE_CONFIG_DIR = Path.home() / ".claude"
 CLAUDE_SETTINGS_PATH = CLAUDE_CONFIG_DIR / "settings.json"
@@ -81,10 +82,20 @@ def render_overlay(
     from `~/.claude.json`, not `~/.claude/settings.json` — registration goes
     through `claude mcp add-json` (see `_register_web_search_mcp`)."""
     base_url = build_tool_base_url("claude", workspace)
+    # ANTHROPIC_CUSTOM_HEADERS is parsed as `key: value` pairs separated by
+    # newlines (Anthropic SDK convention). Setting User-Agent here overrides
+    # the SDK's default UA on outbound requests so the gateway can attribute
+    # traffic to ucode.
+    custom_headers = "\n".join(
+        [
+            "x-databricks-use-coding-agent-mode: true",
+            f"User-Agent: ucode/{ucode_version()} claude/{agent_version('claude')}",
+        ]
+    )
     env: dict[str, str] = {
         "ANTHROPIC_MODEL": model,
         "ANTHROPIC_BASE_URL": base_url,
-        "ANTHROPIC_CUSTOM_HEADERS": "x-databricks-use-coding-agent-mode: true",
+        "ANTHROPIC_CUSTOM_HEADERS": custom_headers,
         "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1",
         "CLAUDE_CODE_API_KEY_HELPER_TTL_MS": "900000",
     }

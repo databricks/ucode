@@ -47,6 +47,7 @@ from ucode.databricks import (
     get_databricks_token,
 )
 from ucode.state import mark_tool_managed, save_state
+from ucode.telemetry import agent_version, ucode_version
 
 PI_CONFIG_DIR = Path.home() / ".pi" / "agent"
 PI_CONFIG_PATH = PI_CONFIG_DIR / "models.json"
@@ -103,6 +104,9 @@ def render_overlay(
     """Return (overlay, managed_key_paths) for ~/.pi/agent/models.json."""
     providers: dict = {}
     keys: list[list[str]] = [["model"]]
+    # Pi expands header values that match an env var name. Our UA contains
+    # `/` and a space so it can never collide — safe to pass as a literal.
+    ua_headers = {"User-Agent": f"ucode/{ucode_version()} pi/{agent_version('pi')}"}
 
     claude_ids = sorted(set(claude_models.values()))
     if claude_ids:
@@ -115,6 +119,7 @@ def render_overlay(
             # `eager_input_streaming` on the streaming + tools path. Pi sends
             # the legacy beta header instead when this is false.
             "compat": {"supportsEagerToolInputStreaming": False},
+            "headers": ua_headers,
             "models": [{"id": m} for m in claude_ids],
         }
         keys.append(["providers", "databricks-claude"])
@@ -124,6 +129,7 @@ def render_overlay(
             "api": "openai-responses",
             "apiKey": token,
             "authHeader": True,
+            "headers": ua_headers,
             "models": [{"id": m} for m in codex_models],
         }
         keys.append(["providers", "databricks-openai"])
@@ -133,6 +139,7 @@ def render_overlay(
             "api": "google-generative-ai",
             "apiKey": token,
             "authHeader": True,
+            "headers": ua_headers,
             "models": [{"id": m} for m in gemini_models],
         }
         keys.append(["providers", "databricks-gemini"])

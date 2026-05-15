@@ -56,6 +56,19 @@ class TestRenderOverlay:
         assert auth["refresh_interval_ms"] == 900_000
 
 
+class TestRenderOverlayUserAgent:
+    def test_user_agent_set_on_provider(self, monkeypatch):
+        monkeypatch.setattr(codex, "ucode_version", lambda: "0.1.0")
+        monkeypatch.setattr(codex, "agent_version", lambda binary: "0.123.0")
+        overlay = codex.render_overlay(WS)
+        provider = overlay["model_providers"]["Databricks"]
+        assert provider["http_headers"]["User-Agent"] == "ucode/0.1.0 codex/0.123.0"
+
+    def test_managed_keys_include_http_headers(self):
+        # Revert must clean up the new key.
+        assert ["model_providers", "Databricks", "http_headers"] in codex.MANAGED_KEYS
+
+
 class TestCodexDefaultModel:
     def test_always_none(self):
         assert codex.default_model({}) is None

@@ -93,6 +93,21 @@ class TestRenderOverlayProviders:
         }
 
 
+class TestRenderOverlayUserAgent:
+    def test_user_agent_set_on_all_three_providers(self, monkeypatch):
+        monkeypatch.setattr(pi, "ucode_version", lambda: "0.1.0")
+        monkeypatch.setattr(pi, "agent_version", lambda binary: "0.74.0")
+        overlay, _ = _overlay(
+            "claude-sonnet",
+            claude_models={"sonnet": "claude-sonnet"},
+            codex_models=["gpt-5"],
+            gemini_models=["gemini-2"],
+        )
+        expected = "ucode/0.1.0 pi/0.74.0"
+        for name in ("databricks-claude", "databricks-openai", "databricks-gemini"):
+            assert overlay["providers"][name]["headers"]["User-Agent"] == expected
+
+
 class TestRenderOverlayCompatFlags:
     def test_claude_disables_eager_tool_input_streaming(self):
         # Gateway's Anthropic translator rejects per-tool

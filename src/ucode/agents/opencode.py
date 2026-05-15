@@ -22,6 +22,7 @@ from ucode.databricks import (
     get_databricks_token,
 )
 from ucode.state import mark_tool_managed, save_state
+from ucode.telemetry import agent_version, ucode_version
 
 OPENCODE_CONFIG_DIR = Path.home() / ".config" / "opencode"
 OPENCODE_CONFIG_PATH = OPENCODE_CONFIG_DIR / "opencode.json"
@@ -66,6 +67,13 @@ def render_overlay(
 ) -> tuple[dict, list[list[str]]]:
     """Return (overlay, managed_key_paths) for opencode.json."""
     auth_headers = {"Authorization": f"Bearer {token}"}
+    # OpenCode hardcodes `User-Agent: opencode/<ver>` in session/llm.ts for
+    # every provider, after the AI SDK's combineHeaders. The provider-level
+    # `headers` are clobbered by that injection, but per-model `headers` are
+    # merged AFTER and win — so the UA must live on each model entry.
+    ua_header = {
+        "User-Agent": f"ucode/{ucode_version()} opencode/{agent_version('opencode')}",
+    }
 
     anthropic_models = opencode_models.get("anthropic") or []
     gemini_models = opencode_models.get("gemini") or []
@@ -80,7 +88,7 @@ def render_overlay(
                 "apiKey": token,
                 "headers": auth_headers,
             },
-            "models": {m: {} for m in anthropic_models},
+            "models": {m: {"headers": ua_header} for m in anthropic_models},
         }
         keys.append(["provider", "databricks-anthropic"])
     if gemini_models:
@@ -91,7 +99,7 @@ def render_overlay(
                 "apiKey": token,
                 "headers": auth_headers,
             },
-            "models": {m: {} for m in gemini_models},
+            "models": {m: {"headers": ua_header} for m in gemini_models},
         }
         keys.append(["provider", "databricks-google"])
 

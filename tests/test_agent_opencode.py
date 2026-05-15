@@ -76,6 +76,35 @@ class TestRenderOverlay:
         headers = overlay["provider"]["databricks-anthropic"]["options"]["headers"]
         assert headers["Authorization"] == "Bearer tok"
 
+    def test_user_agent_header_anthropic(self, monkeypatch):
+        # UA must live at the per-model level — OpenCode clobbers
+        # provider-level `headers["User-Agent"]` in session/llm.ts.
+        monkeypatch.setattr(opencode, "ucode_version", lambda: "0.1.0")
+        monkeypatch.setattr(opencode, "agent_version", lambda binary: "0.74.0")
+        models = {"anthropic": ["claude-sonnet"]}
+        overlay, _ = opencode.render_overlay("claude-sonnet", "tok", _base_urls(), models)
+        model_headers = overlay["provider"]["databricks-anthropic"]["models"]["claude-sonnet"][
+            "headers"
+        ]
+        assert model_headers["User-Agent"] == "ucode/0.1.0 opencode/0.74.0"
+
+    def test_user_agent_header_gemini(self, monkeypatch):
+        monkeypatch.setattr(opencode, "ucode_version", lambda: "0.1.0")
+        monkeypatch.setattr(opencode, "agent_version", lambda binary: "0.74.0")
+        models = {"gemini": ["gemini-2"]}
+        overlay, _ = opencode.render_overlay("gemini-2", "tok", _base_urls(), models)
+        model_headers = overlay["provider"]["databricks-google"]["models"]["gemini-2"]["headers"]
+        assert model_headers["User-Agent"] == "ucode/0.1.0 opencode/0.74.0"
+
+    def test_provider_level_headers_only_authorization(self, monkeypatch):
+        # Sanity: provider-level headers should NOT include User-Agent (since
+        # it's clobbered there) — only Authorization.
+        models = {"anthropic": ["claude-sonnet"]}
+        overlay, _ = opencode.render_overlay("claude-sonnet", "tok", _base_urls(), models)
+        provider_headers = overlay["provider"]["databricks-anthropic"]["options"]["headers"]
+        assert "User-Agent" not in provider_headers
+        assert provider_headers["Authorization"] == "Bearer tok"
+
     def test_managed_keys_include_model(self):
         _, keys = opencode.render_overlay("model", "tok", _base_urls(), {})
         assert ["model"] in keys

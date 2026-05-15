@@ -23,6 +23,7 @@ from ucode.databricks import (
     get_databricks_token,
 )
 from ucode.state import mark_tool_managed, save_state
+from ucode.telemetry import agent_version, ucode_version
 
 GEMINI_CONFIG_DIR = Path.home() / ".gemini"
 GEMINI_ENV_PATH = GEMINI_CONFIG_DIR / ".env"
@@ -42,27 +43,30 @@ MANAGED_KEYS: list[str] = [
     "GOOGLE_GEMINI_BASE_URL",
     "GEMINI_API_KEY_AUTH_MECHANISM",
     "GEMINI_API_KEY",
+    "GEMINI_CLI_CUSTOM_HEADERS",
     "OAUTH_TOKEN",
 ]
 
 
 def render_env_overlay(workspace: str, model: str, token: str) -> dict[str, str]:
+    # Gemini CLI parses GEMINI_CLI_CUSTOM_HEADERS as comma-separated
+    # `Key:Value` pairs and spreads them after the SDK's default User-Agent,
+    # so a key named `User-Agent` overrides the default. Resolved via
+    # upstream issue google-gemini/gemini-cli#10088.
+    custom_headers = f"User-Agent:ucode/{ucode_version()} gemini/{agent_version('gemini')}"
     return {
         "GEMINI_MODEL": model,
         "GOOGLE_GEMINI_BASE_URL": build_tool_base_url("gemini", workspace),
         "GEMINI_API_KEY_AUTH_MECHANISM": "bearer",
         "GEMINI_API_KEY": token,
+        "GEMINI_CLI_CUSTOM_HEADERS": custom_headers,
         "OAUTH_TOKEN": token,
     }
 
 
 def build_runtime_env(workspace: str, model: str, token: str) -> dict[str, str]:
     env = os.environ.copy()
-    env["GEMINI_MODEL"] = model
-    env["GOOGLE_GEMINI_BASE_URL"] = build_tool_base_url("gemini", workspace)
-    env["GEMINI_API_KEY_AUTH_MECHANISM"] = "bearer"
-    env["GEMINI_API_KEY"] = token
-    env["OAUTH_TOKEN"] = token
+    env.update(render_env_overlay(workspace, model, token))
     # Newer Gemini CLI releases refuse to run in untrusted directories;
     # opt every launch into trust so `ucode gemini` works in any folder.
     env["GEMINI_CLI_TRUST_WORKSPACE"] = "true"

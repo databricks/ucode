@@ -72,6 +72,23 @@ class TestRenderOverlay:
         assert len(env_keys) > 0
 
 
+class TestRenderOverlayUserAgent:
+    def _ua(self, monkeypatch) -> str:
+        monkeypatch.setattr(claude, "ucode_version", lambda: "0.1.0")
+        monkeypatch.setattr(claude, "agent_version", lambda binary: "2.1.136")
+        overlay, _ = claude.render_overlay(WS, "s4")
+        return overlay["env"]["ANTHROPIC_CUSTOM_HEADERS"]
+
+    def test_user_agent_present(self, monkeypatch):
+        assert "User-Agent: ucode/0.1.0 claude/2.1.136" in self._ua(monkeypatch)
+
+    def test_existing_databricks_header_preserved(self, monkeypatch):
+        assert "x-databricks-use-coding-agent-mode: true" in self._ua(monkeypatch)
+
+    def test_headers_newline_delimited(self, monkeypatch):
+        assert "\n" in self._ua(monkeypatch)
+
+
 class TestRenderOverlayWebSearchDisable:
     def test_settings_overlay_never_includes_mcp_servers(self):
         # MCP servers belong in ~/.claude.json, not settings.json.
