@@ -6,11 +6,11 @@ import json
 import subprocess
 from unittest.mock import MagicMock
 
-import pytest
-
 from ucode import mcp
 
 WS = "https://example.databricks.com"
+CLAUDE_STATE = {"workspace": WS, "available_tools": ["claude"]}
+ALL_MCP_CLIENTS = ["claude", "codex", "gemini", "opencode", "copilot"]
 
 
 class TestBuildMcpHttpEntry:
@@ -223,114 +223,176 @@ class TestConfigureClientMcpServer:
         assert calls == [("github", f"{WS}/api/2.0/mcp/external/github")]
 
 
-class TestBuildMcpServerOptions:
-    def test_includes_discovered_mcps_in_initial_options(self):
-        assert mcp.build_mcp_server_options(["confluence-mcp", "github-mcp"]) == [
-            ("external:confluence-mcp", "confluence-mcp"),
-            ("external:github-mcp", "github-mcp"),
-            ("managed:sql", "Databricks SQL"),
-            ("vector-search", "Vector Search"),
-            ("genie", "Genie Space"),
-            ("uc-functions", "Unity Catalog functions"),
-            ("custom", "Custom MCP URLs"),
+class TestMcpPicker:
+    def test_prompt_uses_scrolling_checkbox_selector(self, monkeypatch):
+        checkbox_calls: list[dict] = []
+
+        class FakePrompt:
+            def ask(self):
+                return [f"{mcp.MCP_ADD_PREFIX}external:github-mcp"]
+
+        def fake_checkbox(*args, **kwargs):
+            checkbox_calls.append({"args": args, "kwargs": kwargs})
+            return FakePrompt()
+
+        monkeypatch.setattr(mcp, "_scrolling_checkbox", fake_checkbox)
+
+        assert mcp.prompt_for_mcp_server_choices(["github-mcp"], [], [], []) == [
+            f"{mcp.MCP_ADD_PREFIX}external:github-mcp"
         ]
 
-    def test_keeps_manual_external_option_when_none_discovered(self):
-        assert mcp.build_mcp_server_options([])[0] == (
-            "external:manual",
-            "External MCP connection",
-        )
-
-    def test_prompt_renders_managed_servers_after_sql_and_before_custom(self, monkeypatch, capsys):
-        monkeypatch.setattr(mcp.console, "input", lambda *args, **kwargs: "")
-
-        assert mcp.prompt_for_mcp_server_selection(["github-mcp"]) == "done"
-
-        output = capsys.readouterr().out
-        assert output.index("External MCP Servers") < output.index("Databricks SQL")
-        assert output.index("Databricks SQL") < output.index("Databricks Managed MCP Servers")
-        assert output.index("Vector Search") < output.index("Custom MCP URLs")
-        assert output.index("Genie Space") < output.index("Custom MCP URLs")
-        assert output.index("Unity Catalog functions") < output.index("Custom MCP URLs")
-        assert "Built-in AI tools" not in output
-
-
-class TestPromptForMcpSetupFields:
-    def test_returns_none_when_user_types_back(self, monkeypatch, capsys):
-        monkeypatch.setattr(mcp.console, "input", lambda *args, **kwargs: "back")
-
-        assert mcp.prompt_for_mcp_setup_fields([("Catalog name", None)]) is None
-
-        output = capsys.readouterr().out
-        assert "Type `back` to return to MCP server selection." in output
-
-
-class TestConfigureMcpCommand:
-    def test_registers_external_server_without_oauth_state(self, monkeypatch):
-        saved_states: list[dict] = []
-        removed: list[tuple[str, str]] = []
-        added: list[tuple[str, dict, str]] = []
-        selections = iter(["external:manual", "done"])
-
-        monkeypatch.setattr(mcp, "load_state", lambda: {"workspace": WS})
-        monkeypatch.setattr(mcp.shutil, "which", lambda binary: f"/usr/bin/{binary}")
-        monkeypatch.setattr(mcp, "ensure_databricks_auth", lambda workspace: None)
-        monkeypatch.setattr(mcp, "available_mcp_clients", lambda: ["claude"])
-        monkeypatch.setattr(mcp, "discover_external_mcp_connection_names", lambda workspace: [])
-        monkeypatch.setattr(
-            mcp, "prompt_for_mcp_server_selection", lambda *args, **kwargs: next(selections)
-        )
-        monkeypatch.setattr(mcp.console, "input", lambda *args, **kwargs: "github")
-        monkeypatch.setattr(
-            mcp,
-            "remove_claude_mcp_server",
-            lambda name, scope: removed.append((name, scope)) or False,
-        )
-        monkeypatch.setattr(
-            mcp,
-            "add_claude_mcp_server",
-            lambda name, entry, scope: added.append((name, entry, scope)),
-        )
-        monkeypatch.setattr(mcp, "save_state", lambda state: saved_states.append(state.copy()))
-
-        assert mcp.configure_mcp_command() == 0
-
-        assert removed == [
-            ("github", "local"),
-            ("github", "project"),
-            ("github", "user"),
+        assert checkbox_calls
+        choices = checkbox_calls[0]["kwargs"]["choices"]
+        choice_text = [choice.title for choice in choices]
+        assert "External connections" not in choice_text
+        assert "Databricks managed services" not in choice_text
+        assert "Custom servers" not in choice_text
+        assert choice_text == [
+            "Databricks SQL",
+            "github-mcp",
         ]
-        assert added == [
-            (
-                "github",
-                {
-                    "type": "http",
-                    "url": f"{WS}/api/2.0/mcp/external/github",
-                    "headers": {"Authorization": "Bearer ${OAUTH_TOKEN}"},
-                },
-                "user",
-            )
-        ]
-        assert saved_states
-        assert "mcp_oauth" not in saved_states[-1]
-        assert saved_states[-1]["mcp_servers"] == [
+        assert "Built-in AI tools" not in choice_text
+        assert checkbox_calls[0]["kwargs"]["instruction"] == (
+            "(space to toggle, enter to save, type to filter)"
+        )
+
+    def test_prompt_returns_none_when_cancelled(self, monkeypatch):
+        class FakePrompt:
+            def ask(self):
+                return None
+
+        monkeypatch.setattr(mcp, "_scrolling_checkbox", lambda *args, **kwargs: FakePrompt())
+
+        assert mcp.prompt_for_mcp_server_choices(["github-mcp"], [], [], []) is None
+
+    def test_picker_marks_configured_servers(self):
+        choices = mcp.build_mcp_picker_choices(
+            ["github-mcp"],
+            [],
+            [],
+            [{"name": "github-mcp", "url": f"{WS}/api/2.0/mcp/external/github-mcp"}],
+        )
+        choices_by_title = {choice.title: choice for choice in choices}
+        assert choices_by_title["github-mcp"].checked is True
+        assert choices_by_title["Databricks SQL"].checked is False
+
+    def test_picker_keeps_databricks_sql_when_nothing_discovered(self):
+        choices = mcp.build_mcp_picker_choices([], [], [], [])
+        assert [choice.title for choice in choices] == ["Databricks SQL"]
+        assert choices[0].value == f"{mcp.MCP_ADD_PREFIX}managed:sql"
+
+    def test_discovers_genie_spaces_as_mcp_servers(self):
+        assert mcp.genie_mcp_servers(
+            [
+                {"space_id": "space-2", "title": "Second Space"},
+                {"space_id": "space-1", "title": "First Space"},
+                {"title": "Missing ID"},
+            ],
+            WS,
+        ) == [
             {
-                "name": "github",
-                "url": f"{WS}/api/2.0/mcp/external/github",
-                "auth": "env:OAUTH_TOKEN",
-                "clients": ["claude"],
+                "name": "databricks-genie-space-1",
+                "title": "First Space",
+                "url": f"{WS}/api/2.0/mcp/genie/space-1",
+            },
+            {
+                "name": "databricks-genie-space-2",
+                "title": "Second Space",
+                "url": f"{WS}/api/2.0/mcp/genie/space-2",
+            },
+        ]
+
+    def test_picker_lists_discovered_genie_spaces(self):
+        choices = mcp.build_mcp_picker_choices(
+            ["github-mcp"],
+            [
+                {
+                    "name": "databricks-genie-space-1",
+                    "title": "First Space",
+                    "url": f"{WS}/api/2.0/mcp/genie/space-1",
+                }
+            ],
+            [],
+            [],
+        )
+
+        choices_by_title = {choice.title: choice for choice in choices}
+        assert choices_by_title["Genie: First Space"].value == (
+            f"{mcp.MCP_ADD_PREFIX}genie-space:space-1"
+        )
+
+    def test_discovers_apps_as_mcp_servers(self):
+        assert mcp.app_mcp_servers(
+            [
+                {
+                    "name": "mcp-my-app",
+                    "url": "https://mcp-my-app.example.databricksapps.com",
+                },
+                {
+                    "name": "regular-app",
+                    "url": "https://regular-app.example.databricksapps.com",
+                },
+                {"name": "missing-url"},
+            ]
+        ) == [
+            {
+                "name": "databricks-app-mcp-my-app",
+                "title": "mcp-my-app",
+                "url": "https://mcp-my-app.example.databricksapps.com/mcp",
             }
         ]
 
-    def test_updates_existing_server_state_by_name(self, monkeypatch):
-        saved_states: list[dict] = []
-        selections = iter(["external:manual", "done"])
+    def test_picker_lists_discovered_app_mcps(self):
+        choices = mcp.build_mcp_picker_choices(
+            ["github-mcp"],
+            [],
+            [
+                {
+                    "name": "databricks-app-mcp-my-app",
+                    "title": "mcp-my-app",
+                    "url": "https://mcp-my-app.example.databricksapps.com/mcp",
+                }
+            ],
+            [],
+        )
 
+        choices_by_title = {choice.title: choice for choice in choices}
+        assert choices_by_title["App: mcp-my-app"].value == f"{mcp.MCP_ADD_PREFIX}app:mcp-my-app"
+
+    def test_picker_keeps_saved_legacy_servers_for_removal(self):
+        choices = mcp.build_mcp_picker_choices(
+            [],
+            [],
+            [],
+            [
+                {
+                    "name": "databricks-vector-search-main-search-docs",
+                    "url": f"{WS}/api/2.0/mcp/vector-search/main/search/docs",
+                }
+            ],
+        )
+
+        choices_by_title = {choice.title: choice for choice in choices}
+        assert choices_by_title["databricks-vector-search-main-search-docs"].checked is True
+
+
+def _patch_mcp_choices(monkeypatch, *values: str) -> None:
+    monkeypatch.setattr(
+        mcp,
+        "prompt_for_mcp_server_choices",
+        lambda *args, **kwargs: list(values),
+    )
+
+
+class TestConfigureMcpCommand:
+    def test_skips_existing_server_state_by_name(self, monkeypatch):
+        saved_states: list[dict] = []
         monkeypatch.setattr(
             mcp,
             "load_state",
             lambda: {
                 "workspace": WS,
+                "available_tools": ["claude"],
                 "mcp_servers": [
                     {
                         "name": "github",
@@ -345,54 +407,41 @@ class TestConfigureMcpCommand:
         monkeypatch.setattr(mcp, "ensure_databricks_auth", lambda workspace: None)
         monkeypatch.setattr(mcp, "available_mcp_clients", lambda: ["claude"])
         monkeypatch.setattr(mcp, "discover_external_mcp_connection_names", lambda workspace: [])
-        monkeypatch.setattr(
-            mcp, "prompt_for_mcp_server_selection", lambda *args, **kwargs: next(selections)
-        )
-        monkeypatch.setattr(mcp.console, "input", lambda *args, **kwargs: "github")
+        monkeypatch.setattr(mcp, "discover_genie_mcp_servers", lambda workspace: [])
+        monkeypatch.setattr(mcp, "discover_app_mcp_servers", lambda workspace: [])
+        _patch_mcp_choices(monkeypatch, "github")
         monkeypatch.setattr(mcp, "remove_claude_mcp_server", lambda name, scope: False)
         monkeypatch.setattr(mcp, "add_claude_mcp_server", lambda name, entry, scope: None)
         monkeypatch.setattr(mcp, "save_state", lambda state: saved_states.append(state.copy()))
 
         assert mcp.configure_mcp_command() == 0
 
-        assert saved_states[-1]["mcp_servers"] == [
-            {
-                "name": "github",
-                "url": f"{WS}/api/2.0/mcp/external/github",
-                "auth": "env:OAUTH_TOKEN",
-                "clients": ["claude"],
-            }
-        ]
+        assert saved_states == []
 
     def test_registers_discovered_external_server(self, monkeypatch):
         saved_states: list[dict] = []
         configured: list[tuple[str, str, str, dict]] = []
-        selections = iter(["external:github-mcp", "done"])
-        option_lists: list[list[tuple[str, str]]] = []
 
-        monkeypatch.setattr(mcp, "load_state", lambda: {"workspace": WS})
+        monkeypatch.setattr(
+            mcp,
+            "load_state",
+            lambda: {"workspace": WS, "available_tools": ALL_MCP_CLIENTS},
+        )
         monkeypatch.setattr(mcp.shutil, "which", lambda binary: f"/usr/bin/{binary}")
         monkeypatch.setattr(mcp, "ensure_databricks_auth", lambda workspace: None)
         monkeypatch.setattr(
             mcp,
             "available_mcp_clients",
-            lambda: ["claude", "codex", "gemini", "opencode", "copilot"],
+            lambda: ALL_MCP_CLIENTS,
         )
         monkeypatch.setattr(
             mcp,
             "discover_external_mcp_connection_names",
             lambda workspace: ["confluence-mcp", "github-mcp"],
         )
-
-        def fake_prompt_for_mcp_server_selection(*args, **kwargs):
-            option_lists.append(mcp.build_mcp_server_options(["confluence-mcp", "github-mcp"]))
-            return next(selections)
-
-        monkeypatch.setattr(
-            mcp,
-            "prompt_for_mcp_server_selection",
-            fake_prompt_for_mcp_server_selection,
-        )
+        monkeypatch.setattr(mcp, "discover_genie_mcp_servers", lambda workspace: [])
+        monkeypatch.setattr(mcp, "discover_app_mcp_servers", lambda workspace: [])
+        _patch_mcp_choices(monkeypatch, f"{mcp.MCP_ADD_PREFIX}external:github-mcp")
 
         def fake_configure_client_mcp_server(client, name, url, entry):
             configured.append((client, name, url, entry))
@@ -403,10 +452,6 @@ class TestConfigureMcpCommand:
 
         assert mcp.configure_mcp_command() == 0
 
-        assert option_lists[0][:2] == [
-            ("external:confluence-mcp", "confluence-mcp"),
-            ("external:github-mcp", "github-mcp"),
-        ]
         expected_entry = {
             "type": "http",
             "url": f"{WS}/api/2.0/mcp/external/github-mcp",
@@ -433,19 +478,197 @@ class TestConfigureMcpCommand:
             }
         ]
 
-    def test_registers_databricks_sql_server(self, monkeypatch):
+    def test_registers_discovered_genie_space_server(self, monkeypatch):
         saved_states: list[dict] = []
         configured: list[tuple[str, str, str, dict]] = []
-        selections = iter(["managed:sql", "done"])
 
-        monkeypatch.setattr(mcp, "load_state", lambda: {"workspace": WS})
+        monkeypatch.setattr(mcp, "load_state", lambda: {**CLAUDE_STATE})
         monkeypatch.setattr(mcp.shutil, "which", lambda binary: f"/usr/bin/{binary}")
         monkeypatch.setattr(mcp, "ensure_databricks_auth", lambda workspace: None)
         monkeypatch.setattr(mcp, "available_mcp_clients", lambda: ["claude"])
         monkeypatch.setattr(mcp, "discover_external_mcp_connection_names", lambda workspace: [])
         monkeypatch.setattr(
-            mcp, "prompt_for_mcp_server_selection", lambda *args, **kwargs: next(selections)
+            mcp,
+            "discover_genie_mcp_servers",
+            lambda workspace: [
+                {
+                    "name": "databricks-genie-space-123",
+                    "title": "Sales Genie",
+                    "url": f"{WS}/api/2.0/mcp/genie/space-123",
+                }
+            ],
         )
+        monkeypatch.setattr(mcp, "discover_app_mcp_servers", lambda workspace: [])
+        _patch_mcp_choices(monkeypatch, f"{mcp.MCP_ADD_PREFIX}genie-space:space-123")
+        monkeypatch.setattr(
+            mcp,
+            "configure_client_mcp_server",
+            lambda client, name, url, entry: configured.append((client, name, url, entry)) or [],
+        )
+        monkeypatch.setattr(mcp, "save_state", lambda state: saved_states.append(state.copy()))
+
+        assert mcp.configure_mcp_command() == 0
+
+        assert configured == [
+            (
+                "claude",
+                "databricks-genie-space-123",
+                f"{WS}/api/2.0/mcp/genie/space-123",
+                {
+                    "type": "http",
+                    "url": f"{WS}/api/2.0/mcp/genie/space-123",
+                    "headers": {"Authorization": "Bearer ${OAUTH_TOKEN}"},
+                },
+            )
+        ]
+        assert saved_states[-1]["mcp_servers"] == [
+            {
+                "name": "databricks-genie-space-123",
+                "url": f"{WS}/api/2.0/mcp/genie/space-123",
+                "auth": "env:OAUTH_TOKEN",
+                "clients": ["claude"],
+            }
+        ]
+
+    def test_registers_discovered_app_mcp_server(self, monkeypatch):
+        saved_states: list[dict] = []
+        configured: list[tuple[str, str, str, dict]] = []
+
+        monkeypatch.setattr(mcp, "load_state", lambda: {**CLAUDE_STATE})
+        monkeypatch.setattr(mcp.shutil, "which", lambda binary: f"/usr/bin/{binary}")
+        monkeypatch.setattr(mcp, "ensure_databricks_auth", lambda workspace: None)
+        monkeypatch.setattr(mcp, "available_mcp_clients", lambda: ["claude"])
+        monkeypatch.setattr(mcp, "discover_external_mcp_connection_names", lambda workspace: [])
+        monkeypatch.setattr(mcp, "discover_genie_mcp_servers", lambda workspace: [])
+        monkeypatch.setattr(
+            mcp,
+            "discover_app_mcp_servers",
+            lambda workspace: [
+                {
+                    "name": "databricks-app-mcp-my-app",
+                    "title": "mcp-my-app",
+                    "url": "https://mcp-my-app.example.databricksapps.com/mcp",
+                }
+            ],
+        )
+        _patch_mcp_choices(monkeypatch, f"{mcp.MCP_ADD_PREFIX}app:mcp-my-app")
+        monkeypatch.setattr(
+            mcp,
+            "configure_client_mcp_server",
+            lambda client, name, url, entry: configured.append((client, name, url, entry)) or [],
+        )
+        monkeypatch.setattr(mcp, "save_state", lambda state: saved_states.append(state.copy()))
+
+        assert mcp.configure_mcp_command() == 0
+
+        assert configured == [
+            (
+                "claude",
+                "databricks-app-mcp-my-app",
+                "https://mcp-my-app.example.databricksapps.com/mcp",
+                {
+                    "type": "http",
+                    "url": "https://mcp-my-app.example.databricksapps.com/mcp",
+                    "headers": {"Authorization": "Bearer ${OAUTH_TOKEN}"},
+                },
+            )
+        ]
+        assert saved_states[-1]["mcp_servers"] == [
+            {
+                "name": "databricks-app-mcp-my-app",
+                "url": "https://mcp-my-app.example.databricksapps.com/mcp",
+                "auth": "env:OAUTH_TOKEN",
+                "clients": ["claude"],
+            }
+        ]
+
+    def test_continues_when_optional_discovery_fails(self, monkeypatch, capsys):
+        saved_states: list[dict] = []
+        configured: list[tuple[str, str, str, dict]] = []
+
+        monkeypatch.setattr(mcp, "load_state", lambda: {**CLAUDE_STATE})
+        monkeypatch.setattr(mcp.shutil, "which", lambda binary: f"/usr/bin/{binary}")
+        monkeypatch.setattr(mcp, "ensure_databricks_auth", lambda workspace: None)
+        monkeypatch.setattr(mcp, "available_mcp_clients", lambda: ["claude"])
+        monkeypatch.setattr(
+            mcp,
+            "discover_external_mcp_connection_names",
+            lambda workspace: (_ for _ in ()).throw(RuntimeError("permission denied")),
+        )
+        monkeypatch.setattr(
+            mcp,
+            "discover_genie_mcp_servers",
+            lambda workspace: (_ for _ in ()).throw(RuntimeError("permission denied")),
+        )
+        monkeypatch.setattr(
+            mcp,
+            "discover_app_mcp_servers",
+            lambda workspace: (_ for _ in ()).throw(RuntimeError("permission denied")),
+        )
+        _patch_mcp_choices(monkeypatch, f"{mcp.MCP_ADD_PREFIX}managed:sql")
+        monkeypatch.setattr(
+            mcp,
+            "configure_client_mcp_server",
+            lambda client, name, url, entry: configured.append((client, name, url, entry)) or [],
+        )
+        monkeypatch.setattr(mcp, "save_state", lambda state: saved_states.append(state.copy()))
+
+        assert mcp.configure_mcp_command() == 0
+
+        output = capsys.readouterr().out
+        assert "Skipped external connections." in output
+        assert "Skipped Genie spaces." in output
+        assert "Skipped Databricks apps." in output
+        assert configured[0][1] == "databricks-sql"
+        assert saved_states[-1]["mcp_servers"][0]["name"] == "databricks-sql"
+
+    def test_configures_only_ucode_configured_clients(self, monkeypatch, capsys):
+        saved_states: list[dict] = []
+        configured: list[tuple[str, str, str, dict]] = []
+        monkeypatch.setattr(
+            mcp,
+            "load_state",
+            lambda: {"workspace": WS, "available_tools": ["claude", "codex"]},
+        )
+        monkeypatch.setattr(mcp.shutil, "which", lambda binary: f"/usr/bin/{binary}")
+        monkeypatch.setattr(mcp, "ensure_databricks_auth", lambda workspace: None)
+        monkeypatch.setattr(mcp, "available_mcp_clients", lambda: ALL_MCP_CLIENTS)
+        monkeypatch.setattr(mcp, "discover_external_mcp_connection_names", lambda workspace: [])
+        monkeypatch.setattr(mcp, "discover_genie_mcp_servers", lambda workspace: [])
+        monkeypatch.setattr(mcp, "discover_app_mcp_servers", lambda workspace: [])
+        _patch_mcp_choices(monkeypatch, f"{mcp.MCP_ADD_PREFIX}managed:sql")
+        monkeypatch.setattr(
+            mcp,
+            "configure_client_mcp_server",
+            lambda client, name, url, entry: configured.append((client, name, url, entry)) or [],
+        )
+        monkeypatch.setattr(mcp, "save_state", lambda state: saved_states.append(state.copy()))
+
+        assert mcp.configure_mcp_command() == 0
+
+        output = capsys.readouterr().out
+        assert "Configuring for: Claude Code, Codex" in output
+        assert [call[0] for call in configured] == ["claude", "codex"]
+        assert saved_states[-1]["mcp_servers"] == [
+            {
+                "name": "databricks-sql",
+                "url": f"{WS}/api/2.0/mcp/sql",
+                "auth": "env:OAUTH_TOKEN",
+                "clients": ["claude", "codex"],
+            }
+        ]
+
+    def test_registers_databricks_sql_server(self, monkeypatch):
+        saved_states: list[dict] = []
+        configured: list[tuple[str, str, str, dict]] = []
+        monkeypatch.setattr(mcp, "load_state", lambda: {**CLAUDE_STATE})
+        monkeypatch.setattr(mcp.shutil, "which", lambda binary: f"/usr/bin/{binary}")
+        monkeypatch.setattr(mcp, "ensure_databricks_auth", lambda workspace: None)
+        monkeypatch.setattr(mcp, "available_mcp_clients", lambda: ["claude"])
+        monkeypatch.setattr(mcp, "discover_external_mcp_connection_names", lambda workspace: [])
+        monkeypatch.setattr(mcp, "discover_genie_mcp_servers", lambda workspace: [])
+        monkeypatch.setattr(mcp, "discover_app_mcp_servers", lambda workspace: [])
+        _patch_mcp_choices(monkeypatch, f"{mcp.MCP_ADD_PREFIX}managed:sql")
         monkeypatch.setattr(
             mcp,
             "configure_client_mcp_server",
@@ -476,139 +699,86 @@ class TestConfigureMcpCommand:
             }
         ]
 
-    def test_registers_vector_search_server(self, monkeypatch):
-        saved_states: list[dict] = []
-        configured: list[tuple[str, str, str, dict]] = []
-        selections = iter(["vector-search", "done"])
-
-        monkeypatch.setattr(mcp, "load_state", lambda: {"workspace": WS})
-        monkeypatch.setattr(mcp.shutil, "which", lambda binary: f"/usr/bin/{binary}")
-        monkeypatch.setattr(mcp, "ensure_databricks_auth", lambda workspace: None)
-        monkeypatch.setattr(mcp, "available_mcp_clients", lambda: ["claude"])
-        monkeypatch.setattr(mcp, "discover_external_mcp_connection_names", lambda workspace: [])
-        monkeypatch.setattr(
-            mcp, "prompt_for_mcp_server_selection", lambda *args, **kwargs: next(selections)
-        )
-        inputs = iter(["main", "search", "docs-index"])
-        monkeypatch.setattr(mcp.console, "input", lambda *args, **kwargs: next(inputs))
-        monkeypatch.setattr(
-            mcp,
-            "configure_client_mcp_server",
-            lambda client, name, url, entry: configured.append((client, name, url, entry)) or [],
-        )
-        monkeypatch.setattr(mcp, "save_state", lambda state: saved_states.append(state.copy()))
-
-        assert mcp.configure_mcp_command() == 0
-
-        assert configured == [
-            (
-                "claude",
-                "databricks-vector-search-main-search-docs-index",
-                f"{WS}/api/2.0/mcp/vector-search/main/search/docs-index",
+    def test_removes_saved_server(self, monkeypatch):
+        state = {
+            "workspace": WS,
+            "available_tools": ["claude"],
+            "mcp_servers": [
                 {
-                    "type": "http",
-                    "url": f"{WS}/api/2.0/mcp/vector-search/main/search/docs-index",
-                    "headers": {"Authorization": "Bearer ${OAUTH_TOKEN}"},
-                },
-            )
-        ]
-
-    @pytest.mark.parametrize("selection", ["vector-search", "genie", "uc-functions", "custom"])
-    def test_returns_to_selection_when_backing_out_of_setup(self, monkeypatch, selection):
-        configured: list[tuple[str, str, str, dict]] = []
+                    "name": "github-mcp",
+                    "url": f"{WS}/api/2.0/mcp/external/github-mcp",
+                    "auth": "env:OAUTH_TOKEN",
+                    "clients": ["claude"],
+                }
+            ],
+        }
         saved_states: list[dict] = []
-        selections = iter([selection, "done"])
+        removed: list[tuple[str, str]] = []
 
-        monkeypatch.setattr(mcp, "load_state", lambda: {"workspace": WS})
+        monkeypatch.setattr(mcp, "load_state", lambda: state)
         monkeypatch.setattr(mcp.shutil, "which", lambda binary: f"/usr/bin/{binary}")
         monkeypatch.setattr(mcp, "ensure_databricks_auth", lambda workspace: None)
         monkeypatch.setattr(mcp, "available_mcp_clients", lambda: ["claude"])
         monkeypatch.setattr(mcp, "discover_external_mcp_connection_names", lambda workspace: [])
-        monkeypatch.setattr(
-            mcp, "prompt_for_mcp_server_selection", lambda *args, **kwargs: next(selections)
-        )
-        monkeypatch.setattr(mcp.console, "input", lambda *args, **kwargs: "back")
+        monkeypatch.setattr(mcp, "discover_genie_mcp_servers", lambda workspace: [])
+        monkeypatch.setattr(mcp, "discover_app_mcp_servers", lambda workspace: [])
+        _patch_mcp_choices(monkeypatch)
         monkeypatch.setattr(
             mcp,
-            "configure_client_mcp_server",
-            lambda client, name, url, entry: configured.append((client, name, url, entry)) or [],
+            "remove_client_mcp_server",
+            lambda client, name: removed.append((client, name)) or ["user"],
         )
         monkeypatch.setattr(mcp, "save_state", lambda state: saved_states.append(state.copy()))
 
         assert mcp.configure_mcp_command() == 0
 
-        assert configured == []
-        assert saved_states == []
+        assert removed == [("claude", "github-mcp")]
+        assert saved_states[-1]["mcp_servers"] == []
 
-    def test_registers_genie_space_server(self, monkeypatch):
-        saved_states: list[dict] = []
-        configured: list[tuple[str, str, str, dict]] = []
-        selections = iter(["genie", "done"])
 
-        monkeypatch.setattr(mcp, "load_state", lambda: {"workspace": WS})
-        monkeypatch.setattr(mcp.shutil, "which", lambda binary: f"/usr/bin/{binary}")
-        monkeypatch.setattr(mcp, "ensure_databricks_auth", lambda workspace: None)
-        monkeypatch.setattr(mcp, "available_mcp_clients", lambda: ["claude"])
-        monkeypatch.setattr(mcp, "discover_external_mcp_connection_names", lambda workspace: [])
-        monkeypatch.setattr(
-            mcp, "prompt_for_mcp_server_selection", lambda *args, **kwargs: next(selections)
-        )
-        monkeypatch.setattr(mcp.console, "input", lambda *args, **kwargs: "space-123")
+class TestRevertMcpConfigs:
+    def test_removes_cli_registered_servers_and_restores_copilot_config(self, monkeypatch):
+        removed: list[tuple[str, str]] = []
+        restored: list[tuple[object, object, bool]] = []
+
         monkeypatch.setattr(
             mcp,
-            "configure_client_mcp_server",
-            lambda client, name, url, entry: configured.append((client, name, url, entry)) or [],
+            "remove_client_mcp_server",
+            lambda client, name: removed.append((client, name)) or ["user"],
         )
-        monkeypatch.setattr(mcp, "save_state", lambda state: saved_states.append(state.copy()))
-
-        assert mcp.configure_mcp_command() == 0
-
-        assert configured == [
-            (
-                "claude",
-                "databricks-genie-space-123",
-                f"{WS}/api/2.0/mcp/genie/space-123",
-                {
-                    "type": "http",
-                    "url": f"{WS}/api/2.0/mcp/genie/space-123",
-                    "headers": {"Authorization": "Bearer ${OAUTH_TOKEN}"},
-                },
-            )
-        ]
-
-    def test_registers_uc_functions_server(self, monkeypatch):
-        saved_states: list[dict] = []
-        configured: list[tuple[str, str, str, dict]] = []
-        selections = iter(["uc-functions", "done"])
-        inputs = iter(["main", "tools"])
-
-        monkeypatch.setattr(mcp, "load_state", lambda: {"workspace": WS})
-        monkeypatch.setattr(mcp.shutil, "which", lambda binary: f"/usr/bin/{binary}")
-        monkeypatch.setattr(mcp, "ensure_databricks_auth", lambda workspace: None)
-        monkeypatch.setattr(mcp, "available_mcp_clients", lambda: ["claude"])
-        monkeypatch.setattr(mcp, "discover_external_mcp_connection_names", lambda workspace: [])
-        monkeypatch.setattr(
-            mcp, "prompt_for_mcp_server_selection", lambda *args, **kwargs: next(selections)
-        )
-        monkeypatch.setattr(mcp.console, "input", lambda *args, **kwargs: next(inputs))
         monkeypatch.setattr(
             mcp,
-            "configure_client_mcp_server",
-            lambda client, name, url, entry: configured.append((client, name, url, entry)) or [],
+            "restore_file",
+            lambda config_path, backup_path, managed: (
+                restored.append((config_path, backup_path, managed)) or True
+            ),
         )
-        monkeypatch.setattr(mcp, "save_state", lambda state: saved_states.append(state.copy()))
 
-        assert mcp.configure_mcp_command() == 0
+        result = mcp.revert_mcp_configs(
+            {
+                "mcp_servers": [
+                    {
+                        "name": "github-mcp",
+                        "clients": ["claude", "codex", "gemini", "opencode", "copilot"],
+                    }
+                ]
+            }
+        )
 
-        assert configured == [
-            (
-                "claude",
-                "databricks-uc-main-tools",
-                f"{WS}/api/2.0/mcp/functions/main/tools",
-                {
-                    "type": "http",
-                    "url": f"{WS}/api/2.0/mcp/functions/main/tools",
-                    "headers": {"Authorization": "Bearer ${OAUTH_TOKEN}"},
-                },
-            )
+        assert removed == [
+            ("claude", "github-mcp"),
+            ("codex", "github-mcp"),
+            ("gemini", "github-mcp"),
+            ("opencode", "github-mcp"),
+            ("copilot", "github-mcp"),
         ]
+        assert restored == [
+            (mcp.copilot.COPILOT_MCP_CONFIG_PATH, mcp.copilot.COPILOT_MCP_BACKUP_PATH, True)
+        ]
+        assert result == {
+            "claude": True,
+            "codex": True,
+            "gemini": True,
+            "opencode": True,
+            "copilot": True,
+        }

@@ -220,7 +220,9 @@ class TestConfigureSubset:
         monkeypatch.setattr(cli_mod, "prompt_for_tools", lambda available: ["codex"])
         # Skip binary install + post-config validation; we're testing the
         # selection plumbing, not the agent binaries themselves.
-        monkeypatch.setattr(cli_mod, "install_tool_binary", lambda tool, strict=False: True)
+        monkeypatch.setattr(
+            cli_mod, "install_tool_binary", lambda tool, strict=False, update_existing=False: True
+        )
         monkeypatch.setattr(cli_mod, "validate_all_tools", lambda state: None)
 
         rc = cli_mod.configure_workspace_command()
@@ -249,7 +251,9 @@ class TestConfigureSubset:
         monkeypatch.setattr(state_mod, "STATE_PATH", tmp_path / "state.json")
         monkeypatch.setattr("ucode.databricks.run_databricks_login", lambda ws: None)
         monkeypatch.setattr(cli_mod, "_prompt_for_configuration", lambda tool=None: e2e_workspace)
-        monkeypatch.setattr(cli_mod, "install_tool_binary", lambda tool, strict=False: True)
+        monkeypatch.setattr(
+            cli_mod, "install_tool_binary", lambda tool, strict=False, update_existing=False: True
+        )
         monkeypatch.setattr(cli_mod, "validate_all_tools", lambda state: None)
 
         # First run: pick codex.
@@ -285,7 +289,7 @@ class TestConfigureSubset:
         monkeypatch.setattr(
             cli_mod,
             "install_tool_binary",
-            lambda tool, strict=False: install_calls.append(tool) or True,
+            lambda tool, strict=False, update_existing=False: install_calls.append(tool) or True,
         )
         monkeypatch.setattr(cli_mod, "validate_all_tools", lambda state: None)
 

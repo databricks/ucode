@@ -190,6 +190,37 @@ class TestInstallToolBinary:
 
         assert install_tool_binary("opencode", strict=False) is False
 
+    def test_updates_existing_binary_when_requested(self, monkeypatch, capsys):
+        calls: list[list[str]] = []
+
+        def fake_which(binary: str) -> str | None:
+            return f"/usr/bin/{binary}"
+
+        def fake_run(args, **kwargs):
+            calls.append(args)
+            return subprocess.CompletedProcess(args, 0)
+
+        monkeypatch.setattr("ucode.agents.shutil.which", fake_which)
+        monkeypatch.setattr("ucode.agents.subprocess.run", fake_run)
+
+        assert install_tool_binary("opencode", strict=False, update_existing=True) is True
+        assert calls == [["npm", "install", "-g", "opencode-ai"]]
+        output = capsys.readouterr().out
+        assert "Updating OpenCode..." in output
+        assert "OpenCode is up to date" in output
+
+    def test_update_failure_keeps_existing_binary_available(self, monkeypatch):
+        def fake_which(binary: str) -> str | None:
+            return f"/usr/bin/{binary}"
+
+        def fake_run(*args, **kwargs):
+            raise subprocess.CalledProcessError(1, args[0])
+
+        monkeypatch.setattr("ucode.agents.shutil.which", fake_which)
+        monkeypatch.setattr("ucode.agents.subprocess.run", fake_run)
+
+        assert install_tool_binary("opencode", strict=True, update_existing=True) is True
+
     def test_ensure_tool_binary_available_raises_when_missing(self, monkeypatch):
         monkeypatch.setattr("ucode.agents.shutil.which", lambda _: None)
 

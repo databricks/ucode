@@ -128,6 +128,32 @@ class TestMcpServerConfig:
         written = json.loads(config_file.read_text())
         assert written["mcpServers"]["github"]["url"] == f"{WS}/api/2.0/mcp/external/github"
 
+    def test_removes_mcp_server_without_clobbering_others(self, tmp_path, monkeypatch):
+        import ucode.agents.copilot as cp_mod
+
+        config_file = tmp_path / "mcp-config.json"
+        monkeypatch.setattr(cp_mod, "COPILOT_MCP_CONFIG_PATH", config_file)
+        config_file.write_text(
+            json.dumps(
+                {
+                    "other": True,
+                    "mcpServers": {
+                        "github": {"url": "old"},
+                        "jira": {"url": "keep"},
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        removed = cp_mod.remove_mcp_server_config("github")
+
+        written = json.loads(config_file.read_text())
+        assert removed is True
+        assert "github" not in written["mcpServers"]
+        assert written["mcpServers"]["jira"] == {"url": "keep"}
+        assert written["other"] is True
+
 
 class TestDefaultModel:
     def test_prefers_claude_sonnet(self):
