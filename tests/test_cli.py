@@ -139,7 +139,7 @@ class TestAutoConfigureOnFirstRun:
         empty_state = {}
         configured_state = {**MINIMAL_STATE}
         with (
-            patch("ucode.cli.ensure_bootstrap_dependencies"),
+            patch("ucode.cli.ensure_bootstrap_dependencies") as mock_bootstrap,
             patch("ucode.cli.load_state", return_value=empty_state),
             patch("ucode.cli._auto_configure_tool") as mock_auto,
             patch("ucode.cli.configure_shared_state", return_value=MINIMAL_STATE),
@@ -156,13 +156,14 @@ class TestAutoConfigureOnFirstRun:
         ):
             result = runner.invoke(app, ["claude"])
         assert result.exit_code == 0, result.output
+        mock_bootstrap.assert_called_once_with("claude", update_existing=True)
         mock_auto.assert_called_once_with("claude")
 
     def test_triggers_when_tool_not_in_available_tools(self):
         """Auto-configure runs when workspace exists but the tool wasn't configured."""
         state_without_tool = {**MINIMAL_STATE, "available_tools": ["codex"]}
         with (
-            patch("ucode.cli.ensure_bootstrap_dependencies"),
+            patch("ucode.cli.ensure_bootstrap_dependencies") as mock_bootstrap,
             patch("ucode.cli.load_state", return_value=state_without_tool),
             patch("ucode.cli._auto_configure_tool") as mock_auto,
             patch("ucode.cli.configure_shared_state", return_value=MINIMAL_STATE),
@@ -179,12 +180,13 @@ class TestAutoConfigureOnFirstRun:
         ):
             result = runner.invoke(app, ["claude"])
         assert result.exit_code == 0, result.output
+        mock_bootstrap.assert_called_once_with("claude", update_existing=True)
         mock_auto.assert_called_once_with("claude")
 
     def test_skipped_when_already_configured(self):
         """Auto-configure is skipped when workspace and tool are already set up."""
         with (
-            patch("ucode.cli.ensure_bootstrap_dependencies"),
+            patch("ucode.cli.ensure_bootstrap_dependencies") as mock_bootstrap,
             patch("ucode.cli.load_state", return_value=MINIMAL_STATE),
             patch("ucode.cli._auto_configure_tool") as mock_auto,
             patch("ucode.cli.configure_shared_state", return_value=MINIMAL_STATE),
@@ -200,6 +202,7 @@ class TestAutoConfigureOnFirstRun:
             patch("ucode.cli.launch_agent"),
         ):
             runner.invoke(app, ["claude"])
+        mock_bootstrap.assert_called_once_with("claude", update_existing=False)
         mock_auto.assert_not_called()
 
 
@@ -261,11 +264,12 @@ class TestConfigureAgentFlag:
     def test_agent_flag_calls_configure_with_tool(self):
         with (
             patch("ucode.cli.install_databricks_cli"),
-            patch("ucode.cli.install_tool_binary"),
+            patch("ucode.cli.install_tool_binary") as mock_install,
             patch("ucode.cli.configure_workspace_command") as mock_cfg,
         ):
             result = runner.invoke(app, ["configure", "--agent", "claude"])
         assert result.exit_code == 0, result.output
+        mock_install.assert_called_once_with("claude", strict=True, update_existing=True)
         mock_cfg.assert_called_once_with("claude")
 
     def test_agent_flag_normalizes_alias(self):

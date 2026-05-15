@@ -176,7 +176,7 @@ def configure_workspace_command(tool: str | None = None) -> int:
         return 0
 
     for tool_name in picked:
-        install_tool_binary(tool_name, strict=False)
+        install_tool_binary(tool_name, strict=False, update_existing=True)
 
     state = configure_selected_tools(state, picked)
 
@@ -318,9 +318,12 @@ def _auto_configure_tool(tool: str) -> None:
 def _launch_tool(tool_name: str, ctx: typer.Context) -> None:
     try:
         tool = normalize_tool(tool_name)
-        ensure_bootstrap_dependencies(tool)
         existing = load_state()
-        if not existing.get("workspace") or tool not in (existing.get("available_tools") or []):
+        needs_auto_configure = not existing.get("workspace") or tool not in (
+            existing.get("available_tools") or []
+        )
+        ensure_bootstrap_dependencies(tool, update_existing=needs_auto_configure)
+        if needs_auto_configure:
             _auto_configure_tool(tool)
         state = ensure_provider_state(tool)
         # Re-fetch model lists on every launch so newly-added Databricks
@@ -408,7 +411,7 @@ def configure(
         install_databricks_cli()
         if agent is not None:
             tool = normalize_tool(agent)
-            install_tool_binary(tool, strict=True)
+            install_tool_binary(tool, strict=True, update_existing=True)
             configure_workspace_command(tool)
         else:
             # Tool binaries are installed after the user picks which agents

@@ -24,6 +24,7 @@ from ucode.state import load_state, save_state
 from ucode.ui import (
     console,
     print_err,
+    print_note,
     print_section,
     print_success,
     print_warning,
@@ -67,12 +68,34 @@ def normalize_tool(tool: str) -> str:
     return normalized
 
 
-def install_tool_binary(tool: str, *, strict: bool = True) -> bool:
+def _update_installed_tool_binary(tool: str) -> bool:
+    spec = TOOL_SPECS[tool]
+    binary = spec["binary"]
+    package = spec["package"]
+
+    if not shutil.which("npm"):
+        print_warning(f"`npm` is not available to update {spec['display']}; continuing.")
+        return False
+
+    print_note(f"Updating {spec['display']}...")
+    try:
+        subprocess.run(["npm", "install", "-g", package], check=True, timeout=300)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        print_warning(f"Could not update {spec['display']}; continuing.")
+        return False
+
+    print_success(f"{spec['display']} is up to date")
+    return bool(shutil.which(binary))
+
+
+def install_tool_binary(tool: str, *, strict: bool = True, update_existing: bool = False) -> bool:
     spec = TOOL_SPECS[tool]
     binary = spec["binary"]
     package = spec["package"]
 
     if shutil.which(binary):
+        if update_existing:
+            _update_installed_tool_binary(tool)
         return True
 
     if not shutil.which("npm"):
@@ -115,9 +138,9 @@ def ensure_tool_binary_available(tool: str) -> None:
     )
 
 
-def ensure_bootstrap_dependencies(tool: str) -> None:
+def ensure_bootstrap_dependencies(tool: str, *, update_existing: bool = False) -> None:
     install_databricks_cli()
-    install_tool_binary(tool, strict=True)
+    install_tool_binary(tool, strict=True, update_existing=update_existing)
 
 
 def default_model_for_tool(tool: str, state: dict) -> str | None:
