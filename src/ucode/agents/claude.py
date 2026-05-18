@@ -6,6 +6,7 @@ import os
 import shutil
 from pathlib import Path
 
+from ucode.agent_updates import available_npm_package_update
 from ucode.config_io import (
     APP_DIR,
     ToolSpec,
@@ -33,6 +34,10 @@ SPEC: ToolSpec = {
     "config_path": CLAUDE_SETTINGS_PATH,
     "backup_path": CLAUDE_BACKUP_PATH,
 }
+
+
+def is_update_available() -> tuple[str, str] | None:
+    return available_npm_package_update(SPEC["package"])
 
 
 def _resolve_web_search_model(state: dict) -> str | None:

@@ -8,6 +8,7 @@ import subprocess
 import threading
 from pathlib import Path
 
+from ucode.agent_updates import available_npm_package_update
 from ucode.config_io import (
     APP_DIR,
     ToolSpec,
@@ -46,6 +47,10 @@ MANAGED_KEYS: list[str] = [
     "GEMINI_CLI_CUSTOM_HEADERS",
     "OAUTH_TOKEN",
 ]
+
+
+def is_update_available() -> tuple[str, str] | None:
+    return available_npm_package_update(SPEC["package"])
 
 
 def render_env_overlay(workspace: str, model: str, token: str) -> dict[str, str]:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from ucode.agent_updates import available_npm_package_update
 from ucode.config_io import (
     APP_DIR,
     ToolSpec,
@@ -39,6 +40,10 @@ MANAGED_KEYS: list[list[str]] = [
     ["model_providers", "Databricks"],
     ["model_providers", "Databricks", "http_headers"],
 ]
+
+
+def is_update_available() -> tuple[str, str] | None:
+    return available_npm_package_update(SPEC["package"])
 
 
 def render_overlay(workspace: str) -> dict:

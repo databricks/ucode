@@ -28,6 +28,7 @@ from ucode.ui import (
     print_section,
     print_success,
     print_warning,
+    prompt_yes_no,
     spinner,
 )
 
@@ -88,13 +89,23 @@ def _update_installed_tool_binary(tool: str) -> bool:
     return bool(shutil.which(binary))
 
 
+def _confirm_update_installed_tool_binary(tool: str) -> bool:
+    spec = TOOL_SPECS[tool]
+    update = _MODULES[tool].is_update_available()
+
+    if not update:
+        return False
+    current, latest = update
+    return prompt_yes_no(f"(Optional) Update {spec['display']} from {current} to {latest}?")
+
+
 def install_tool_binary(tool: str, *, strict: bool = True, update_existing: bool = False) -> bool:
     spec = TOOL_SPECS[tool]
     binary = spec["binary"]
     package = spec["package"]
 
     if shutil.which(binary):
-        if update_existing:
+        if update_existing and _confirm_update_installed_tool_binary(tool):
             _update_installed_tool_binary(tool)
         return True
 

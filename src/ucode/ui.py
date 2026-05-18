@@ -246,7 +246,7 @@ def prompt_for_tools(available: list[tuple[str, str]]) -> list[str]:
 
 def prompt_yes_no(prompt: str) -> bool:
     while True:
-        response = console.input(f"{label(prompt)} {muted('[y/n]')} {muted('›')} ").strip().lower()
+        response = console.input(f"{label(prompt)} {muted('(y/n)')} {muted('›')} ").strip().lower()
         if response in {"y", "yes"}:
             return True
         if response in {"n", "no"}:
