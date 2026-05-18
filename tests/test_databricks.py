@@ -166,6 +166,27 @@ class TestGetDatabricksToken:
         with pytest.raises(RuntimeError, match="no access token"):
             get_databricks_token(WS)
 
+    def test_error_suggests_logout_when_matching_profile_exists(self, tmp_path, monkeypatch):
+        env = self._fake_databricks(
+            tmp_path,
+            'case "$*" in\n'
+            '  *"auth profiles"*) echo \'{"profiles": [{"host": "'
+            + WS
+            + '", "name": "example-profile", "auth_type": "databricks-cli"}]}\'; exit 0 ;;\n'
+            '  *"auth login"*) exit 0 ;;\n'
+            "esac\n"
+            'echo \'{"access_token": "", "token_type": "Bearer"}\'',
+        )
+        monkeypatch.setattr("os.environ", env)
+
+        with pytest.raises(RuntimeError) as exc_info:
+            get_databricks_token(WS)
+
+        message = str(exc_info.value)
+        assert "stale or invalid" in message
+        assert "databricks auth logout --profile example-profile" in message
+        assert f"databricks auth login --host {WS} --profile example-profile" in message
+
 
 class TestListDatabricksConnections:
     def test_lists_paginated_connections_with_workspace_env(self, monkeypatch):

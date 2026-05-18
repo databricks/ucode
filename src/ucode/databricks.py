@@ -256,9 +256,18 @@ def get_databricks_token(workspace: str, *, force_refresh: bool = False) -> str:
         token = _fetch()
 
     if not token:
+        profile_name = find_profile_name_for_host(workspace)
+        stale_profile_hint = ""
+        if profile_name:
+            stale_profile_hint = (
+                " The saved Databricks CLI profile may be stale or invalid. Try:\n"
+                f"  databricks auth logout --profile {profile_name}\n"
+                f"  databricks auth login --host {workspace} --profile {profile_name}"
+            )
         raise RuntimeError(
             f"Databricks CLI returned no access token for {workspace}. "
             "Run `databricks auth login` to re-authenticate."
+            f"{stale_profile_hint}"
         )
     return token
 
