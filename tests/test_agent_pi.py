@@ -54,6 +54,7 @@ class TestPiSpec:
     def test_config_path_under_pi_agent_dir(self):
         assert pi.SPEC["config_path"].name == "models.json"
         assert pi.SPEC["config_path"].parent.name == "agent"
+        assert pi.PI_UCODE_HOME in pi.SPEC["config_path"].parents
 
 
 class TestRenderOverlayProviders:
@@ -237,6 +238,10 @@ class TestBuildRuntimeEnv:
     def test_sets_oauth_token(self):
         env = pi.build_runtime_env("tok")
         assert env["OAUTH_TOKEN"] == "tok"
+
+    def test_sets_ucode_home(self):
+        env = pi.build_runtime_env("tok")
+        assert env["HOME"] == str(pi.PI_UCODE_HOME)
 
 
 class TestPiValidateCmd:

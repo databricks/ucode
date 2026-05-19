@@ -189,6 +189,7 @@ class TestClaudeUserAgent:
         # render_overlay just builds the env block; we write it ourselves to
         # avoid the apiKeyHelper / save_state plumbing.
         overlay, _ = claude.render_overlay(capture_server.base_url, "test-model")
+        claude.CLAUDE_SETTINGS_PATH.write_text(json.dumps(overlay), encoding="utf-8")
         env = {
             **os.environ,
             "CLAUDE_CONFIG_DIR": str(config_dir),
@@ -293,9 +294,8 @@ class TestGeminiUserAgent:
 
         _require_binary("gemini")
         monkeypatch.setattr(config_io_mod, "APP_DIR", tmp_path)
-        monkeypatch.setattr(gemini, "GEMINI_ENV_PATH", tmp_path / ".env")
-        monkeypatch.setattr(gemini, "GEMINI_SETTINGS_PATH", tmp_path / "settings.json")
-        monkeypatch.setattr(gemini, "GEMINI_BACKUP_PATH", tmp_path / "gemini-env.backup")
+        monkeypatch.setattr(gemini, "GEMINI_ENV_PATH", tmp_path / "ucode.env")
+        monkeypatch.setattr(gemini, "GEMINI_BACKUP_PATH", tmp_path / "gemini-ucode-env.backup")
         # Run from tmp_path so Gemini sees an untrusted folder (the trust env
         # var built into build_runtime_env handles it).
         monkeypatch.chdir(tmp_path)
@@ -314,11 +314,12 @@ class TestPiUserAgent:
         from ucode.agents import pi
 
         _require_binary("pi")
-        pi_dir = tmp_path / "pi-agent"
-        pi_dir.mkdir()
+        pi_home = tmp_path / "pi-home"
+        pi_dir = pi_home / ".pi" / "agent"
         config_path = pi_dir / "models.json"
 
         monkeypatch.setattr(config_io_mod, "APP_DIR", tmp_path)
+        monkeypatch.setattr(pi, "PI_UCODE_HOME", pi_home)
         monkeypatch.setattr(pi, "PI_CONFIG_PATH", config_path)
         monkeypatch.setattr(pi, "PI_BACKUP_PATH", tmp_path / "pi.backup.json")
 
@@ -340,7 +341,7 @@ class TestPiUserAgent:
             mp.setattr("ucode.agents.pi.get_databricks_token", lambda ws, **kwargs: "test-token")
             pi.write_tool_config(state, "test-claude-model", token="test-token")
 
-        env = {**pi.build_runtime_env("test-token"), "PI_CODING_AGENT_DIR": str(pi_dir)}
+        env = pi.build_runtime_env("test-token")
         result = _run_until_first_request(pi.validate_cmd("pi"), env)
 
         req = capture_server.first_request_with_path_prefix("/ai-gateway/anthropic")

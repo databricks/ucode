@@ -19,6 +19,9 @@ class TestGeminiSpec:
     def test_display(self):
         assert gemini.SPEC["display"] == "Gemini CLI"
 
+    def test_config_path_is_ucode_env_file(self):
+        assert gemini.SPEC["config_path"].name == "ucode.env"
+
 
 class TestRenderEnvOverlay:
     def test_sets_gemini_model(self):
@@ -108,13 +111,12 @@ class TestGeminiManagedKeys:
         assert "OAUTH_TOKEN" in gemini.MANAGED_KEYS
 
 
-class TestWriteToolConfigSetsAuthType:
-    def test_writes_settings_json_with_gemini_api_key_auth(self, tmp_path, monkeypatch):
+class TestWriteToolConfig:
+    def test_writes_ucode_env_file(self, tmp_path, monkeypatch):
         import ucode.config_io as config_io_mod
 
-        settings_path = tmp_path / "settings.json"
-        monkeypatch.setattr(gemini, "GEMINI_ENV_PATH", tmp_path / ".env")
-        monkeypatch.setattr(gemini, "GEMINI_SETTINGS_PATH", settings_path)
+        env_path = tmp_path / "ucode.env"
+        monkeypatch.setattr(gemini, "GEMINI_ENV_PATH", env_path)
         monkeypatch.setattr(gemini, "GEMINI_BACKUP_PATH", tmp_path / "backup")
         monkeypatch.setattr(config_io_mod, "APP_DIR", tmp_path)
         monkeypatch.setattr("ucode.agents.gemini.save_state", lambda s: None)
@@ -124,16 +126,16 @@ class TestWriteToolConfigSetsAuthType:
 
         gemini.write_tool_config({"workspace": WS}, "some-model")
 
-        settings = json.loads(settings_path.read_text())
-        assert settings["security"]["auth"]["selectedType"] == "gemini-api-key"
+        env = env_path.read_text()
+        assert 'GEMINI_MODEL="some-model"' in env
+        assert f'GOOGLE_GEMINI_BASE_URL="{WS}/ai-gateway/gemini"' in env
 
-    def test_preserves_existing_settings_json_keys(self, tmp_path, monkeypatch):
+    def test_does_not_write_settings_json(self, tmp_path, monkeypatch):
         import ucode.config_io as config_io_mod
 
         settings_path = tmp_path / "settings.json"
         settings_path.write_text(json.dumps({"theme": "dark", "otherKey": 123}))
-        monkeypatch.setattr(gemini, "GEMINI_ENV_PATH", tmp_path / ".env")
-        monkeypatch.setattr(gemini, "GEMINI_SETTINGS_PATH", settings_path)
+        monkeypatch.setattr(gemini, "GEMINI_ENV_PATH", tmp_path / "ucode.env")
         monkeypatch.setattr(gemini, "GEMINI_BACKUP_PATH", tmp_path / "backup")
         monkeypatch.setattr(config_io_mod, "APP_DIR", tmp_path)
         monkeypatch.setattr("ucode.agents.gemini.save_state", lambda s: None)
@@ -146,4 +148,4 @@ class TestWriteToolConfigSetsAuthType:
         settings = json.loads(settings_path.read_text())
         assert settings["theme"] == "dark"
         assert settings["otherKey"] == 123
-        assert settings["security"]["auth"]["selectedType"] == "gemini-api-key"
+        assert "security" not in settings

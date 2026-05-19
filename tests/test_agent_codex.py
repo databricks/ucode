@@ -21,38 +21,43 @@ class TestCodexSpec:
 
 
 class TestRenderOverlay:
-    def test_sets_default_profile(self):
+    def test_creates_ucode_profile_without_setting_global_default(self):
         overlay = codex.render_overlay(WS)
-        assert overlay["profile"] == "default"
+        assert "profile" not in overlay
+        assert "ucode" in overlay["profiles"]
 
     def test_sets_model_provider(self):
         overlay = codex.render_overlay(WS)
-        assert overlay["profiles"]["default"]["model_provider"] == "Databricks"
+        assert overlay["profiles"]["ucode"]["model_provider"] == "ucode-databricks"
+
+    def test_sets_model_when_provided(self):
+        overlay = codex.render_overlay(WS, "databricks-gpt-5")
+        assert overlay["profiles"]["ucode"]["model"] == "databricks-gpt-5"
 
     def test_provider_base_url(self):
         overlay = codex.render_overlay(WS)
-        provider = overlay["model_providers"]["Databricks"]
+        provider = overlay["model_providers"]["ucode-databricks"]
         assert provider["base_url"] == f"{WS}/ai-gateway/codex/v1"
 
     def test_provider_wire_api(self):
         overlay = codex.render_overlay(WS)
-        provider = overlay["model_providers"]["Databricks"]
+        provider = overlay["model_providers"]["ucode-databricks"]
         assert provider["wire_api"] == "responses"
 
     def test_auth_uses_sh(self):
         overlay = codex.render_overlay(WS)
-        auth = overlay["model_providers"]["Databricks"]["auth"]
+        auth = overlay["model_providers"]["ucode-databricks"]["auth"]
         assert auth["command"] == "sh"
         assert "-c" in auth["args"]
 
     def test_auth_contains_workspace(self):
         overlay = codex.render_overlay(WS)
-        auth = overlay["model_providers"]["Databricks"]["auth"]
+        auth = overlay["model_providers"]["ucode-databricks"]["auth"]
         assert any(WS in arg for arg in auth["args"])
 
     def test_auth_refresh_interval(self):
         overlay = codex.render_overlay(WS)
-        auth = overlay["model_providers"]["Databricks"]["auth"]
+        auth = overlay["model_providers"]["ucode-databricks"]["auth"]
         assert auth["refresh_interval_ms"] == 900_000
 
 
@@ -61,18 +66,20 @@ class TestRenderOverlayUserAgent:
         monkeypatch.setattr(codex, "ucode_version", lambda: "0.1.0")
         monkeypatch.setattr(codex, "agent_version", lambda binary: "0.123.0")
         overlay = codex.render_overlay(WS)
-        provider = overlay["model_providers"]["Databricks"]
+        provider = overlay["model_providers"]["ucode-databricks"]
         assert provider["http_headers"]["User-Agent"] == "ucode/0.1.0 codex/0.123.0"
 
     def test_managed_keys_include_http_headers(self):
         # Revert must clean up the new key.
-        assert ["model_providers", "Databricks", "http_headers"] in codex.MANAGED_KEYS
+        assert ["model_providers", "ucode-databricks", "http_headers"] in codex.MANAGED_KEYS
 
 
 class TestCodexDefaultModel:
-    def test_always_none(self):
+    def test_returns_first_codex_model(self):
+        assert codex.default_model({"codex_models": ["gpt-5", "gpt-4o"]}) == "gpt-5"
+
+    def test_none_when_no_models(self):
         assert codex.default_model({}) is None
-        assert codex.default_model({"codex_models": ["gpt-4o"]}) is None
 
 
 class TestCodexValidateCmd:
@@ -83,6 +90,10 @@ class TestCodexValidateCmd:
     def test_uses_exec_subcommand(self):
         cmd = codex.validate_cmd("codex")
         assert "exec" in cmd
+
+    def test_uses_ucode_profile(self):
+        cmd = codex.validate_cmd("codex")
+        assert cmd[:3] == ["codex", "--profile", "ucode"]
 
     def test_has_prompt(self):
         cmd = codex.validate_cmd("codex")
@@ -96,7 +107,7 @@ class TestCodexValidateCmd:
 
 
 class TestCodexLaunch:
-    def test_sets_oauth_token_before_exec(self, monkeypatch):
+    def test_sets_oauth_token_and_ucode_profile_before_exec(self, monkeypatch):
         exec_calls: list[tuple[str, list[str]]] = []
 
         def fake_execvp(binary: str, args: list[str]) -> None:
@@ -113,4 +124,4 @@ class TestCodexLaunch:
             assert str(exc) == "stop"
 
         assert os.environ["OAUTH_TOKEN"] == "fresh-token"
-        assert exec_calls == [("codex", ["codex", "--search"])]
+        assert exec_calls == [("codex", ["codex", "--profile", "ucode", "--search"])]

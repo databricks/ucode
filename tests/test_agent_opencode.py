@@ -27,6 +27,11 @@ class TestOpencodeSpec:
     def test_display(self):
         assert opencode.SPEC["display"] == "OpenCode"
 
+    def test_config_path_is_under_ucode_xdg_home(self):
+        assert opencode.SPEC["config_path"] == (
+            opencode.OPENCODE_XDG_CONFIG_HOME / "opencode" / "opencode.json"
+        )
+
 
 class TestRenderOverlay:
     def test_sets_model(self):
@@ -237,6 +242,11 @@ class TestBuildRuntimeEnv:
         env = opencode.build_runtime_env("tok")
 
         assert env["OAUTH_TOKEN"] == "tok"
+
+    def test_sets_ucode_xdg_config_home(self):
+        env = opencode.build_runtime_env("tok")
+
+        assert env["XDG_CONFIG_HOME"] == str(opencode.OPENCODE_XDG_CONFIG_HOME)
 
 
 class TestOpencodeDefaultModel:

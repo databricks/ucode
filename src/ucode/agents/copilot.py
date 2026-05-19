@@ -38,10 +38,10 @@ from ucode.databricks import (
 from ucode.state import mark_tool_managed, save_state
 
 COPILOT_CONFIG_DIR = Path.home() / ".copilot"
-COPILOT_ENV_PATH = COPILOT_CONFIG_DIR / ".env"
-COPILOT_MCP_CONFIG_PATH = COPILOT_CONFIG_DIR / "mcp-config.json"
-COPILOT_BACKUP_PATH = APP_DIR / "copilot-env.backup"
-COPILOT_MCP_BACKUP_PATH = APP_DIR / "copilot-mcp-config.backup.json"
+COPILOT_ENV_PATH = COPILOT_CONFIG_DIR / "ucode.env"
+COPILOT_MCP_CONFIG_PATH = COPILOT_CONFIG_DIR / "ucode-mcp-config.json"
+COPILOT_BACKUP_PATH = APP_DIR / "copilot-ucode-env.backup"
+COPILOT_MCP_BACKUP_PATH = APP_DIR / "copilot-ucode-mcp-config.backup.json"
 
 SPEC: ToolSpec = {
     "binary": "copilot",
@@ -183,7 +183,7 @@ def launch(state: dict, tool_args: list[str]) -> None:
     )
     refresher.start()
 
-    proc = subprocess.Popen([SPEC["binary"], *tool_args], env=env)
+    proc = subprocess.Popen([SPEC["binary"], *mcp_config_args(), *tool_args], env=env)
     try:
         returncode = proc.wait()
     except KeyboardInterrupt:
@@ -197,7 +197,19 @@ def launch(state: dict, tool_args: list[str]) -> None:
 
 
 def validate_cmd(binary: str) -> list[str]:
-    return [binary, "--prompt", "say hi in 5 words or less", "--allow-all-tools"]
+    return [
+        binary,
+        *mcp_config_args(),
+        "--prompt",
+        "say hi in 5 words or less",
+        "--allow-all-tools",
+    ]
+
+
+def mcp_config_args() -> list[str]:
+    if not COPILOT_MCP_CONFIG_PATH.exists():
+        return []
+    return ["--additional-mcp-config", f"@{COPILOT_MCP_CONFIG_PATH}"]
 
 
 def validate_env(state: dict) -> dict[str, str]:

@@ -188,8 +188,7 @@ class TestConfigureSubset:
         monkeypatch.setattr(claude, "CLAUDE_SETTINGS_PATH", tmp_path / "claude-settings.json")
         monkeypatch.setattr(claude, "CLAUDE_BACKUP_PATH", tmp_path / "claude.backup.json")
 
-        monkeypatch.setattr(gemini, "GEMINI_ENV_PATH", tmp_path / ".gemini-env")
-        monkeypatch.setattr(gemini, "GEMINI_SETTINGS_PATH", tmp_path / "gemini-settings.json")
+        monkeypatch.setattr(gemini, "GEMINI_ENV_PATH", tmp_path / "gemini-ucode.env")
         monkeypatch.setattr(gemini, "GEMINI_BACKUP_PATH", tmp_path / "gemini.backup")
 
         monkeypatch.setattr(opencode, "OPENCODE_CONFIG_PATH", tmp_path / "opencode.json")
@@ -229,7 +228,7 @@ class TestConfigureSubset:
         assert rc == 0
         assert codex_path.exists(), "codex config should have been written"
         assert not (tmp_path / "claude-settings.json").exists(), "claude config should NOT exist"
-        assert not (tmp_path / ".gemini-env").exists(), "gemini env should NOT exist"
+        assert not (tmp_path / "gemini-ucode.env").exists(), "gemini env should NOT exist"
         assert not (tmp_path / "opencode.json").exists(), "opencode config should NOT exist"
         assert not (tmp_path / ".copilot-env").exists(), "copilot env should NOT exist"
         assert not (tmp_path / "pi-models.json").exists(), "pi config should NOT exist"
@@ -343,14 +342,24 @@ class TestCodexLaunch:
         monkeypatch.setattr(codex, "CODEX_BACKUP_PATH", backup_path)
 
         failures = []
+        timeout_seconds = int(os.environ.get("UCODE_E2E_AGENT_TIMEOUT", "60"))
         for model in models:
             state = {**e2e_state, "workspace": e2e_workspace}
             with pytest.MonkeyPatch().context() as mp:
                 mp.setattr("ucode.state.save_state", lambda s: None)
-                codex.write_tool_config(state)
+                codex.write_tool_config(state, model)
 
             cmd = codex.validate_cmd("codex")
-            result = _run_agent(cmd)
+            try:
+                result = _run_agent(
+                    cmd,
+                    env={**os.environ, "CODEX_HOME": str(config_dir)},
+                    timeout=timeout_seconds,
+                )
+            except subprocess.TimeoutExpired:
+                failures.append(f"model={model} timed out after {timeout_seconds}s")
+                continue
+
             if result.returncode != 0 or not (result.stdout or result.stderr).strip():
                 failures.append(
                     f"model={model} rc={result.returncode} "
@@ -425,9 +434,8 @@ class TestGeminiLaunch:
             pytest.skip("No Gemini models available on this workspace")
 
         monkeypatch.setattr(config_io_mod, "APP_DIR", tmp_path)
-        monkeypatch.setattr(gemini, "GEMINI_ENV_PATH", tmp_path / ".env")
-        monkeypatch.setattr(gemini, "GEMINI_SETTINGS_PATH", tmp_path / "settings.json")
-        monkeypatch.setattr(gemini, "GEMINI_BACKUP_PATH", tmp_path / "gemini-env.backup")
+        monkeypatch.setattr(gemini, "GEMINI_ENV_PATH", tmp_path / "ucode.env")
+        monkeypatch.setattr(gemini, "GEMINI_BACKUP_PATH", tmp_path / "gemini-ucode-env.backup")
         # Run from tmp_path so Gemini sees an untrusted folder — that mirrors
         # what users hit on a fresh checkout and exercises the trust + .env
         # discovery code paths that previously broke validation.
@@ -454,26 +462,19 @@ class TestGeminiLaunch:
         assert not failures, "Gemini launch failures:\n" + "\n".join(failures)
 
 
-class TestGeminiSettingsJsonOnFreshInstall:
-    """Verify write_tool_config writes settings.json with the correct auth type.
+class TestGeminiFreshInstall:
+    """Verify Gemini works from ucode env without writing user settings.json."""
 
-    Reproduces the failure mode where a fresh Gemini CLI install has no
-    settings.json and the CLI errors: 'Please set an Auth method'.
-    """
-
-    def test_writes_settings_json_with_gemini_api_key_auth(
+    def test_does_not_write_settings_json_for_auth(
         self, tmp_path, monkeypatch, e2e_state, e2e_workspace, e2e_token
     ):
-        import json
-
         import ucode.config_io as config_io_mod
         from ucode.agents import gemini
 
         settings_path = tmp_path / "settings.json"
         monkeypatch.setattr(config_io_mod, "APP_DIR", tmp_path)
-        monkeypatch.setattr(gemini, "GEMINI_ENV_PATH", tmp_path / ".env")
-        monkeypatch.setattr(gemini, "GEMINI_SETTINGS_PATH", settings_path)
-        monkeypatch.setattr(gemini, "GEMINI_BACKUP_PATH", tmp_path / "gemini-env.backup")
+        monkeypatch.setattr(gemini, "GEMINI_ENV_PATH", tmp_path / "ucode.env")
+        monkeypatch.setattr(gemini, "GEMINI_BACKUP_PATH", tmp_path / "gemini-ucode-env.backup")
 
         gemini_models: list = e2e_state.get("gemini_models") or []
         model = gemini_models[0] if gemini_models else "some-model"
@@ -484,11 +485,8 @@ class TestGeminiSettingsJsonOnFreshInstall:
                 {**e2e_state, "workspace": e2e_workspace}, model, token=e2e_token
             )
 
-        assert settings_path.exists(), "settings.json was not created"
-        settings = json.loads(settings_path.read_text())
-        assert settings["security"]["auth"]["selectedType"] == "gemini-api-key", (
-            f"Expected selectedType=gemini-api-key, got: {settings}"
-        )
+        assert not settings_path.exists(), "settings.json should not be created"
+        assert (tmp_path / "ucode.env").exists(), "ucode Gemini env file was not created"
 
 
 class TestOpencodeLaunch:
@@ -515,8 +513,10 @@ class TestOpencodeLaunch:
             pytest.skip("No OpenCode models available on this workspace")
 
         monkeypatch.setattr(config_io_mod, "APP_DIR", tmp_path)
-        config_path = tmp_path / "opencode.json"
+        xdg = tmp_path / "opencode-xdg"
+        config_path = xdg / "opencode" / "opencode.json"
         backup_path = tmp_path / "opencode-config.backup.json"
+        monkeypatch.setattr(opencode, "OPENCODE_XDG_CONFIG_HOME", xdg)
         monkeypatch.setattr(opencode, "OPENCODE_CONFIG_PATH", config_path)
         monkeypatch.setattr(opencode, "OPENCODE_BACKUP_PATH", backup_path)
 
@@ -539,7 +539,7 @@ class TestOpencodeLaunch:
                 )
 
             cmd = opencode.validate_cmd("opencode")
-            result = _run_agent(cmd, timeout=90)
+            result = _run_agent(cmd, env=opencode.build_runtime_env(e2e_token), timeout=90)
             combined = (result.stdout + result.stderr).strip()
             if result.returncode != 0 or not combined:
                 failures.append(
@@ -653,13 +653,13 @@ class TestPiLaunch:
             pytest.skip("No Pi-compatible models available on this workspace")
 
         monkeypatch.setattr(config_io_mod, "APP_DIR", tmp_path)
-        # Pi reads models.json from PI_CODING_AGENT_DIR (default ~/.pi/agent).
-        # Point both pi (via env) and our writer (via PI_CONFIG_PATH) at the
-        # same tmp dir so the spawned `pi` subprocess sees what we wrote.
-        pi_dir = tmp_path / "pi-agent"
-        pi_dir.mkdir()
+        # Pi reads models.json below HOME/.pi/agent. Point both pi's runtime
+        # HOME and our writer at the same isolated tmp home.
+        pi_home = tmp_path / "pi-home"
+        pi_dir = pi_home / ".pi" / "agent"
         config_path = pi_dir / "models.json"
         backup_path = tmp_path / "pi-models.backup.json"
+        monkeypatch.setattr(pi, "PI_UCODE_HOME", pi_home)
         monkeypatch.setattr(pi, "PI_CONFIG_PATH", config_path)
         monkeypatch.setattr(pi, "PI_BACKUP_PATH", backup_path)
 
@@ -680,7 +680,7 @@ class TestPiLaunch:
                     token=e2e_token,
                 )
 
-            env = {**pi.build_runtime_env(e2e_token), "PI_CODING_AGENT_DIR": str(pi_dir)}
+            env = pi.build_runtime_env(e2e_token)
             cmd = pi.validate_cmd("pi")
             result = _run_agent(cmd, env=env, timeout=120)
             combined = (result.stdout + result.stderr).strip()
@@ -845,9 +845,8 @@ class TestGeminiAuthRecovery:
             pytest.skip("No Gemini models available on this workspace")
 
         monkeypatch.setattr(config_io_mod, "APP_DIR", tmp_path)
-        monkeypatch.setattr(gemini, "GEMINI_ENV_PATH", tmp_path / ".env")
-        monkeypatch.setattr(gemini, "GEMINI_SETTINGS_PATH", tmp_path / "settings.json")
-        monkeypatch.setattr(gemini, "GEMINI_BACKUP_PATH", tmp_path / "gemini-env.backup")
+        monkeypatch.setattr(gemini, "GEMINI_ENV_PATH", tmp_path / "ucode.env")
+        monkeypatch.setattr(gemini, "GEMINI_BACKUP_PATH", tmp_path / "gemini-ucode-env.backup")
 
         model = gemini_models[0]
         fake_db_dir = _make_reauth_fake_databricks(tmp_path / "fake_db", e2e_token)

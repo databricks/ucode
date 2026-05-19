@@ -24,8 +24,8 @@ from ucode.state import mark_tool_managed, save_state
 from ucode.telemetry import agent_version, ucode_version
 
 CLAUDE_CONFIG_DIR = Path.home() / ".claude"
-CLAUDE_SETTINGS_PATH = CLAUDE_CONFIG_DIR / "settings.json"
-CLAUDE_BACKUP_PATH = APP_DIR / "claude-settings.backup.json"
+CLAUDE_SETTINGS_PATH = CLAUDE_CONFIG_DIR / "ucode-settings.json"
+CLAUDE_BACKUP_PATH = APP_DIR / "claude-ucode-settings.backup.json"
 
 SPEC: ToolSpec = {
     "binary": "claude",
@@ -187,8 +187,16 @@ def launch(state: dict, tool_args: list[str]) -> None:
     workspace = state.get("workspace")
     if workspace:
         os.environ["OAUTH_TOKEN"] = get_databricks_token(workspace)
-    os.execvp(binary, [binary, *tool_args])
+    os.execvp(binary, [binary, "--settings", str(CLAUDE_SETTINGS_PATH), *tool_args])
 
 
 def validate_cmd(binary: str) -> list[str]:
-    return [binary, "-p", "say hi in 5 words or less", "--max-turns", "1"]
+    return [
+        binary,
+        "--settings",
+        str(CLAUDE_SETTINGS_PATH),
+        "-p",
+        "say hi in 5 words or less",
+        "--max-turns",
+        "1",
+    ]

@@ -19,6 +19,9 @@ class TestCopilotSpec:
     def test_display(self):
         assert copilot.SPEC["display"] == "GitHub Copilot CLI"
 
+    def test_config_path_is_ucode_env_file(self):
+        assert copilot.SPEC["config_path"].name == "ucode.env"
+
 
 class TestRenderEnvOverlay:
     def test_sets_provider_base_url(self):
@@ -205,3 +208,12 @@ class TestValidateCmd:
     def test_has_prompt_flag(self):
         cmd = copilot.validate_cmd("copilot")
         assert "--prompt" in cmd
+
+    def test_adds_ucode_mcp_config_when_present(self, tmp_path, monkeypatch):
+        mcp_path = tmp_path / "ucode-mcp-config.json"
+        mcp_path.write_text("{}", encoding="utf-8")
+        monkeypatch.setattr(copilot, "COPILOT_MCP_CONFIG_PATH", mcp_path)
+
+        cmd = copilot.validate_cmd("copilot")
+
+        assert cmd[:3] == ["copilot", "--additional-mcp-config", f"@{mcp_path}"]

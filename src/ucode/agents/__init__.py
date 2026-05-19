@@ -163,8 +163,6 @@ def resolve_launch_model(
     state: dict,
     explicit_model: str | None,
 ) -> tuple[dict, str | None]:
-    if tool == "codex":
-        return state, None
     model = explicit_model or default_model_for_tool(tool, state)
     if not model:
         raise RuntimeError(
@@ -176,7 +174,7 @@ def resolve_launch_model(
 def configure_tool(tool: str, state: dict, model: str | None = None) -> dict:
     result: dict | tuple[dict, str]
     if tool == "codex":
-        result = codex.write_tool_config(state)
+        result = codex.write_tool_config(state, model)
     else:
         if not model:
             raise RuntimeError(f"A {tool} model must be selected before configuration.")

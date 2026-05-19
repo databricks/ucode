@@ -31,7 +31,6 @@ import os
 import signal
 import subprocess
 import threading
-from pathlib import Path
 
 from ucode.agent_updates import available_npm_package_update
 from ucode.config_io import (
@@ -50,7 +49,8 @@ from ucode.databricks import (
 from ucode.state import mark_tool_managed, save_state
 from ucode.telemetry import agent_version, ucode_version
 
-PI_CONFIG_DIR = Path.home() / ".pi" / "agent"
+PI_UCODE_HOME = APP_DIR / "pi-home"
+PI_CONFIG_DIR = PI_UCODE_HOME / ".pi" / "agent"
 PI_CONFIG_PATH = PI_CONFIG_DIR / "models.json"
 PI_BACKUP_PATH = APP_DIR / "pi-models.backup.json"
 
@@ -219,6 +219,7 @@ def _refresh_forever(state: dict, stop_event: threading.Event) -> None:
 def build_runtime_env(token: str) -> dict[str, str]:
     env = os.environ.copy()
     env["OAUTH_TOKEN"] = token
+    env["HOME"] = str(PI_UCODE_HOME)
     return env
 
 
@@ -249,3 +250,10 @@ def launch(state: dict, tool_args: list[str]) -> None:
 
 def validate_cmd(binary: str) -> list[str]:
     return [binary, "--print", "say hi in 5 words or less"]
+
+
+def validate_env(state: dict) -> dict[str, str]:
+    workspace = state.get("workspace")
+    if not workspace:
+        raise RuntimeError("No workspace configured.")
+    return build_runtime_env(get_databricks_token(workspace))

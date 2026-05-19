@@ -166,6 +166,10 @@ class TestClaudeValidateCmd:
         cmd = claude.validate_cmd("claude")
         assert "-p" in cmd
 
+    def test_uses_ucode_settings_file(self):
+        cmd = claude.validate_cmd("claude")
+        assert cmd[:3] == ["claude", "--settings", str(claude.CLAUDE_SETTINGS_PATH)]
+
     def test_has_max_turns(self):
         cmd = claude.validate_cmd("claude")
         assert "--max-turns" in cmd
@@ -267,4 +271,9 @@ class TestClaudeLaunch:
             assert str(exc) == "stop"
 
         assert os.environ["OAUTH_TOKEN"] == "fresh-token"
-        assert exec_calls == [("claude", ["claude", "--debug"])]
+        assert exec_calls == [
+            (
+                "claude",
+                ["claude", "--settings", str(claude.CLAUDE_SETTINGS_PATH), "--debug"],
+            )
+        ]

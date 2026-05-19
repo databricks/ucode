@@ -25,6 +25,8 @@ from ucode.telemetry import agent_version, ucode_version
 CODEX_CONFIG_DIR = Path.home() / ".codex"
 CODEX_CONFIG_PATH = CODEX_CONFIG_DIR / "config.toml"
 CODEX_BACKUP_PATH = APP_DIR / "codex-config.backup.toml"
+CODEX_PROFILE_NAME = "ucode"
+CODEX_MODEL_PROVIDER_NAME = "ucode-databricks"
 
 SPEC: ToolSpec = {
     "binary": "codex",
@@ -35,10 +37,9 @@ SPEC: ToolSpec = {
 }
 
 MANAGED_KEYS: list[list[str]] = [
-    ["profile"],
-    ["profiles", "default", "model_provider"],
-    ["model_providers", "Databricks"],
-    ["model_providers", "Databricks", "http_headers"],
+    ["profiles", CODEX_PROFILE_NAME],
+    ["model_providers", CODEX_MODEL_PROVIDER_NAME],
+    ["model_providers", CODEX_MODEL_PROVIDER_NAME, "http_headers"],
 ]
 
 
@@ -46,14 +47,16 @@ def is_update_available() -> tuple[str, str] | None:
     return available_npm_package_update(SPEC["package"])
 
 
-def render_overlay(workspace: str) -> dict:
+def render_overlay(workspace: str, model: str | None = None) -> dict:
     auth_command = build_auth_shell_command(workspace)
     base_url = build_tool_base_url("codex", workspace)
+    profile = {"model_provider": CODEX_MODEL_PROVIDER_NAME}
+    if model:
+        profile["model"] = model
     return {
-        "profile": "default",
-        "profiles": {"default": {"model_provider": "Databricks"}},
+        "profiles": {CODEX_PROFILE_NAME: profile},
         "model_providers": {
-            "Databricks": {
+            CODEX_MODEL_PROVIDER_NAME: {
                 "name": "Databricks AI Gateway",
                 "base_url": base_url,
                 "wire_api": "responses",
@@ -73,7 +76,7 @@ def render_overlay(workspace: str) -> dict:
 
 def write_tool_config(state: dict, model: str | None = None) -> dict:
     backup_existing_file(CODEX_CONFIG_PATH, CODEX_BACKUP_PATH)
-    overlay = render_overlay(state["workspace"])
+    overlay = render_overlay(state["workspace"], model or default_model(state))
     doc = read_toml_safe(CODEX_CONFIG_PATH)
     deep_merge_dict(doc, overlay)
     write_toml_file(CODEX_CONFIG_PATH, doc)
@@ -83,7 +86,8 @@ def write_tool_config(state: dict, model: str | None = None) -> dict:
 
 
 def default_model(state: dict) -> str | None:
-    return None
+    codex_models = state.get("codex_models") or []
+    return codex_models[0] if codex_models else None
 
 
 def launch(state: dict, tool_args: list[str]) -> None:
@@ -91,8 +95,15 @@ def launch(state: dict, tool_args: list[str]) -> None:
     workspace = state.get("workspace")
     if workspace:
         os.environ["OAUTH_TOKEN"] = get_databricks_token(workspace)
-    os.execvp(binary, [binary, *tool_args])
+    os.execvp(binary, [binary, "--profile", CODEX_PROFILE_NAME, *tool_args])
 
 
 def validate_cmd(binary: str) -> list[str]:
-    return [binary, "exec", "--skip-git-repo-check", "say hi in 5 words or less"]
+    return [
+        binary,
+        "--profile",
+        CODEX_PROFILE_NAME,
+        "exec",
+        "--skip-git-repo-check",
+        "say hi in 5 words or less",
+    ]
