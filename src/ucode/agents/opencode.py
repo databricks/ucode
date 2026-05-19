@@ -86,6 +86,15 @@ def render_overlay(
     providers: dict = {}
     keys: list[list[str]] = [["model"]]
     if anthropic_models:
+        # @ai-sdk/anthropic injects `eager_input_streaming: true` on tool defs;
+        # the Databricks gateway's strict validator rejects it. opencode's
+        # auto-disable in transform.ts skips models whose id contains "claude",
+        # so we opt out per-model. The setting lives in per-call providerOptions,
+        # which opencode reads from `models.<m>.options`, not provider `options`.
+        anthropic_model_overlay = {
+            "headers": ua_header,
+            "options": {"toolStreaming": False},
+        }
         providers["databricks-anthropic"] = {
             "npm": "@ai-sdk/anthropic",
             "options": {
@@ -93,7 +102,7 @@ def render_overlay(
                 "apiKey": token,
                 "headers": auth_headers,
             },
-            "models": {m: {"headers": ua_header} for m in anthropic_models},
+            "models": {m: anthropic_model_overlay for m in anthropic_models},
         }
         keys.append(["provider", "databricks-anthropic"])
     if gemini_models:

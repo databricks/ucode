@@ -81,6 +81,16 @@ class TestRenderOverlay:
         headers = overlay["provider"]["databricks-anthropic"]["options"]["headers"]
         assert headers["Authorization"] == "Bearer tok"
 
+    def test_anthropic_tool_streaming_disabled(self):
+        # @ai-sdk/anthropic injects `eager_input_streaming: true` on tool defs,
+        # which the Databricks gateway rejects. opencode's auto-disable skips
+        # Claude models, so we opt out per-model. The setting must live in
+        # `models.<m>.options` — per-call providerOptions — not provider options.
+        models = {"anthropic": ["claude-sonnet"]}
+        overlay, _ = opencode.render_overlay("claude-sonnet", "tok", _base_urls(), models)
+        model_entry = overlay["provider"]["databricks-anthropic"]["models"]["claude-sonnet"]
+        assert model_entry["options"]["toolStreaming"] is False
+
     def test_user_agent_header_anthropic(self, monkeypatch):
         # UA must live at the per-model level — OpenCode clobbers
         # provider-level `headers["User-Agent"]` in session/llm.ts.
