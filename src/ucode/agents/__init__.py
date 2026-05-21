@@ -32,12 +32,13 @@ from ucode.ui import (
     spinner,
 )
 
-from . import claude, codex, copilot, gemini, opencode, pi
+from . import claude, codex, copilot, gemini, goose, opencode, pi
 
 _MODULES = {
     "codex": codex,
     "claude": claude,
     "gemini": gemini,
+    "goose": goose,
     "opencode": opencode,
     "copilot": copilot,
     "pi": pi,
@@ -51,6 +52,7 @@ TOOL_ALIASES = {
     "claude-code": "claude",
     "gemini": "gemini",
     "gemini-cli": "gemini",
+    "goose": "goose",
     "opencode": "opencode",
     "copilot": "copilot",
     "pi": "pi",
@@ -64,7 +66,7 @@ def normalize_tool(tool: str) -> str:
     normalized = TOOL_ALIASES.get(tool.strip().lower())
     if not normalized:
         raise RuntimeError(
-            f"Unsupported tool '{tool}'. Use one of: codex, claude, gemini, opencode, copilot, pi."
+            f"Unsupported tool '{tool}'. Use one of: codex, claude, gemini, goose, opencode, copilot, pi."
         )
     return normalized
 
@@ -108,6 +110,16 @@ def install_tool_binary(tool: str, *, strict: bool = True, update_existing: bool
         if update_existing and _confirm_update_installed_tool_binary(tool):
             _update_installed_tool_binary(tool)
         return True
+
+    if not package:
+        message = (
+            f"`{binary}` is not installed. "
+            f"Install {spec['display']} and ensure `{binary}` is on your PATH."
+        )
+        if strict:
+            raise RuntimeError(message)
+        print_warning(message)
+        return False
 
     if not shutil.which("npm"):
         message = f"`{binary}` is not installed and npm is not available to install it."
@@ -182,6 +194,8 @@ def configure_tool(tool: str, state: dict, model: str | None = None) -> dict:
             result = claude.write_tool_config(state, model)
         elif tool == "gemini":
             result = gemini.write_tool_config(state, model)
+        elif tool == "goose":
+            result = goose.write_tool_config(state, model)
         elif tool == "copilot":
             result = copilot.write_tool_config(state, model)
         elif tool == "pi":
@@ -210,6 +224,8 @@ def check_gateway_endpoint(state: dict, tool: str) -> bool:
         return bool(state.get("gemini_models"))
     if tool == "copilot":
         return bool(state.get("claude_models")) or bool(state.get("codex_models"))
+    if tool == "goose":
+        return bool(state.get("claude_models"))
     if tool == "pi":
         return (
             bool(state.get("claude_models"))
@@ -221,6 +237,7 @@ def check_gateway_endpoint(state: dict, tool: str) -> bool:
 
 _TOOL_DISCOVERY_SOURCES: dict[str, tuple[str, ...]] = {
     "claude": ("claude",),
+    "goose": ("claude",),
     "opencode": ("claude", "gemini"),
     "codex": ("codex",),
     "gemini": ("gemini",),
