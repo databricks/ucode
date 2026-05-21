@@ -90,6 +90,22 @@ def _prompt_for_configuration(tool: str | None = None) -> str:
     return prompt_for_workspace(desc, profiles)
 
 
+def _parse_agents_option(agents: str) -> list[str]:
+    tools: list[str] = []
+    for raw_tool in agents.split(","):
+        raw_tool = raw_tool.strip()
+        if not raw_tool:
+            continue
+        tool = normalize_tool(raw_tool)
+        if tool not in tools:
+            tools.append(tool)
+    if not tools:
+        raise RuntimeError(
+            "No agents provided for --agents. Use a comma-separated list like `--agents claude,codex`."
+        )
+    return tools
+
+
 def configure_shared_state(
     workspace: str, tools: list[str] | None = None, force_login: bool = False
 ) -> dict:
@@ -160,7 +176,12 @@ def configure_shared_state(
     return state
 
 
-def configure_workspace_command(tool: str | None = None) -> int:
+def configure_workspace_command(
+    tool: str | None = None, selected_tools: list[str] | None = None
+) -> int:
+    if tool is not None and selected_tools is not None:
+        raise RuntimeError("Use either --agent or --agents, not both.")
+
     if tool is not None:
         workspace = _prompt_for_configuration(tool)
         state = configure_shared_state(workspace, tools=[tool], force_login=True)
@@ -190,10 +211,11 @@ def configure_workspace_command(tool: str | None = None) -> int:
         return 0
 
     workspace = _prompt_for_configuration()
-    state = configure_shared_state(workspace, force_login=True)
+    state = configure_shared_state(workspace, tools=selected_tools, force_login=True)
 
     available_on_workspace: list[str] = []
-    for tool_name in TOOL_SPECS:
+    tools_to_check = selected_tools or list(TOOL_SPECS)
+    for tool_name in tools_to_check:
         with spinner(f"Checking {TOOL_SPECS[tool_name]['display']} availability..."):
             if check_gateway_endpoint(state, tool_name):
                 available_on_workspace.append(tool_name)
@@ -203,7 +225,20 @@ def configure_workspace_command(tool: str | None = None) -> int:
         _print_discovery_diagnostics(state)
         return 1
 
-    picked = prompt_for_tools([(t, TOOL_SPECS[t]["display"]) for t in available_on_workspace])
+    if selected_tools is None:
+        picked = prompt_for_tools([(t, TOOL_SPECS[t]["display"]) for t in available_on_workspace])
+    else:
+        unavailable_tools = [
+            tool_name for tool_name in selected_tools if tool_name not in available_on_workspace
+        ]
+        if unavailable_tools:
+            _print_discovery_diagnostics(state)
+            displays = ", ".join(
+                TOOL_SPECS[tool_name]["display"] for tool_name in unavailable_tools
+            )
+            raise RuntimeError(f"Requested agent(s) not available on this workspace: {displays}.")
+        picked = selected_tools
+
     if not picked:
         print_note("No coding agents selected — nothing to configure.")
         return 0
@@ -456,6 +491,13 @@ def configure(
             help="Configure only the named agent (e.g. claude, codex, gemini, opencode, copilot, pi).",
         ),
     ] = None,
+    agents: Annotated[
+        str | None,
+        typer.Option(
+            "--agents",
+            help="Configure a comma-separated list of agents without prompting (e.g. claude,codex).",
+        ),
+    ] = None,
 ) -> None:
     """Configure workspace URL and AI Gateway."""
     if ctx.invoked_subcommand is not None:
@@ -463,10 +505,14 @@ def configure(
     set_dry_run(dry_run)
     try:
         install_databricks_cli()
+        if agent is not None and agents is not None:
+            raise RuntimeError("Use either --agent or --agents, not both.")
         if agent is not None:
             tool = normalize_tool(agent)
             install_tool_binary(tool, strict=True, update_existing=True)
             configure_workspace_command(tool)
+        elif agents is not None:
+            configure_workspace_command(selected_tools=_parse_agents_option(agents))
         else:
             # Tool binaries are installed after the user picks which agents
             # they want, in configure_workspace_command.

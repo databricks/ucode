@@ -65,6 +65,12 @@ class TestHelp:
         assert result.exit_code == 0
         assert "Usage:" in result.output
 
+    def test_configure_help_lists_agents_flag(self):
+        result = runner.invoke(app, ["configure", "--help"])
+        assert result.exit_code == 0
+        assert "--agents" in result.output
+        assert "comma-separated list of agents" in result.output
+
 
 def _patch_launch(tool: str):
     """Return a context-manager stack that makes _launch_tool a no-op.
@@ -363,6 +369,27 @@ class TestConfigureAgentFlag:
         assert result.exit_code == 0, result.output
         mock_cfg.assert_called_once_with()
 
+    def test_agents_flag_calls_configure_with_tools(self):
+        with (
+            patch("ucode.cli.install_databricks_cli"),
+            patch("ucode.cli.install_tool_binary") as mock_install,
+            patch("ucode.cli.configure_workspace_command") as mock_cfg,
+        ):
+            result = runner.invoke(app, ["configure", "--agents", "claude,codex"])
+        assert result.exit_code == 0, result.output
+        mock_install.assert_not_called()
+        mock_cfg.assert_called_once_with(selected_tools=["claude", "codex"])
+
+    def test_agents_flag_normalizes_aliases_and_dedupes(self):
+        with (
+            patch("ucode.cli.install_databricks_cli"),
+            patch("ucode.cli.install_tool_binary"),
+            patch("ucode.cli.configure_workspace_command") as mock_cfg,
+        ):
+            result = runner.invoke(app, ["configure", "--agents", " claude-code, codex,claude "])
+        assert result.exit_code == 0, result.output
+        mock_cfg.assert_called_once_with(selected_tools=["claude", "codex"])
+
     def test_agent_flag_calls_configure_with_tool(self):
         with (
             patch("ucode.cli.install_databricks_cli"),
@@ -409,3 +436,90 @@ class TestConfigureAgentFlag:
             result = runner.invoke(app, ["configure", "--agent", "bogus"])
         assert result.exit_code != 0
         mock_cfg.assert_not_called()
+
+    def test_agents_flag_rejects_unknown(self):
+        with (
+            patch("ucode.cli.install_databricks_cli"),
+            patch("ucode.cli.install_tool_binary"),
+            patch("ucode.cli.configure_workspace_command") as mock_cfg,
+        ):
+            result = runner.invoke(app, ["configure", "--agents", "claude,bogus"])
+        assert result.exit_code != 0
+        assert "Unsupported tool 'bogus'" in result.output
+        assert "codex, claude, gemini, opencode, copilot, pi" in " ".join(result.output.split())
+        mock_cfg.assert_not_called()
+
+    def test_agents_flag_rejects_empty_list(self):
+        with (
+            patch("ucode.cli.install_databricks_cli"),
+            patch("ucode.cli.install_tool_binary"),
+            patch("ucode.cli.configure_workspace_command") as mock_cfg,
+        ):
+            result = runner.invoke(app, ["configure", "--agents", ","])
+        assert result.exit_code != 0
+        mock_cfg.assert_not_called()
+
+    def test_agent_and_agents_flags_are_mutually_exclusive(self):
+        with (
+            patch("ucode.cli.install_databricks_cli"),
+            patch("ucode.cli.install_tool_binary"),
+            patch("ucode.cli.configure_workspace_command") as mock_cfg,
+        ):
+            result = runner.invoke(app, ["configure", "--agent", "claude", "--agents", "codex"])
+        assert result.exit_code != 0
+        mock_cfg.assert_not_called()
+
+
+class TestConfigureAgentsSelection:
+    def test_selected_tools_skip_picker(self, monkeypatch):
+        import ucode.cli as cli_mod
+
+        state = {**MINIMAL_STATE, "available_tools": []}
+        monkeypatch.setattr(
+            cli_mod, "_prompt_for_configuration", lambda tool=None: "https://example.com"
+        )
+        monkeypatch.setattr(cli_mod, "configure_shared_state", lambda *args, **kwargs: state)
+        monkeypatch.setattr(
+            cli_mod, "check_gateway_endpoint", lambda state, tool: tool in {"claude", "codex"}
+        )
+        monkeypatch.setattr(
+            cli_mod,
+            "prompt_for_tools",
+            lambda available: pytest.fail("prompt_for_tools should not be called"),
+        )
+        install_calls: list[str] = []
+        monkeypatch.setattr(
+            cli_mod,
+            "install_tool_binary",
+            lambda tool, strict=False, update_existing=False: install_calls.append(tool) or True,
+        )
+        configured: list[list[str]] = []
+        monkeypatch.setattr(
+            cli_mod,
+            "configure_selected_tools",
+            lambda state, tools: configured.append(tools) or {**state, "available_tools": tools},
+        )
+        monkeypatch.setattr(cli_mod, "validate_all_tools", lambda state: None)
+
+        assert cli_mod.configure_workspace_command(selected_tools=["claude", "codex"]) == 0
+        assert install_calls == ["claude", "codex"]
+        assert configured == [["claude", "codex"]]
+
+    def test_unavailable_selected_tool_errors_before_configure(self, monkeypatch):
+        import ucode.cli as cli_mod
+
+        state = {**MINIMAL_STATE, "available_tools": []}
+        monkeypatch.setattr(
+            cli_mod, "_prompt_for_configuration", lambda tool=None: "https://example.com"
+        )
+        monkeypatch.setattr(cli_mod, "configure_shared_state", lambda *args, **kwargs: state)
+        monkeypatch.setattr(cli_mod, "check_gateway_endpoint", lambda state, tool: tool == "claude")
+        monkeypatch.setattr(cli_mod, "install_tool_binary", lambda *args, **kwargs: None)
+        monkeypatch.setattr(
+            cli_mod,
+            "configure_selected_tools",
+            lambda state, tools: pytest.fail("configure_selected_tools should not be called"),
+        )
+
+        with pytest.raises(RuntimeError, match="Codex"):
+            cli_mod.configure_workspace_command(selected_tools=["claude", "codex"])

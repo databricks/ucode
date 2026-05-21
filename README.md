@@ -45,6 +45,14 @@ To configure all tools at once:
 ucode configure
 ```
 
+To configure specific tools without the picker, pass a comma-separated list:
+
+```bash
+ucode configure --agents claude,codex
+```
+
+Available agent names are `codex`, `claude`, `gemini`, `opencode`, `copilot`, and `pi`.
+
 ### MCP servers (optional)
 
 ```bash
@@ -72,6 +80,7 @@ Discovered external MCP connections are listed directly. MCP auth uses a Databri
 | `ucode usage` | Show AI Gateway usage summary |
 | `ucode revert` | Clear saved state and restore backed-up config files |
 | `ucode configure --dry-run` | Preview config files without writing them |
+| `ucode configure --agents claude,codex` | Configure specific agents without the interactive picker |
 
 ## Managed Local Files
 
