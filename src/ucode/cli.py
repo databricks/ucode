@@ -28,11 +28,11 @@ from ucode.agents import (
 from ucode.config_io import restore_file, set_dry_run
 from ucode.databricks import (
     build_shared_base_urls,
+    discover_claude_models,
+    discover_codex_models,
+    discover_gemini_models,
     ensure_ai_gateway_v2,
     ensure_databricks_auth,
-    fetch_ai_gateway_claude_models,
-    fetch_codex_models,
-    fetch_gemini_models,
     get_databricks_profiles,
     get_databricks_token,
     install_databricks_cli,
@@ -56,6 +56,29 @@ from ucode.ui import (
     status_badge,
 )
 from ucode.usage import usage as usage_report
+
+_DISCOVERY_CONSUMERS: dict[str, tuple[str, ...]] = {
+    "claude": ("claude", "opencode", "copilot", "pi"),
+    "codex": ("codex", "copilot", "pi"),
+    "gemini": ("gemini", "opencode", "pi"),
+}
+
+
+def _print_discovery_diagnostics(state: dict) -> None:
+    """Surface per-source reasons after a failed discovery so the user knows
+    which API call returned what — instead of the generic 'no agents' line."""
+    reasons = state.get("_discovery_reasons") or {}
+    if not reasons:
+        return
+    labels = {"claude": "Claude models", "codex": "Codex models", "gemini": "Gemini models"}
+    for source, reason in reasons.items():
+        consumers = ", ".join(_DISCOVERY_CONSUMERS.get(source, ()))
+        label = labels.get(source, source)
+        if reason:
+            print_note(f"{label} (needed for: {consumers}): {reason}")
+        else:
+            print_note(f"{label} (needed for: {consumers}): no models returned")
+    print_note("Re-run with `UCODE_DEBUG=1` to log raw discovery responses to ~/.ucode/debug.log.")
 
 
 def _prompt_for_configuration(tool: str | None = None) -> str:
@@ -81,31 +104,33 @@ def configure_shared_state(
         run_databricks_login(workspace)
     else:
         ensure_databricks_auth(workspace)
-    with spinner("Verifying AI Gateway V2..."):
+    with spinner("Verifying Unity AI Gateway..."):
         token = get_databricks_token(workspace)
         ensure_ai_gateway_v2(workspace, token)
     print_success("Unity AI Gateway detected")
 
+    want_claude = (
+        fetch_all or "claude" in tools or "opencode" in tools or "copilot" in tools or "pi" in tools
+    )
+    want_gemini = fetch_all or "gemini" in tools or "opencode" in tools or "pi" in tools
+    want_codex = fetch_all or "codex" in tools or "copilot" in tools or "pi" in tools
+
+    claude_reason: str | None = None
+    gemini_reason: str | None = None
+    codex_reason: str | None = None
     with spinner("Fetching available models..."):
-        claude_models = (
-            fetch_ai_gateway_claude_models(workspace, token)
-            if fetch_all
-            or "claude" in tools
-            or "opencode" in tools
-            or "copilot" in tools
-            or "pi" in tools
-            else {}
-        )
-        gemini_models = (
-            fetch_gemini_models(workspace, token)
-            if fetch_all or "gemini" in tools or "opencode" in tools or "pi" in tools
-            else []
-        )
-        codex_models = (
-            fetch_codex_models(workspace, token)
-            if fetch_all or "codex" in tools or "copilot" in tools or "pi" in tools
-            else []
-        )
+        if want_claude:
+            claude_models, claude_reason = discover_claude_models(workspace, token)
+        else:
+            claude_models = {}
+        if want_gemini:
+            gemini_models, gemini_reason = discover_gemini_models(workspace, token)
+        else:
+            gemini_models = []
+        if want_codex:
+            codex_models, codex_reason = discover_codex_models(workspace, token)
+        else:
+            codex_models = []
     opencode_models: dict[str, list[str]] = {}
     if claude_models:
         opencode_models["anthropic"] = list(claude_models.values())
@@ -116,15 +141,22 @@ def configure_shared_state(
     state = load_state()
     state["workspace"] = workspace
     state["base_urls"] = build_shared_base_urls(workspace)
-    if fetch_all or "claude" in tools or "opencode" in tools or "copilot" in tools or "pi" in tools:
+    if want_claude:
         state["claude_models"] = claude_models
-    if fetch_all or "gemini" in tools or "opencode" in tools or "pi" in tools:
+    if want_gemini:
         state["gemini_models"] = gemini_models
-    if fetch_all or "codex" in tools or "copilot" in tools or "pi" in tools:
+    if want_codex:
         state["codex_models"] = codex_models
     if fetch_all or "opencode" in tools:
         state["opencode_models"] = opencode_models
     save_state(state)
+    # Diagnostic reasons are transient — attach after save_state so they don't
+    # land on disk but are available to the caller for this run.
+    state["_discovery_reasons"] = {
+        "claude": claude_reason,
+        "gemini": gemini_reason,
+        "codex": codex_reason,
+    }
     return state
 
 
@@ -168,6 +200,7 @@ def configure_workspace_command(tool: str | None = None) -> int:
 
     if not available_on_workspace:
         print_err("No coding agents are available on this workspace.")
+        _print_discovery_diagnostics(state)
         return 1
 
     picked = prompt_for_tools([(t, TOOL_SPECS[t]["display"]) for t in available_on_workspace])

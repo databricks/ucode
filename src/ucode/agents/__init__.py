@@ -219,12 +219,36 @@ def check_gateway_endpoint(state: dict, tool: str) -> bool:
     return False
 
 
+_TOOL_DISCOVERY_SOURCES: dict[str, tuple[str, ...]] = {
+    "claude": ("claude",),
+    "opencode": ("claude", "gemini"),
+    "codex": ("codex",),
+    "gemini": ("gemini",),
+    "copilot": ("claude", "codex"),
+    "pi": ("claude", "codex", "gemini"),
+}
+
+
+def _availability_failure_detail(tool: str, state: dict) -> str:
+    reasons = state.get("_discovery_reasons") or {}
+    if not reasons:
+        return ""
+    sources = _TOOL_DISCOVERY_SOURCES.get(tool, ())
+    parts = [f"{source} discovery: {reasons[source]}" for source in sources if reasons.get(source)]
+    if not parts:
+        return ""
+    return " (" + "; ".join(parts) + ")"
+
+
 def configure_single_tool(tool: str, state: dict) -> dict:
     """Check availability, configure, and persist state for one tool only."""
     with spinner(f"Checking {TOOL_SPECS[tool]['display']} availability..."):
         ok = check_gateway_endpoint(state, tool)
     if not ok:
-        raise RuntimeError(f"{TOOL_SPECS[tool]['display']} is not available on this workspace.")
+        detail = _availability_failure_detail(tool, state)
+        raise RuntimeError(
+            f"{TOOL_SPECS[tool]['display']} is not available on this workspace.{detail}"
+        )
     if tool == "codex":
         state = configure_tool("codex", state)
     else:

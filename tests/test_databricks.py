@@ -332,7 +332,22 @@ class TestListDatabricksApps:
 
 
 class TestEnsureAiGatewayV2:
-    """Test ensure_ai_gateway_v2 without real network calls."""
+    """Test ensure_ai_gateway_v2 without real network calls.
+
+    The probe is `GET /api/ai-gateway/v2/endpoints`: a successful JSON
+    response means v2 is wired up (even if `endpoints` is empty), while
+    404/401/403/network errors all raise a RuntimeError with the docs URL.
+    """
+
+    @staticmethod
+    def _mock_json_response(body: str):
+        from unittest.mock import MagicMock
+
+        mock_resp = MagicMock()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_resp.read.return_value = body.encode("utf-8")
+        return mock_resp
 
     def test_raises_on_404(self):
         from unittest.mock import MagicMock, patch
@@ -343,6 +358,17 @@ class TestEnsureAiGatewayV2:
             from ucode.databricks import ensure_ai_gateway_v2
 
             with pytest.raises(RuntimeError, match=AI_GATEWAY_V2_DOCS_URL):
+                ensure_ai_gateway_v2(WS, "fake-token")
+
+    def test_raises_on_401(self):
+        from unittest.mock import MagicMock, patch
+        from urllib.error import HTTPError
+
+        exc = HTTPError(url="", code=401, msg="Unauthorized", hdrs=MagicMock(), fp=None)
+        with patch("ucode.databricks.urllib_request.urlopen", side_effect=exc):
+            from ucode.databricks import ensure_ai_gateway_v2
+
+            with pytest.raises(RuntimeError, match="401"):
                 ensure_ai_gateway_v2(WS, "fake-token")
 
     def test_raises_on_url_error(self):
@@ -358,24 +384,26 @@ class TestEnsureAiGatewayV2:
             with pytest.raises(RuntimeError, match=AI_GATEWAY_V2_DOCS_URL):
                 ensure_ai_gateway_v2(WS, "fake-token")
 
-    def test_succeeds_on_non_404_http_error(self):
-        from unittest.mock import MagicMock, patch
-        from urllib.error import HTTPError
+    def test_succeeds_with_endpoints_list(self):
+        from unittest.mock import patch
 
-        # 405 Method Not Allowed → still means v2 is there (method mismatch, not missing route)
-        exc = HTTPError(url="", code=405, msg="Method Not Allowed", hdrs=MagicMock(), fp=None)
-        with patch("ucode.databricks.urllib_request.urlopen", side_effect=exc):
+        with patch(
+            "ucode.databricks.urllib_request.urlopen",
+            return_value=self._mock_json_response('{"endpoints": [{"name": "foo"}]}'),
+        ):
             from ucode.databricks import ensure_ai_gateway_v2
 
             ensure_ai_gateway_v2(WS, "fake-token")  # should not raise
 
-    def test_succeeds_when_urlopen_returns(self):
-        from unittest.mock import MagicMock, patch
+    def test_succeeds_with_empty_endpoints_list(self):
+        from unittest.mock import patch
 
-        mock_resp = MagicMock()
-        mock_resp.__enter__ = lambda s: s
-        mock_resp.__exit__ = MagicMock(return_value=False)
-        with patch("ucode.databricks.urllib_request.urlopen", return_value=mock_resp):
+        # A 200 with no endpoints still means v2 is wired up on this workspace —
+        # downstream discovery will surface "no models" with a clearer reason.
+        with patch(
+            "ucode.databricks.urllib_request.urlopen",
+            return_value=self._mock_json_response('{"endpoints": []}'),
+        ):
             from ucode.databricks import ensure_ai_gateway_v2
 
             ensure_ai_gateway_v2(WS, "fake-token")  # should not raise

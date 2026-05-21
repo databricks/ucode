@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import logging
+import logging.handlers
 import os
 import platform
 import re
@@ -15,7 +16,9 @@ from urllib import error as urllib_error
 from urllib import request as urllib_request
 from urllib.parse import urlparse
 
+from ucode.config_io import APP_DIR
 from ucode.ui import (
+    err_console,
     normalize_workspace_url,
     print_kv,
     print_note,
@@ -34,6 +37,90 @@ WINDOWS_DATABRICKS_INSTALL_URL = (
 AI_GATEWAY_V2_DOCS_URL = "https://docs.databricks.com/aws/en/ai-gateway/overview-beta"
 MIN_DATABRICKS_CLI_VERSION = (0, 298, 0)
 TOKEN_REFRESH_INTERVAL_SECONDS = 1800
+
+
+def _debug_enabled() -> bool:
+    return os.environ.get("UCODE_DEBUG") == "1"
+
+
+_DEBUG_LOGGER: logging.Logger | None = None
+
+
+def _get_debug_logger() -> logging.Logger | None:
+    """Lazily configure a rotating file logger when UCODE_DEBUG=1.
+
+    Returns the logger on first call (and caches it), or None if debug is
+    disabled or the log file could not be opened. A one-time breadcrumb is
+    printed to stderr so the user knows where to tail."""
+    global _DEBUG_LOGGER
+    if _DEBUG_LOGGER is not None or not _debug_enabled():
+        return _DEBUG_LOGGER
+
+    log_path = APP_DIR / "debug.log"
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        handler = logging.handlers.RotatingFileHandler(
+            log_path,
+            maxBytes=1_000_000,
+            backupCount=3,
+            encoding="utf-8",
+        )
+        handler.setFormatter(
+            logging.Formatter("%(asctime)s %(message)s", datefmt="%Y-%m-%dT%H:%M:%S")
+        )
+    except OSError:
+        return None
+
+    logger = logging.getLogger("ucode.debug")
+    logger.setLevel(logging.DEBUG)
+    logger.addHandler(handler)
+    logger.propagate = False
+    _DEBUG_LOGGER = logger
+    err_console.print(f"[dim]\\[ucode debug] logging to {log_path}[/dim]")
+    return _DEBUG_LOGGER
+
+
+def _debug(label: str, detail: str) -> None:
+    """When UCODE_DEBUG=1, append a timestamped entry to ~/.ucode/debug.log."""
+    logger = _get_debug_logger()
+    if logger is not None:
+        logger.debug("%s: %s", label, detail)
+
+
+def _http_get_json(
+    url: str, token: str, *, timeout: int = 10
+) -> tuple[dict | list | None, str | None]:
+    """GET a JSON endpoint. Returns (payload, None) on success, (None, reason) on failure.
+
+    Honors UCODE_DEBUG=1 to append status + truncated body to ~/.ucode/debug.log.
+    """
+    request = urllib_request.Request(
+        url,
+        headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+    )
+    try:
+        with urllib_request.urlopen(request, timeout=timeout) as response:
+            body = response.read().decode("utf-8")
+        _debug(f"GET {url}", f"HTTP 200, {len(body)} bytes")
+        if _debug_enabled():
+            _debug("body", body[:4000])
+        try:
+            return json.loads(body), None
+        except json.JSONDecodeError as exc:
+            return None, f"response was not valid JSON ({exc.msg})"
+    except urllib_error.HTTPError as exc:
+        body = ""
+        try:
+            body = exc.read().decode("utf-8", errors="replace") if exc.fp else ""
+        except Exception:
+            body = ""
+        _debug(f"GET {url}", f"HTTP {exc.code} {exc.reason}")
+        if _debug_enabled() and body:
+            _debug("body", body[:4000])
+        return None, f"HTTP {exc.code} {exc.reason}"
+    except urllib_error.URLError as exc:
+        _debug(f"GET {url}", f"URLError: {exc.reason}")
+        return None, f"network error: {exc.reason}"
 
 
 def run(
@@ -446,19 +533,20 @@ def build_auth_shell_command(workspace: str) -> str:
     )
 
 
-def fetch_ai_gateway_claude_models(workspace: str, token: str) -> dict[str, str]:
-    hostname = workspace_hostname(workspace)
-    request = urllib_request.Request(
-        f"https://{hostname}/ai-gateway/anthropic/v1/models",
-        headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
-    )
-    try:
-        with urllib_request.urlopen(request, timeout=10) as response:
-            data = json.loads(response.read().decode("utf-8"))
-    except (urllib_error.URLError, urllib_error.HTTPError, json.JSONDecodeError):
-        return {}
+def discover_claude_models(workspace: str, token: str) -> tuple[dict[str, str], str | None]:
+    """Discover Claude families on this workspace's AI Gateway.
 
-    models = [
+    Returns (models_by_family, reason). reason is None on success; otherwise it
+    describes why the dict is empty (HTTP error, network error, or no models
+    matching the expected naming convention).
+    """
+    hostname = workspace_hostname(workspace)
+    payload, reason = _http_get_json(f"https://{hostname}/ai-gateway/anthropic/v1/models", token)
+    if payload is None:
+        return {}, reason
+
+    data = cast(dict, payload) if isinstance(payload, dict) else {}
+    raw_ids = [
         m["id"]
         for m in data.get("data", [])
         if isinstance(m.get("id"), str) and not m["id"].endswith("-anthropic")
@@ -467,71 +555,114 @@ def fetch_ai_gateway_claude_models(workspace: str, token: str) -> dict[str, str]
     result: dict[str, str] = {}
     for family, key in [("opus", "opus"), ("sonnet", "sonnet"), ("haiku", "haiku")]:
         candidates = sorted(
-            [m for m in models if f"databricks-claude-{family}-" in m],
+            [m for m in raw_ids if f"databricks-claude-{family}-" in m],
             reverse=True,
         )
         if candidates:
             result[key] = candidates[0]
-    return result
-
-
-def _fetch_endpoints_with_api_type(workspace: str, token: str, api_type: str) -> list[str]:
-    """Generic helper: list endpoint names whose served_entities expose api_type."""
-    hostname = workspace_hostname(workspace)
-    request = urllib_request.Request(
-        f"https://{hostname}/api/2.0/serving-endpoints:foundation-models",
-        headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+    if result:
+        return result, None
+    if not raw_ids:
+        return {}, "AI Gateway returned no Claude model ids"
+    sample = ", ".join(raw_ids[:5])
+    return {}, (
+        "AI Gateway returned model ids but none matched "
+        f"`databricks-claude-{{opus,sonnet,haiku}}-*` (got: {sample})"
     )
-    try:
-        with urllib_request.urlopen(request, timeout=10) as response:
-            data = json.loads(response.read().decode("utf-8"))
-    except (urllib_error.URLError, urllib_error.HTTPError, json.JSONDecodeError):
-        return []
 
+
+def fetch_ai_gateway_claude_models(workspace: str, token: str) -> dict[str, str]:
+    """Backwards-compatible wrapper that discards the diagnostic reason."""
+    models, _ = discover_claude_models(workspace, token)
+    return models
+
+
+def discover_endpoints_with_api_type(
+    workspace: str, token: str, api_type: str
+) -> tuple[list[str], str | None]:
+    """List endpoint names whose served_entities expose api_type with v2 support.
+
+    Returns (endpoints, reason). reason is None on success; otherwise it
+    describes why the list is empty.
+    """
+    hostname = workspace_hostname(workspace)
+    payload, reason = _http_get_json(
+        f"https://{hostname}/api/2.0/serving-endpoints:foundation-models", token
+    )
+    if payload is None:
+        return [], reason
+
+    data = cast(dict, payload) if isinstance(payload, dict) else {}
+    endpoints = data.get("endpoints", [])
     out: list[str] = []
-    for ep in data.get("endpoints", []):
+    saw_endpoint_without_v2 = False
+    for ep in endpoints:
         name = ep.get("name", "")
         entities = ep.get("config", {}).get("served_entities", [])
         api_types: set[str] = set()
+        any_v2 = False
         for se in entities:
             fm = se.get("foundation_model", {})
             if fm.get("ai_gateway_v2_supported") is True:
+                any_v2 = True
                 api_types.update(fm.get("api_types", []))
+        if not any_v2 and entities:
+            saw_endpoint_without_v2 = True
         if api_type in api_types:
             out.append(name)
-    return sorted(out)
+    if out:
+        return sorted(out), None
+    if not endpoints:
+        return [], "foundation-models listing returned no endpoints"
+    if saw_endpoint_without_v2:
+        return [], (
+            f"no endpoint exposes api_type `{api_type}` with "
+            "`ai_gateway_v2_supported=true` (workspace has v1-only endpoints)"
+        )
+    return [], f"no endpoint exposes api_type `{api_type}`"
+
+
+def _fetch_endpoints_with_api_type(workspace: str, token: str, api_type: str) -> list[str]:
+    """Backwards-compatible wrapper that discards the diagnostic reason."""
+    endpoints, _ = discover_endpoints_with_api_type(workspace, token, api_type)
+    return endpoints
+
+
+def discover_gemini_models(workspace: str, token: str) -> tuple[list[str], str | None]:
+    return discover_endpoints_with_api_type(workspace, token, "gemini/v1/generateContent")
+
+
+def discover_codex_models(workspace: str, token: str) -> tuple[list[str], str | None]:
+    return discover_endpoints_with_api_type(workspace, token, "openai/v1/responses")
 
 
 def fetch_gemini_models(workspace: str, token: str) -> list[str]:
-    return _fetch_endpoints_with_api_type(workspace, token, "gemini/v1/generateContent")
+    models, _ = discover_gemini_models(workspace, token)
+    return models
 
 
 def fetch_codex_models(workspace: str, token: str) -> list[str]:
-    return _fetch_endpoints_with_api_type(workspace, token, "openai/v1/responses")
+    models, _ = discover_codex_models(workspace, token)
+    return models
 
 
 def ensure_ai_gateway_v2(workspace: str, token: str) -> None:
     """Probe AI Gateway v2 and raise if unavailable.
 
-    Replaces the prior detect/fall-back pattern: v2 is now mandatory.
+    Uses the dedicated v2 listing endpoint `GET /api/ai-gateway/v2/endpoints`:
+    a 200 response (even with an empty list) means v2 is wired up on this
+    workspace — a "no endpoints provisioned" case will surface naturally in
+    downstream discovery. 404 / 401 / 403 / network failures all raise a
+    clear error with the docs link instead of silently progressing.
     """
     hostname = workspace_hostname(workspace)
-    request = urllib_request.Request(
-        f"https://{hostname}/ai-gateway/anthropic/v1/messages",
-        method="HEAD",
-        headers={"Authorization": f"Bearer {token}"},
-    )
-    try:
-        urllib_request.urlopen(request, timeout=10)
+    url = f"https://{hostname}/api/ai-gateway/v2/endpoints?page_size=1"
+    payload, reason = _http_get_json(url, token)
+    if payload is not None:
         return
-    except urllib_error.HTTPError as exc:
-        if exc.code != 404:
-            return
-    except urllib_error.URLError:
-        pass
     raise RuntimeError(
-        "Databricks AI Gateway V2 is required but not available on this workspace. "
-        f"See {AI_GATEWAY_V2_DOCS_URL}"
+        "Databricks AI Gateway V2 is required but not available on this workspace "
+        f"({reason}). See {AI_GATEWAY_V2_DOCS_URL}"
     )
 
 
