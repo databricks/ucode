@@ -109,6 +109,9 @@ class TestManagedKeys:
     def test_includes_goose_model(self):
         assert "GOOSE_MODEL" in goose.MANAGED_KEYS
 
+    def test_includes_oauth_token(self):
+        assert "OAUTH_TOKEN" in goose.MANAGED_KEYS
+
 
 class TestValidateCmd:
     def test_starts_with_binary(self):
@@ -350,6 +353,7 @@ class TestWriteToolConfig:
         assert written["DATABRICKS_HOST"] == WS
         assert written["GOOSE_PROVIDER"] == "databricks"
         assert written["GOOSE_MODEL"] == "databricks-claude-sonnet-4-6"
+        assert written["OAUTH_TOKEN"] == "test-token"
         assert token == "test-token"
         assert "goose" in (returned_state.get("managed_configs") or {})
         assert written["extensions"]["skills"]["enabled"] is True

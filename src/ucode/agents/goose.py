@@ -51,6 +51,7 @@ MANAGED_KEYS: list[str] = [
     "DATABRICKS_HOST",
     "GOOSE_PROVIDER",
     "GOOSE_MODEL",
+    "OAUTH_TOKEN",
 ]
 
 GOOSE_MCP_AUTH_ENV_KEY = "OAUTH_TOKEN"
@@ -158,6 +159,7 @@ def write_tool_config(
     if token is None:
         token = get_databricks_token(state["workspace"], force_refresh=force_refresh)
     overlay = render_overlay(state["workspace"], model)
+    overlay[GOOSE_MCP_AUTH_ENV_KEY] = token
     existing = read_yaml_safe(GOOSE_CONFIG_PATH)
     deep_merge_dict(existing, overlay)
     write_yaml_file(GOOSE_CONFIG_PATH, existing)
