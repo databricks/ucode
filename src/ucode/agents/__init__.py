@@ -225,7 +225,7 @@ def check_gateway_endpoint(state: dict, tool: str) -> bool:
     if tool == "copilot":
         return bool(state.get("claude_models")) or bool(state.get("codex_models"))
     if tool == "goose":
-        return bool(state.get("claude_models"))
+        return bool(state.get("claude_models")) or bool(state.get("gemini_models"))
     if tool == "pi":
         return (
             bool(state.get("claude_models"))
@@ -237,7 +237,7 @@ def check_gateway_endpoint(state: dict, tool: str) -> bool:
 
 _TOOL_DISCOVERY_SOURCES: dict[str, tuple[str, ...]] = {
     "claude": ("claude",),
-    "goose": ("claude",),
+    "goose": ("claude", "gemini"),
     "opencode": ("claude", "gemini"),
     "codex": ("codex",),
     "gemini": ("gemini",),

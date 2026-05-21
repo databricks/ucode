@@ -60,7 +60,7 @@ from ucode.usage import usage as usage_report
 _DISCOVERY_CONSUMERS: dict[str, tuple[str, ...]] = {
     "claude": ("claude", "goose", "opencode", "copilot", "pi"),
     "codex": ("codex", "copilot", "pi"),
-    "gemini": ("gemini", "opencode", "pi"),
+    "gemini": ("gemini", "goose", "opencode", "pi"),
 }
 
 
@@ -117,7 +117,9 @@ def configure_shared_state(
         or "copilot" in tools
         or "pi" in tools
     )
-    want_gemini = fetch_all or "gemini" in tools or "opencode" in tools or "pi" in tools
+    want_gemini = (
+        fetch_all or "gemini" in tools or "goose" in tools or "opencode" in tools or "pi" in tools
+    )
     want_codex = fetch_all or "codex" in tools or "copilot" in tools or "pi" in tools
 
     claude_reason: str | None = None

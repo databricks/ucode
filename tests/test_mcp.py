@@ -10,7 +10,7 @@ from ucode import mcp
 
 WS = "https://example.databricks.com"
 CLAUDE_STATE = {"workspace": WS, "available_tools": ["claude"]}
-ALL_MCP_CLIENTS = ["claude", "codex", "gemini", "opencode", "copilot"]
+ALL_MCP_CLIENTS = ["claude", "codex", "gemini", "opencode", "copilot", "goose"]
 
 
 class TestBuildMcpHttpEntry:
@@ -221,6 +221,40 @@ class TestConfigureClientMcpServer:
 
         assert removed_scopes == []
         assert calls == [("github", f"{WS}/api/2.0/mcp/external/github")]
+
+
+class TestGooseMcpConfig:
+    def test_configure_writes_goose_extension(self, monkeypatch):
+        written: list[tuple[str, str]] = []
+        monkeypatch.setattr(
+            mcp.goose,
+            "write_mcp_server_config",
+            lambda name, url: written.append((name, url)) or False,
+        )
+        mcp.configure_client_mcp_server("goose", "databricks-sql", f"{WS}/api/2.0/mcp/sql", {})
+        assert written == [("databricks-sql", f"{WS}/api/2.0/mcp/sql")]
+
+    def test_configure_returns_user_scope_when_replacing(self, monkeypatch):
+        monkeypatch.setattr(mcp.goose, "write_mcp_server_config", lambda name, url: True)
+        scopes = mcp.configure_client_mcp_server(
+            "goose", "databricks-sql", f"{WS}/api/2.0/mcp/sql", {}
+        )
+        assert scopes == ["user"]
+
+    def test_configure_returns_empty_when_new(self, monkeypatch):
+        monkeypatch.setattr(mcp.goose, "write_mcp_server_config", lambda name, url: False)
+        scopes = mcp.configure_client_mcp_server("goose", "new-server", f"{WS}/api/2.0/mcp/new", {})
+        assert scopes == []
+
+    def test_remove_returns_user_scope_when_found(self, monkeypatch):
+        monkeypatch.setattr(mcp.goose, "remove_mcp_server_config", lambda name: True)
+        scopes = mcp.remove_client_mcp_server("goose", "databricks-sql")
+        assert scopes == ["user"]
+
+    def test_remove_returns_empty_when_not_found(self, monkeypatch):
+        monkeypatch.setattr(mcp.goose, "remove_mcp_server_config", lambda name: False)
+        scopes = mcp.remove_client_mcp_server("goose", "nonexistent")
+        assert scopes == []
 
 
 class TestMcpPicker:
@@ -467,6 +501,7 @@ class TestConfigureMcpCommand:
             ("codex", "github-mcp", f"{WS}/api/2.0/mcp/external/github-mcp", expected_entry),
             ("gemini", "github-mcp", f"{WS}/api/2.0/mcp/external/github-mcp", expected_entry),
             ("opencode", "github-mcp", f"{WS}/api/2.0/mcp/external/github-mcp", expected_entry),
+            ("goose", "github-mcp", f"{WS}/api/2.0/mcp/external/github-mcp", expected_entry),
             ("copilot", "github-mcp", f"{WS}/api/2.0/mcp/external/github-mcp", expected_entry),
         ]
         assert saved_states[-1]["mcp_servers"] == [
@@ -474,7 +509,7 @@ class TestConfigureMcpCommand:
                 "name": "github-mcp",
                 "url": f"{WS}/api/2.0/mcp/external/github-mcp",
                 "auth": "env:OAUTH_TOKEN",
-                "clients": ["claude", "codex", "gemini", "opencode", "copilot"],
+                "clients": ["claude", "codex", "gemini", "opencode", "goose", "copilot"],
             }
         ]
 

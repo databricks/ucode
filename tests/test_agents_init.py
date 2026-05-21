@@ -82,11 +82,11 @@ class TestCheckGatewayEndpoint:
     def test_goose_available_with_claude(self):
         assert check_gateway_endpoint({"claude_models": {"sonnet": "s4"}}, "goose") is True
 
-    def test_goose_unavailable_without_claude(self):
-        assert (
-            check_gateway_endpoint({"codex_models": ["m"], "gemini_models": ["g"]}, "goose")
-            is False
-        )
+    def test_goose_unavailable_without_models(self):
+        assert check_gateway_endpoint({"codex_models": ["m"]}, "goose") is False
+
+    def test_goose_available_with_gemini(self):
+        assert check_gateway_endpoint({"gemini_models": ["gemini-pro"]}, "goose") is True
 
     def test_codex_available(self):
         assert check_gateway_endpoint({"codex_models": ["model-a"]}, "codex") is True

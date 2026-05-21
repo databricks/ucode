@@ -53,17 +53,22 @@ MANAGED_KEYS: list[str] = [
     "GOOSE_MODEL",
 ]
 
+GOOSE_MCP_AUTH_ENV_KEY = "OAUTH_TOKEN"
+
 
 def is_update_available() -> tuple[str, str] | None:
     return None  # no npm update check for native binary
 
 
 def default_model(state: dict) -> str | None:
-    """Prefer Claude sonnet, then opus, then haiku."""
+    """Prefer Claude sonnet, then opus, then haiku; fall back to gemini."""
     claude_models = state.get("claude_models") or {}
     for family in ("sonnet", "opus", "haiku"):
         if claude_models.get(family):
             return claude_models[family]
+    gemini_models = state.get("gemini_models") or []
+    if gemini_models:
+        return gemini_models[0]
     return None
 
 
@@ -73,6 +78,16 @@ def render_overlay(workspace: str, model: str) -> dict:
         "DATABRICKS_HOST": workspace,
         "GOOSE_PROVIDER": "databricks",
         "GOOSE_MODEL": model,
+        "extensions": {
+            "skills": {
+                "enabled": True,
+                "type": "platform",
+                "name": "skills",
+                "description": "Load and use skills from .claude/skills or .goose/skills directories",
+                "bundled": True,
+                "available_tools": [],
+            }
+        },
     }
 
 
@@ -80,7 +95,56 @@ def build_runtime_env(workspace: str, token: str) -> dict[str, str]:
     env = os.environ.copy()
     env["DATABRICKS_HOST"] = workspace
     env["DATABRICKS_TOKEN"] = token
+    env["OAUTH_TOKEN"] = token
     return env
+
+
+def _mcp_slug(name: str) -> str:
+    return name.lower().replace("-", "_")
+
+
+def build_mcp_server_entry(name: str, url: str) -> dict:
+    return {
+        "enabled": True,
+        "type": "streamable_http",
+        "name": name,
+        "description": f"Databricks MCP server: {name}",
+        "uri": url,
+        "envs": {},
+        "env_keys": [GOOSE_MCP_AUTH_ENV_KEY],
+        "headers": {"Authorization": f"Bearer ${{{GOOSE_MCP_AUTH_ENV_KEY}}}"},
+        "timeout": 300,
+        "bundled": None,
+        "available_tools": [],
+    }
+
+
+def write_mcp_server_config(name: str, url: str) -> bool:
+    backup_existing_file(GOOSE_CONFIG_PATH, GOOSE_BACKUP_PATH)
+    existing = read_yaml_safe(GOOSE_CONFIG_PATH)
+    extensions = existing.get("extensions")
+    if not isinstance(extensions, dict):
+        extensions = {}
+    slug = _mcp_slug(name)
+    removed = slug in extensions
+    extensions[slug] = build_mcp_server_entry(name, url)
+    existing["extensions"] = extensions
+    write_yaml_file(GOOSE_CONFIG_PATH, existing)
+    return removed
+
+
+def remove_mcp_server_config(name: str) -> bool:
+    existing = read_yaml_safe(GOOSE_CONFIG_PATH)
+    extensions = existing.get("extensions")
+    if not isinstance(extensions, dict):
+        return False
+    slug = _mcp_slug(name)
+    if slug not in extensions:
+        return False
+    extensions.pop(slug)
+    existing["extensions"] = extensions
+    write_yaml_file(GOOSE_CONFIG_PATH, existing)
+    return True
 
 
 def write_tool_config(

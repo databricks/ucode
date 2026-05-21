@@ -22,7 +22,7 @@ from questionary.prompts.common import InquirerControl
 from questionary.question import Question
 from questionary.styles import merge_styles_default
 
-from ucode.agents import copilot, opencode
+from ucode.agents import copilot, goose, opencode
 from ucode.config_io import restore_file
 from ucode.databricks import (
     ensure_databricks_auth,
@@ -62,6 +62,11 @@ MCP_CLIENTS = {
         "binary": "opencode",
         "display": "OpenCode",
         "list_command": "opencode mcp list",
+    },
+    "goose": {
+        "binary": "goose",
+        "display": "Goose",
+        "list_command": "goose session --help",
     },
     "copilot": {
         "binary": "copilot",
@@ -255,6 +260,9 @@ def configure_client_mcp_server(client: str, name: str, url: str, entry: dict) -
     if client == "copilot":
         removed = copilot.write_mcp_server_config(name, url)
         return [MCP_USER_SCOPE] if removed else []
+    if client == "goose":
+        removed = goose.write_mcp_server_config(name, url)
+        return [MCP_USER_SCOPE] if removed else []
     raise RuntimeError(f"Unsupported MCP client '{client}'.")
 
 
@@ -269,6 +277,8 @@ def remove_client_mcp_server(client: str, name: str) -> list[str]:
         return [MCP_USER_SCOPE] if opencode.remove_mcp_server_config(name) else []
     if client == "copilot":
         return [MCP_USER_SCOPE] if copilot.remove_mcp_server_config(name) else []
+    if client == "goose":
+        return [MCP_USER_SCOPE] if goose.remove_mcp_server_config(name) else []
     raise RuntimeError(f"Unsupported MCP client '{client}'.")
 
 
@@ -752,14 +762,14 @@ def configure_mcp_command() -> int:
     installed_clients = available_mcp_clients()
     if not installed_clients:
         raise RuntimeError(
-            "No supported MCP clients are installed. Install Claude, Codex, Gemini, OpenCode, "
+            "No supported MCP clients are installed. Install Claude, Codex, Gemini, Goose, OpenCode, "
             "or GitHub Copilot CLI."
         )
     clients = configured_mcp_clients(state, installed_clients)
     if not clients:
         raise RuntimeError(
             "No configured MCP-capable coding agents are installed. Run `ucode configure` "
-            "for Codex, Claude, Gemini, OpenCode, or GitHub Copilot CLI first."
+            "for Codex, Claude, Gemini, Goose, OpenCode, or GitHub Copilot CLI first."
         )
     configured_tools = set(state.get("available_tools") or [])
     missing_clients = [
