@@ -102,7 +102,7 @@ def render_overlay(
                 "apiKey": token,
                 "headers": auth_headers,
             },
-            "models": {m: anthropic_model_overlay for m in anthropic_models},
+            "models": dict.fromkeys(anthropic_models, anthropic_model_overlay),
         }
         keys.append(["provider", "databricks-anthropic"])
     if gemini_models:
