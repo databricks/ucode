@@ -165,6 +165,7 @@ def get_databricks_profiles() -> list[tuple[str, str]]:
     try:
         result = run(
             ["databricks", "auth", "profiles", "--output", "json"],
+            check=False,
             capture_output=True,
             text=True,
             timeout=10,
