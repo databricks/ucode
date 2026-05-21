@@ -206,6 +206,7 @@ class TestListDatabricksConnections:
             return subprocess.CompletedProcess(args, 0, stdout=json.dumps(payload))
 
         monkeypatch.setattr(db_mod, "run", fake_run)
+        monkeypatch.setattr(db_mod, "find_profile_name_for_host", lambda ws: "test-profile")
 
         assert list_databricks_connections(WS) == [
             {"name": "confluence-mcp", "connection_type": "HTTP"},
@@ -219,6 +220,8 @@ class TestListDatabricksConnections:
             "0",
             "--output",
             "json",
+            "--profile",
+            "test-profile",
         ]
         assert calls[0]["kwargs"]["env"]["DATABRICKS_HOST"] == WS
         assert calls[1]["args"][-2:] == ["--page-token", "next-page"]
@@ -228,6 +231,7 @@ class TestListDatabricksConnections:
             return subprocess.CompletedProcess(args, 0, stdout="not-json")
 
         monkeypatch.setattr(db_mod, "run", fake_run)
+        monkeypatch.setattr(db_mod, "find_profile_name_for_host", lambda ws: None)
 
         with pytest.raises(RuntimeError, match="invalid JSON"):
             list_databricks_connections(WS)
@@ -249,6 +253,7 @@ class TestListGenieSpaces:
             return subprocess.CompletedProcess(args, 0, stdout=json.dumps(payload))
 
         monkeypatch.setattr(db_mod, "run", fake_run)
+        monkeypatch.setattr(db_mod, "find_profile_name_for_host", lambda ws: "test-profile")
 
         assert list_genie_spaces(WS) == [
             {"space_id": "space-1", "title": "First"},
@@ -262,6 +267,8 @@ class TestListGenieSpaces:
             "100",
             "--output",
             "json",
+            "--profile",
+            "test-profile",
         ]
         assert calls[0]["kwargs"]["env"]["DATABRICKS_HOST"] == WS
         assert calls[1]["args"][-2:] == ["--page-token", "next-page"]
@@ -271,6 +278,7 @@ class TestListGenieSpaces:
             return subprocess.CompletedProcess(args, 0, stdout="not-json")
 
         monkeypatch.setattr(db_mod, "run", fake_run)
+        monkeypatch.setattr(db_mod, "find_profile_name_for_host", lambda ws: None)
 
         with pytest.raises(RuntimeError, match="invalid JSON"):
             list_genie_spaces(WS)
@@ -291,6 +299,7 @@ class TestListDatabricksApps:
             return subprocess.CompletedProcess(args, 0, stdout=json.dumps(payload))
 
         monkeypatch.setattr(db_mod, "run", fake_run)
+        monkeypatch.setattr(db_mod, "find_profile_name_for_host", lambda ws: "test-profile")
 
         assert list_databricks_apps(WS) == [
             {
@@ -306,6 +315,8 @@ class TestListDatabricksApps:
             "1000",
             "--output",
             "json",
+            "--profile",
+            "test-profile",
         ]
         assert calls[0]["kwargs"]["env"]["DATABRICKS_HOST"] == WS
 

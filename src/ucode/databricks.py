@@ -380,6 +380,7 @@ def _extract_connection_page(payload: object) -> tuple[list[dict], str | None]:
 
 def list_databricks_connections(workspace: str) -> list[dict]:
     env = build_databricks_cli_env(workspace)
+    profile_name = find_profile_name_for_host(workspace)
     connections: list[dict] = []
     page_token: str | None = None
     seen_page_tokens: set[str] = set()
@@ -395,6 +396,8 @@ def list_databricks_connections(workspace: str) -> list[dict]:
                 "--output",
                 "json",
             ]
+            if profile_name:
+                cmd.extend(["--profile", profile_name])
             if page_token:
                 cmd.extend(["--page-token", page_token])
 
@@ -442,6 +445,7 @@ def _extract_genie_spaces_page(payload: object) -> tuple[list[dict], str | None]
 
 def list_genie_spaces(workspace: str) -> list[dict]:
     env = build_databricks_cli_env(workspace)
+    profile_name = find_profile_name_for_host(workspace)
     spaces: list[dict] = []
     page_token: str | None = None
     seen_page_tokens: set[str] = set()
@@ -457,6 +461,8 @@ def list_genie_spaces(workspace: str) -> list[dict]:
                 "--output",
                 "json",
             ]
+            if profile_name:
+                cmd.extend(["--profile", profile_name])
             if page_token:
                 cmd.extend(["--page-token", page_token])
 
@@ -501,17 +507,21 @@ def _extract_apps_payload(payload: object) -> list[dict]:
 
 def list_databricks_apps(workspace: str) -> list[dict]:
     env = build_databricks_cli_env(workspace)
+    profile_name = find_profile_name_for_host(workspace)
+    cmd = [
+        "databricks",
+        "apps",
+        "list",
+        "--limit",
+        "1000",
+        "--output",
+        "json",
+    ]
+    if profile_name:
+        cmd.extend(["--profile", profile_name])
     try:
         result = run(
-            [
-                "databricks",
-                "apps",
-                "list",
-                "--limit",
-                "1000",
-                "--output",
-                "json",
-            ],
+            cmd,
             capture_output=True,
             text=True,
             env=env,
