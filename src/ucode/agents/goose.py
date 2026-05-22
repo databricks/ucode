@@ -104,15 +104,15 @@ def _mcp_slug(name: str) -> str:
     return name.lower().replace("-", "_")
 
 
-def build_mcp_server_entry(name: str, url: str) -> dict:
+def build_mcp_server_entry(name: str, url: str, token: str = "") -> dict:
     return {
         "enabled": True,
         "type": "streamable_http",
         "name": name,
         "description": f"Databricks MCP server: {name}",
         "uri": url,
-        "envs": {},
-        "env_keys": [GOOSE_MCP_AUTH_ENV_KEY],
+        "envs": {GOOSE_MCP_AUTH_ENV_KEY: token},
+        "env_keys": [],
         "headers": {"Authorization": f"Bearer ${{{GOOSE_MCP_AUTH_ENV_KEY}}}"},
         "timeout": 300,
         "bundled": None,
@@ -120,7 +120,7 @@ def build_mcp_server_entry(name: str, url: str) -> dict:
     }
 
 
-def write_mcp_server_config(name: str, url: str) -> bool:
+def write_mcp_server_config(name: str, url: str, token: str = "") -> bool:
     backup_existing_file(GOOSE_CONFIG_PATH, GOOSE_BACKUP_PATH)
     existing = read_yaml_safe(GOOSE_CONFIG_PATH)
     extensions = existing.get("extensions")
@@ -128,7 +128,7 @@ def write_mcp_server_config(name: str, url: str) -> bool:
         extensions = {}
     slug = _mcp_slug(name)
     removed = slug in extensions
-    extensions[slug] = build_mcp_server_entry(name, url)
+    extensions[slug] = build_mcp_server_entry(name, url, token)
     existing["extensions"] = extensions
     write_yaml_file(GOOSE_CONFIG_PATH, existing)
     return removed
@@ -159,9 +159,17 @@ def write_tool_config(
     if token is None:
         token = get_databricks_token(state["workspace"], force_refresh=force_refresh)
     overlay = render_overlay(state["workspace"], model)
-    overlay[GOOSE_MCP_AUTH_ENV_KEY] = token
     existing = read_yaml_safe(GOOSE_CONFIG_PATH)
     deep_merge_dict(existing, overlay)
+    extensions = existing.get("extensions")
+    if isinstance(extensions, dict):
+        for ext in extensions.values():
+            if isinstance(ext, dict) and ext.get("type") == "streamable_http":
+                envs = ext.get("envs")
+                if isinstance(envs, dict):
+                    envs[GOOSE_MCP_AUTH_ENV_KEY] = token
+                else:
+                    ext["envs"] = {GOOSE_MCP_AUTH_ENV_KEY: token}
     write_yaml_file(GOOSE_CONFIG_PATH, existing)
     state = mark_tool_managed(state, "goose", MANAGED_KEYS)
     save_state(state)

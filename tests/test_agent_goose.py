@@ -183,9 +183,13 @@ class TestBuildMcpServerEntry:
         entry = goose.build_mcp_server_entry("databricks-sql", f"{WS}/api/2.0/mcp/sql")
         assert "OAUTH_TOKEN" in entry["headers"]["Authorization"]
 
-    def test_includes_oauth_token_env_key(self):
+    def test_token_stored_in_envs(self):
+        entry = goose.build_mcp_server_entry("databricks-sql", f"{WS}/api/2.0/mcp/sql", "tok123")
+        assert entry["envs"]["OAUTH_TOKEN"] == "tok123"
+
+    def test_env_keys_is_empty(self):
         entry = goose.build_mcp_server_entry("databricks-sql", f"{WS}/api/2.0/mcp/sql")
-        assert "OAUTH_TOKEN" in entry["env_keys"]
+        assert entry["env_keys"] == []
 
 
 class TestMcpSlug:
@@ -353,7 +357,6 @@ class TestWriteToolConfig:
         assert written["DATABRICKS_HOST"] == WS
         assert written["GOOSE_PROVIDER"] == "databricks"
         assert written["GOOSE_MODEL"] == "databricks-claude-sonnet-4-6"
-        assert written["OAUTH_TOKEN"] == "test-token"
         assert token == "test-token"
         assert "goose" in (returned_state.get("managed_configs") or {})
         assert written["extensions"]["skills"]["enabled"] is True
@@ -441,3 +444,39 @@ class TestWriteToolConfig:
         assert written["GOOSE_MAX_TOKENS"] == 16000
         assert written["extensions"]["developer"]["enabled"] is True
         assert written["GOOSE_PROVIDER"] == "databricks"
+
+    def test_refreshes_token_in_streamable_http_extension_envs(self, tmp_path, monkeypatch):
+        import yaml
+
+        import ucode.agents.goose as goose_mod
+        import ucode.config_io as config_io_mod
+        import ucode.state as state_mod
+
+        monkeypatch.setattr(config_io_mod, "APP_DIR", tmp_path)
+        config_path = tmp_path / "config.yaml"
+        backup_path = tmp_path / "goose-backup.yaml"
+        monkeypatch.setattr(goose_mod, "GOOSE_CONFIG_PATH", config_path)
+        monkeypatch.setattr(goose_mod, "GOOSE_BACKUP_PATH", backup_path)
+        monkeypatch.setattr(state_mod, "STATE_PATH", tmp_path / "state.json")
+        monkeypatch.setattr(goose_mod, "get_databricks_token", lambda *a, **kw: "new-token")
+
+        config_path.write_text(
+            yaml.dump(
+                {
+                    "extensions": {
+                        "my_mcp": {
+                            "type": "streamable_http",
+                            "envs": {"OAUTH_TOKEN": "old-token"},
+                            "headers": {"Authorization": "Bearer ${OAUTH_TOKEN}"},
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        state = {"workspace": WS, "claude_models": {"sonnet": "databricks-claude-sonnet-4-6"}}
+        goose_mod.write_tool_config(state, "databricks-claude-sonnet-4-6")
+
+        written = yaml.safe_load(config_path.read_text())
+        assert written["extensions"]["my_mcp"]["envs"]["OAUTH_TOKEN"] == "new-token"

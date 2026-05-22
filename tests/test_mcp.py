@@ -229,20 +229,20 @@ class TestGooseMcpConfig:
         monkeypatch.setattr(
             mcp.goose,
             "write_mcp_server_config",
-            lambda name, url: written.append((name, url)) or False,
+            lambda name, url, token="": written.append((name, url)) or False,
         )
         mcp.configure_client_mcp_server("goose", "databricks-sql", f"{WS}/api/2.0/mcp/sql", {})
         assert written == [("databricks-sql", f"{WS}/api/2.0/mcp/sql")]
 
     def test_configure_returns_user_scope_when_replacing(self, monkeypatch):
-        monkeypatch.setattr(mcp.goose, "write_mcp_server_config", lambda name, url: True)
+        monkeypatch.setattr(mcp.goose, "write_mcp_server_config", lambda name, url, token="": True)
         scopes = mcp.configure_client_mcp_server(
             "goose", "databricks-sql", f"{WS}/api/2.0/mcp/sql", {}
         )
         assert scopes == ["user"]
 
     def test_configure_returns_empty_when_new(self, monkeypatch):
-        monkeypatch.setattr(mcp.goose, "write_mcp_server_config", lambda name, url: False)
+        monkeypatch.setattr(mcp.goose, "write_mcp_server_config", lambda name, url, token="": False)
         scopes = mcp.configure_client_mcp_server("goose", "new-server", f"{WS}/api/2.0/mcp/new", {})
         assert scopes == []
 
@@ -477,7 +477,7 @@ class TestConfigureMcpCommand:
         monkeypatch.setattr(mcp, "discover_app_mcp_servers", lambda workspace: [])
         _patch_mcp_choices(monkeypatch, f"{mcp.MCP_ADD_PREFIX}external:github-mcp")
 
-        def fake_configure_client_mcp_server(client, name, url, entry):
+        def fake_configure_client_mcp_server(client, name, url, entry, state=None):
             configured.append((client, name, url, entry))
             return []
 
@@ -538,7 +538,9 @@ class TestConfigureMcpCommand:
         monkeypatch.setattr(
             mcp,
             "configure_client_mcp_server",
-            lambda client, name, url, entry: configured.append((client, name, url, entry)) or [],
+            lambda client, name, url, entry, state=None: (
+                configured.append((client, name, url, entry)) or []
+            ),
         )
         monkeypatch.setattr(mcp, "save_state", lambda state: saved_states.append(state.copy()))
 
@@ -590,7 +592,9 @@ class TestConfigureMcpCommand:
         monkeypatch.setattr(
             mcp,
             "configure_client_mcp_server",
-            lambda client, name, url, entry: configured.append((client, name, url, entry)) or [],
+            lambda client, name, url, entry, state=None: (
+                configured.append((client, name, url, entry)) or []
+            ),
         )
         monkeypatch.setattr(mcp, "save_state", lambda state: saved_states.append(state.copy()))
 
@@ -644,7 +648,9 @@ class TestConfigureMcpCommand:
         monkeypatch.setattr(
             mcp,
             "configure_client_mcp_server",
-            lambda client, name, url, entry: configured.append((client, name, url, entry)) or [],
+            lambda client, name, url, entry, state=None: (
+                configured.append((client, name, url, entry)) or []
+            ),
         )
         monkeypatch.setattr(mcp, "save_state", lambda state: saved_states.append(state.copy()))
 
@@ -675,7 +681,9 @@ class TestConfigureMcpCommand:
         monkeypatch.setattr(
             mcp,
             "configure_client_mcp_server",
-            lambda client, name, url, entry: configured.append((client, name, url, entry)) or [],
+            lambda client, name, url, entry, state=None: (
+                configured.append((client, name, url, entry)) or []
+            ),
         )
         monkeypatch.setattr(mcp, "save_state", lambda state: saved_states.append(state.copy()))
 
@@ -707,7 +715,9 @@ class TestConfigureMcpCommand:
         monkeypatch.setattr(
             mcp,
             "configure_client_mcp_server",
-            lambda client, name, url, entry: configured.append((client, name, url, entry)) or [],
+            lambda client, name, url, entry, state=None: (
+                configured.append((client, name, url, entry)) or []
+            ),
         )
         monkeypatch.setattr(mcp, "save_state", lambda state: saved_states.append(state.copy()))
 

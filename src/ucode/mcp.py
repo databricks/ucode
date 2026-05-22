@@ -26,6 +26,7 @@ from ucode.agents import copilot, goose, opencode
 from ucode.config_io import restore_file
 from ucode.databricks import (
     ensure_databricks_auth,
+    get_databricks_token,
     list_databricks_apps,
     list_databricks_connections,
     list_genie_spaces,
@@ -239,7 +240,9 @@ def configured_mcp_clients(state: dict, installed_clients: list[str]) -> list[st
     ]
 
 
-def configure_client_mcp_server(client: str, name: str, url: str, entry: dict) -> list[str]:
+def configure_client_mcp_server(
+    client: str, name: str, url: str, entry: dict, state: dict | None = None
+) -> list[str]:
     if client == "claude":
         removed_scopes = [
             scope for scope in MCP_CLEANUP_SCOPES if remove_claude_mcp_server(name, scope)
@@ -261,7 +264,14 @@ def configure_client_mcp_server(client: str, name: str, url: str, entry: dict) -
         removed = copilot.write_mcp_server_config(name, url)
         return [MCP_USER_SCOPE] if removed else []
     if client == "goose":
-        removed = goose.write_mcp_server_config(name, url)
+        token = ""
+        workspace = (state or {}).get("workspace") or ""
+        if workspace:
+            try:
+                token = get_databricks_token(workspace)
+            except RuntimeError:
+                pass
+        removed = goose.write_mcp_server_config(name, url, token=token)
         return [MCP_USER_SCOPE] if removed else []
     raise RuntimeError(f"Unsupported MCP client '{client}'.")
 
@@ -727,6 +737,7 @@ def apply_mcp_server_changes(
     original_servers: list[dict],
     working_servers: list[dict],
     clients: list[str],
+    state: dict | None = None,
 ) -> bool:
     original_by_name = _servers_by_name(original_servers)
     working_by_name = _servers_by_name(working_servers)
@@ -747,7 +758,7 @@ def apply_mcp_server_changes(
             continue
         entry = build_mcp_http_entry(url)
         for client in clients:
-            configure_client_mcp_server(client, name, url, entry)
+            configure_client_mcp_server(client, name, url, entry, state=state)
         changed = True
 
     return changed
@@ -844,7 +855,9 @@ def configure_mcp_command() -> int:
         )
         working_names.add(entry_name)
 
-    changed = apply_mcp_server_changes(original_mcp_servers, working_mcp_servers, clients)
+    changed = apply_mcp_server_changes(
+        original_mcp_servers, working_mcp_servers, clients, state=state
+    )
     if changed or original_mcp_servers != working_mcp_servers:
         state["mcp_servers"] = working_mcp_servers
         save_state(state)
