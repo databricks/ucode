@@ -37,6 +37,17 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
       - uses: databricks/setup-cli@bdb89f81c11a5bd647fd55b585b7c396ec68a25a  # v1.0.0
+      # The agent launch tests `_require_binary("codex")` etc. and skip when
+      # the CLI isn't on PATH. Install all six so each TestXxxLaunch test
+      # actually runs instead of skipping.
+      - name: Install agent CLIs
+        run: npm install -g
+          @anthropic-ai/claude-code
+          @openai/codex
+          @google/gemini-cli
+          opencode-ai
+          @github/copilot
+          @earendil-works/pi-coding-agent
       - run: uv tool install .
       # Redirect stdin so any interactive `databricks auth login --no-browser`
       # fallback EOFs instead of hanging the runner. With DATABRICKS_BEARER
