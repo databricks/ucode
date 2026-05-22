@@ -267,9 +267,11 @@ class TestWriteToolConfig:
         monkeypatch.setattr(config_io_mod, "APP_DIR", tmp_path)
         config_file = tmp_path / "models.json"
         backup_file = tmp_path / "pi-backup.json"
+        settings_file = tmp_path / "settings.json"
         monkeypatch.setattr(pi_mod, "PI_CONFIG_PATH", config_file)
+        monkeypatch.setattr(pi_mod, "PI_SETTINGS_PATH", settings_file)
         monkeypatch.setattr(pi_mod, "PI_BACKUP_PATH", backup_file)
-        return pi_mod, config_file
+        return pi_mod, config_file, settings_file
 
     def _state(self, **overrides) -> dict:
         state = {
@@ -284,7 +286,7 @@ class TestWriteToolConfig:
         return state
 
     def test_stale_managed_providers_removed_before_merge(self, tmp_path, monkeypatch):
-        pi_mod, config_file = self._setup(tmp_path, monkeypatch)
+        pi_mod, config_file, _ = self._setup(tmp_path, monkeypatch)
 
         stale = {
             "providers": {
@@ -312,7 +314,7 @@ class TestWriteToolConfig:
         """Earlier ucode versions wrote `databricks-anthropic`, `databricks-codex`,
         and `databricks-oss` providers. They must be stripped on the next write
         so users don't end up with stale entries pointing at routes that 400."""
-        pi_mod, config_file = self._setup(tmp_path, monkeypatch)
+        pi_mod, config_file, _ = self._setup(tmp_path, monkeypatch)
 
         config_file.write_text(
             json.dumps(
@@ -339,7 +341,7 @@ class TestWriteToolConfig:
         assert "databricks-claude" in written_providers
 
     def test_config_written_with_correct_model_and_token(self, tmp_path, monkeypatch):
-        pi_mod, config_file = self._setup(tmp_path, monkeypatch)
+        pi_mod, config_file, _ = self._setup(tmp_path, monkeypatch)
 
         with (
             patch("ucode.agents.pi.get_databricks_token", return_value="tok"),
@@ -350,3 +352,19 @@ class TestWriteToolConfig:
         written = json.loads(config_file.read_text())
         assert written["model"] == "databricks-claude/claude-sonnet"
         assert written["providers"]["databricks-claude"]["apiKey"] == "tok"
+
+    def test_settings_pins_default_provider_and_model(self, tmp_path, monkeypatch):
+        # Without this, Pi's `findInitialModel` can fall through to a built-in
+        # provider when an unrelated env var (e.g. HF_TOKEN) makes one look
+        # auth-configured. Pinning the default keeps Pi on our provider.
+        pi_mod, _, settings_file = self._setup(tmp_path, monkeypatch)
+
+        with (
+            patch("ucode.agents.pi.get_databricks_token", return_value="tok"),
+            patch("ucode.agents.pi.save_state"),
+        ):
+            pi_mod.write_tool_config(self._state(), "claude-sonnet", token="tok")
+
+        settings = json.loads(settings_file.read_text())
+        assert settings["defaultProvider"] == "databricks-claude"
+        assert settings["defaultModel"] == "claude-sonnet"
