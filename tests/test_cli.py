@@ -2,12 +2,22 @@
 
 from __future__ import annotations
 
+import re
 from unittest.mock import patch
 
 import pytest
 from typer.testing import CliRunner
 
 from ucode.cli import app
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _strip_ansi(text: str) -> str:
+    """Drop SGR escape sequences so substring assertions match regardless of
+    whether the runner forces color rendering (e.g. CI sets FORCE_COLOR=1,
+    which makes rich split styled tokens like ``--agents`` with ANSI codes)."""
+    return _ANSI_RE.sub("", text)
 
 runner = CliRunner()
 
@@ -68,9 +78,10 @@ class TestHelp:
     def test_configure_help_lists_agents_flag(self):
         result = runner.invoke(app, ["configure", "--help"])
         assert result.exit_code == 0
-        assert "--agents" in result.output
-        assert "comma-separated list of agents" in result.output
-        assert "--workspaces" in result.output
+        output = _strip_ansi(result.output)
+        assert "--agents" in output
+        assert "comma-separated list of agents" in output
+        assert "--workspaces" in output
 
 
 def _patch_launch(tool: str):
