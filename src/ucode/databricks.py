@@ -434,21 +434,39 @@ def get_databricks_token(workspace: str, *, force_refresh: bool = False) -> str:
         ),
     )
 
-    token = ""
-    try:
-        result = run(
-            cmd,
-            check=False,
-            capture_output=True,
-            text=True,
-            env=env,
-            timeout=15,
-        )
-        _debug("auth token", _format_subprocess_result(result))
-        if result.returncode == 0:
-            token = json.loads(result.stdout or "{}").get("access_token", "")
-    except (subprocess.TimeoutExpired, json.JSONDecodeError) as exc:
-        _debug("auth token", f"exception: {type(exc).__name__}: {exc}")
+    def _fetch() -> str:
+        try:
+            result = run(
+                cmd,
+                check=False,
+                capture_output=True,
+                text=True,
+                env=env,
+                timeout=15,
+            )
+            _debug("auth token", _format_subprocess_result(result))
+            if result.returncode == 0:
+                return json.loads(result.stdout or "{}").get("access_token", "")
+        except (subprocess.TimeoutExpired, json.JSONDecodeError) as exc:
+            _debug("auth token", f"exception: {type(exc).__name__}: {exc}")
+        return ""
+
+    token = _fetch()
+    if not token:
+        # Session may have expired — attempt non-interactive re-auth and retry once.
+        _debug("auth token", "empty on first fetch; attempting auth login --no-browser")
+        try:
+            reauth = run(
+                ["databricks", "auth", "login", "--host", workspace, "--no-browser"],
+                capture_output=True,
+                text=True,
+                env=env,
+                timeout=30,
+            )
+            _debug("auth login", _format_subprocess_result(reauth))
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+            _debug("auth login", f"exception: {type(exc).__name__}: {exc}")
+        token = _fetch()
 
     if not token:
         profile_name = find_profile_name_for_host(workspace)

@@ -238,7 +238,27 @@ class TestGetDatabricksToken:
         token = get_databricks_token(WS)
         assert token == "good-token"
 
-    def test_raises_when_token_empty(self, tmp_path, monkeypatch):
+    def test_reauths_and_retries_when_token_empty(self, tmp_path, monkeypatch):
+        call_count = tmp_path / "calls"
+        call_count.write_text("0")
+        env = self._fake_databricks(
+            tmp_path,
+            f"count=$(cat {call_count})\n"
+            f"echo $((count + 1)) > {call_count}\n"
+            'case "$*" in\n'
+            '  *"auth login"*) exit 0 ;;\n'
+            "esac\n"
+            'if [ "$count" -eq 0 ]; then\n'
+            '  echo \'{"access_token": "", "token_type": "Bearer"}\'\n'
+            "else\n"
+            '  echo \'{"access_token": "refreshed-token", "token_type": "Bearer"}\'\n'
+            "fi",
+        )
+        monkeypatch.setattr("os.environ", env)
+        token = get_databricks_token(WS)
+        assert token == "refreshed-token"
+
+    def test_raises_when_reauth_also_fails(self, tmp_path, monkeypatch):
         env = self._fake_databricks(
             tmp_path,
             'echo \'{"access_token": "", "token_type": "Bearer"}\'',
