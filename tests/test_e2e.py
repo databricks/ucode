@@ -313,8 +313,7 @@ class TestConfigureSubset:
 
 def _require_binary(binary: str):
     if not shutil.which(binary):
-        from ucode.agents import install_tool_binary
-        install_tool_binary(binary, strict=True)
+        pytest.skip(f"`{binary}` is not installed")
 
 
 class TestCodexLaunch:
