@@ -766,7 +766,7 @@ def configure_mcp_command() -> int:
         client for client in MCP_CLIENTS if client in configured_tools and client not in clients
     ]
 
-    ensure_databricks_auth(workspace)
+    ensure_databricks_auth(workspace, state.get("profile"))
 
     print_section("MCP Servers")
     client_names = ", ".join(str(MCP_CLIENTS[client]["display"]) for client in clients)

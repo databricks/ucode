@@ -186,7 +186,7 @@ class TestWriteToolConfigMcpRegistration:
         monkeypatch.setattr(
             claude,
             "_register_web_search_mcp",
-            lambda ws, model: calls.append(("register", ws, model)),
+            lambda ws, model, profile=None: calls.append(("register", ws, model)),
         )
 
     def test_registers_mcp_when_codex_model_available(self, monkeypatch):
@@ -262,7 +262,9 @@ class TestClaudeLaunch:
             raise RuntimeError("stop")
 
         monkeypatch.delenv("OAUTH_TOKEN", raising=False)
-        monkeypatch.setattr(claude, "get_databricks_token", lambda workspace: "fresh-token")
+        monkeypatch.setattr(
+            claude, "get_databricks_token", lambda workspace, profile=None: "fresh-token"
+        )
         monkeypatch.setattr(os, "execvp", fake_execvp)
 
         try:

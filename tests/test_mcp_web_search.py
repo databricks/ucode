@@ -206,7 +206,7 @@ class TestCallResponsesApi:
     def test_posts_to_responses_endpoint(self, monkeypatch):
         monkeypatch.setenv("DATABRICKS_HOST", WS)
         monkeypatch.setenv("UCODE_WEB_SEARCH_MODEL", "databricks-gpt-5")
-        monkeypatch.setattr(mcp_web_search, "get_databricks_token", lambda ws: "tok")
+        monkeypatch.setattr(mcp_web_search, "get_databricks_token", lambda ws, profile=None: "tok")
 
         captured: dict[str, Any] = {}
 

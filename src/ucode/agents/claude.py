@@ -59,19 +59,22 @@ def _resolve_web_search_model(state: dict) -> str | None:
 WEB_SEARCH_MCP_NAME = "web_search"
 
 
-def _web_search_mcp_entry(workspace: str, search_model: str) -> dict:
+def _web_search_mcp_entry(workspace: str, search_model: str, profile: str | None = None) -> dict:
     """Stdio MCP server entry pointing at `ucode mcp web-search`. Resolves
     the absolute path to the `ucode` binary so launchers without the right
     PATH (e.g. desktop GUI launchers) still find it."""
     ucode_binary = shutil.which("ucode") or "ucode"
+    env: dict[str, str] = {
+        "DATABRICKS_HOST": workspace,
+        "UCODE_WEB_SEARCH_MODEL": search_model,
+    }
+    if profile:
+        env["DATABRICKS_CONFIG_PROFILE"] = profile
     return {
         "type": "stdio",
         "command": ucode_binary,
         "args": ["mcp", "web-search"],
-        "env": {
-            "DATABRICKS_HOST": workspace,
-            "UCODE_WEB_SEARCH_MODEL": search_model,
-        },
+        "env": env,
     }
 
 
@@ -80,6 +83,7 @@ def render_overlay(
     model: str,
     claude_models: dict[str, str] | None = None,
     disable_web_search: bool = False,
+    profile: str | None = None,
 ) -> tuple[dict, list[list[str]]]:
     """Return (overlay, managed_key_paths) for Claude settings.json.
 
@@ -111,7 +115,7 @@ def render_overlay(
             env["ANTHROPIC_DEFAULT_SONNET_MODEL"] = claude_models["sonnet"]
         if claude_models.get("haiku"):
             env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = claude_models["haiku"]
-    overlay: dict = {"apiKeyHelper": build_auth_shell_command(workspace), "env": env}
+    overlay: dict = {"apiKeyHelper": build_auth_shell_command(workspace, profile), "env": env}
     keys: list[list[str]] = [["apiKeyHelper"]] + [["env", k] for k in env]
 
     # Disable Claude Code's built-in WebSearch (it routes through Anthropic's
@@ -124,7 +128,7 @@ def render_overlay(
     return overlay, keys
 
 
-def _register_web_search_mcp(workspace: str, search_model: str) -> None:
+def _register_web_search_mcp(workspace: str, search_model: str, profile: str | None = None) -> None:
     """Register (or replace) the web_search MCP server in Claude Code's user
     scope via `claude mcp add-json`. Removes any prior entry first so re-runs
     pick up changes to the workspace, model, or ucode binary path."""
@@ -141,7 +145,7 @@ def _register_web_search_mcp(workspace: str, search_model: str) -> None:
         except RuntimeError:
             # Best-effort cleanup of stale entries — keep going.
             pass
-    entry = _web_search_mcp_entry(workspace, search_model)
+    entry = _web_search_mcp_entry(workspace, search_model, profile)
     add_claude_mcp_server(WEB_SEARCH_MCP_NAME, entry)
 
 
@@ -164,13 +168,14 @@ def write_tool_config(state: dict, model: str) -> dict:
         model,
         state.get("claude_models") or {},
         disable_web_search=web_search_model is not None,
+        profile=state.get("profile"),
     )
     existing = read_json_safe(CLAUDE_SETTINGS_PATH)
     merged = deep_merge_dict(existing, overlay)
     write_json_file(CLAUDE_SETTINGS_PATH, merged)
 
     if web_search_model:
-        _register_web_search_mcp(state["workspace"], web_search_model)
+        _register_web_search_mcp(state["workspace"], web_search_model, state.get("profile"))
 
     state = mark_tool_managed(state, "claude", managed_keys)
     save_state(state)
@@ -186,7 +191,7 @@ def launch(state: dict, tool_args: list[str]) -> None:
     binary = SPEC["binary"]
     workspace = state.get("workspace")
     if workspace:
-        os.environ["OAUTH_TOKEN"] = get_databricks_token(workspace)
+        os.environ["OAUTH_TOKEN"] = get_databricks_token(workspace, state.get("profile"))
     os.execvp(binary, [binary, "--settings", str(CLAUDE_SETTINGS_PATH), *tool_args])
 
 

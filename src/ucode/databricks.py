@@ -356,7 +356,16 @@ def install_databricks_cli() -> None:
     ensure_databricks_cli_version()
 
 
-def has_valid_databricks_auth(workspace: str) -> bool:
+def _profile_args(profile: str | None) -> list[str]:
+    """Return ``["--profile", profile]`` when set, otherwise an empty list.
+
+    Centralizing this keeps every `databricks` CLI invocation in this module
+    consistent when a workspace's `~/.databrickscfg` has more than one profile
+    pointing at the same host."""
+    return ["--profile", profile] if profile else []
+
+
+def has_valid_databricks_auth(workspace: str, profile: str | None = None) -> bool:
     # Honor the CI short-circuit (see ``get_databricks_token``): if a
     # pre-fetched bearer is available, treat auth as valid and skip the
     # `databricks auth token` shell-out (which only knows user-OAuth).
@@ -366,7 +375,16 @@ def has_valid_databricks_auth(workspace: str) -> bool:
     try:
         env = build_databricks_cli_env(workspace)
         result = run(
-            ["databricks", "auth", "token", "--host", workspace, "--output", "json"],
+            [
+                "databricks",
+                "auth",
+                "token",
+                "--host",
+                workspace,
+                *_profile_args(profile),
+                "--output",
+                "json",
+            ],
             check=False,
             capture_output=True,
             text=True,
@@ -421,16 +439,25 @@ def find_profile_name_for_host(workspace: str) -> str | None:
     return None
 
 
-def run_databricks_login(workspace: str) -> None:
-    """Run databricks auth login unconditionally."""
+def run_databricks_login(workspace: str, profile: str | None = None) -> None:
+    """Run databricks auth login unconditionally.
+
+    When ``profile`` is provided, it is passed via ``--profile``. Otherwise we
+    fall back to looking up an existing profile by host so a stored session is
+    refreshed in place rather than overwriting another profile's tokens."""
     print_section("Databricks Login")
     print_kv("Workspace", workspace)
     print_note("A browser may open for `databricks auth login`.")
     try:
-        cmd = ["databricks", "auth", "login", "--host", workspace]
-        profile_name = find_profile_name_for_host(workspace)
-        if profile_name:
-            cmd += ["--profile", profile_name]
+        profile_name = profile or find_profile_name_for_host(workspace)
+        cmd = [
+            "databricks",
+            "auth",
+            "login",
+            "--host",
+            workspace,
+            *_profile_args(profile_name),
+        ]
         run(cmd, env=build_databricks_cli_env(workspace), timeout=300)
     except subprocess.CalledProcessError as exc:
         raise RuntimeError("`databricks auth login` failed.") from exc
@@ -439,17 +466,22 @@ def run_databricks_login(workspace: str) -> None:
     print_success("Databricks authentication complete")
 
 
-def ensure_databricks_auth(workspace: str) -> None:
+def ensure_databricks_auth(workspace: str, profile: str | None = None) -> None:
     """Check auth and login only if needed (used by launch path)."""
     with spinner("Checking Databricks auth..."):
-        auth_is_valid = has_valid_databricks_auth(workspace)
+        auth_is_valid = has_valid_databricks_auth(workspace, profile)
     if auth_is_valid:
         print_success(f"Databricks auth already available for {workspace}")
         return
-    run_databricks_login(workspace)
+    run_databricks_login(workspace, profile)
 
 
-def get_databricks_token(workspace: str, *, force_refresh: bool = False) -> str:
+def get_databricks_token(
+    workspace: str,
+    profile: str | None = None,
+    *,
+    force_refresh: bool = False,
+) -> str:
     # ``DATABRICKS_BEARER`` is the CI escape hatch: when set, skip the
     # `databricks auth token` subprocess entirely and return the pre-fetched
     # bearer directly. Used by the e2e job, where the protected runner has
@@ -463,7 +495,16 @@ def get_databricks_token(workspace: str, *, force_refresh: bool = False) -> str:
 
     _log_auth_diagnostics()
     env = build_databricks_cli_env(workspace)
-    cmd = ["databricks", "auth", "token", "--host", workspace, "--output", "json"]
+    cmd = [
+        "databricks",
+        "auth",
+        "token",
+        "--host",
+        workspace,
+        *_profile_args(profile),
+        "--output",
+        "json",
+    ]
     if force_refresh:
         cmd.append("--force-refresh")
 
@@ -472,7 +513,8 @@ def get_databricks_token(workspace: str, *, force_refresh: bool = False) -> str:
         "set="
         + ",".join(
             sorted(k for k in env if k.startswith("DATABRICKS_") or k in {"BUNDLE_PROFILE"})
-        ),
+        )
+        + f" profile={profile or '<none>'}",
     )
 
     def _fetch() -> str:
@@ -498,7 +540,15 @@ def get_databricks_token(workspace: str, *, force_refresh: bool = False) -> str:
         _debug("auth token", "empty on first fetch; attempting auth login --no-browser")
         try:
             reauth = run(
-                ["databricks", "auth", "login", "--host", workspace, "--no-browser"],
+                [
+                    "databricks",
+                    "auth",
+                    "login",
+                    "--host",
+                    workspace,
+                    *_profile_args(profile),
+                    "--no-browser",
+                ],
                 capture_output=True,
                 text=True,
                 env=env,
@@ -510,7 +560,7 @@ def get_databricks_token(workspace: str, *, force_refresh: bool = False) -> str:
         token = _fetch()
 
     if not token:
-        profile_name = find_profile_name_for_host(workspace)
+        profile_name = profile or find_profile_name_for_host(workspace)
         stale_profile_hint = ""
         if profile_name:
             stale_profile_hint = (
@@ -692,13 +742,21 @@ def list_databricks_apps(workspace: str) -> list[dict]:
         raise RuntimeError("Databricks apps listing returned invalid JSON.") from exc
 
 
-def build_auth_shell_command(workspace: str) -> str:
+def build_auth_shell_command(workspace: str, profile: str | None = None) -> str:
     workspace_arg = shlex.quote(workspace.rstrip("/"))
-    cli_command = (
-        "env -u DATABRICKS_CONFIG_PROFILE "
-        f"databricks auth token --host {workspace_arg} --force-refresh --output json "
-        "| jq -r '.access_token'"
-    )
+    if profile:
+        profile_arg = shlex.quote(profile)
+        cli_command = (
+            f"databricks auth token --host {workspace_arg} "
+            f"--profile {profile_arg} --force-refresh --output json "
+            "| jq -r '.access_token'"
+        )
+    else:
+        cli_command = (
+            "env -u DATABRICKS_CONFIG_PROFILE "
+            f"databricks auth token --host {workspace_arg} --force-refresh --output json "
+            "| jq -r '.access_token'"
+        )
     return (
         'if [ -n "${DATABRICKS_BEARER:-}" ]; then '
         'printf "%s\\n" "$DATABRICKS_BEARER"; '

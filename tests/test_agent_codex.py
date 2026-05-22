@@ -115,7 +115,9 @@ class TestCodexLaunch:
             raise RuntimeError("stop")
 
         monkeypatch.delenv("OAUTH_TOKEN", raising=False)
-        monkeypatch.setattr(codex, "get_databricks_token", lambda workspace: "fresh-token")
+        monkeypatch.setattr(
+            codex, "get_databricks_token", lambda workspace, profile=None: "fresh-token"
+        )
         monkeypatch.setattr(os, "execvp", fake_execvp)
 
         try:

@@ -177,18 +177,22 @@ def normalize_workspace_url(workspace: str) -> str:
 def prompt_for_workspace(
     description: str,
     profiles: list[tuple[str, str]] | None = None,
-) -> str:
+) -> tuple[str, str | None]:
     """Ask the user for a workspace URL, offering profiles as quick-select.
 
     `profiles` is a list of (host_url, profile_name) tuples. Caller fetches
-    them — `ui.py` stays Databricks-agnostic. Returns a normalized URL.
+    them — `ui.py` stays Databricks-agnostic. Returns ``(url, profile_name)``;
+    profile_name is ``None`` when the user typed a URL manually.
     """
     console.print()
     console.print(Panel(description, title="ucode setup", style="bold blue", expand=False))
 
     if profiles:
-        choices = [questionary.Choice(title=host, value=host) for host, _ in profiles]
-        choices.append(questionary.Choice(title="Enter a different URL", value="__manual__"))
+        choices = [
+            questionary.Choice(title=host, value=(host, profile_name))
+            for host, profile_name in profiles
+        ]
+        choices.append(questionary.Choice(title="Enter a different URL", value=None))
         style = questionary.Style(
             [
                 ("highlighted", "fg:cyan bold"),
@@ -199,13 +203,14 @@ def prompt_for_workspace(
         choice = questionary.select(
             "Select workspace:", choices=choices, style=style, pointer="›", qmark=""
         ).ask()
-        if choice is not None and choice != "__manual__":
-            return normalize_workspace_url(choice)
+        if choice is not None:
+            host, profile_name = choice
+            return normalize_workspace_url(host), profile_name
 
     while True:
         raw_value = console.input(f"  [bold]Workspace URL[/bold] {muted('›')} ").strip()
         try:
-            return normalize_workspace_url(raw_value)
+            return normalize_workspace_url(raw_value), None
         except ValueError as exc:
             print_err(str(exc))
 
