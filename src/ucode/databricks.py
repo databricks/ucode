@@ -357,6 +357,11 @@ def install_databricks_cli() -> None:
 
 
 def has_valid_databricks_auth(workspace: str) -> bool:
+    # Honor the CI short-circuit (see ``get_databricks_token``): if a
+    # pre-fetched bearer is available, treat auth as valid and skip the
+    # `databricks auth token` shell-out (which only knows user-OAuth).
+    if os.environ.get("DATABRICKS_BEARER", "").strip():
+        return True
     _log_auth_diagnostics()
     try:
         env = build_databricks_cli_env(workspace)
@@ -445,6 +450,17 @@ def ensure_databricks_auth(workspace: str) -> None:
 
 
 def get_databricks_token(workspace: str, *, force_refresh: bool = False) -> str:
+    # ``DATABRICKS_BEARER`` is the CI escape hatch: when set, skip the
+    # `databricks auth token` subprocess entirely and return the pre-fetched
+    # bearer directly. Used by the e2e job, where the protected runner has
+    # no `databricks auth login` cache and `databricks auth token` only knows
+    # how to read user-OAuth caches (not M2M client_credentials). Mirrors the
+    # same short-circuit baked into ``build_auth_shell_command``.
+    bearer = os.environ.get("DATABRICKS_BEARER", "").strip()
+    if bearer:
+        _debug("get_databricks_token", "using DATABRICKS_BEARER env var")
+        return bearer
+
     _log_auth_diagnostics()
     env = build_databricks_cli_env(workspace)
     cmd = ["databricks", "auth", "token", "--host", workspace, "--output", "json"]
