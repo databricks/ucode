@@ -70,6 +70,7 @@ class TestHelp:
         assert result.exit_code == 0
         assert "--agents" in result.output
         assert "comma-separated list of agents" in result.output
+        assert "--workspaces" in result.output
 
 
 def _patch_launch(tool: str):
@@ -390,6 +391,57 @@ class TestConfigureAgentFlag:
         assert result.exit_code == 0, result.output
         mock_cfg.assert_called_once_with(selected_tools=["claude", "codex"])
 
+    def test_workspaces_flag_calls_configure_with_workspaces(self):
+        with (
+            patch("ucode.cli.install_databricks_cli"),
+            patch("ucode.cli.install_tool_binary"),
+            patch("ucode.cli.configure_workspace_command") as mock_cfg,
+        ):
+            result = runner.invoke(
+                app,
+                [
+                    "configure",
+                    "--workspaces",
+                    "first.databricks.com,https://second.databricks.com/",
+                ],
+            )
+        assert result.exit_code == 0, result.output
+        mock_cfg.assert_called_once_with(
+            workspaces=[
+                "https://first.databricks.com",
+                "https://second.databricks.com",
+            ]
+        )
+
+    def test_agents_and_workspaces_flags_call_configure_with_both(self):
+        with (
+            patch("ucode.cli.install_databricks_cli"),
+            patch("ucode.cli.install_tool_binary"),
+            patch("ucode.cli.configure_workspace_command") as mock_cfg,
+        ):
+            result = runner.invoke(
+                app,
+                ["configure", "--agents", "claude,codex", "--workspaces", "https://first.com"],
+            )
+        assert result.exit_code == 0, result.output
+        mock_cfg.assert_called_once_with(
+            selected_tools=["claude", "codex"], workspaces=["https://first.com"]
+        )
+
+    def test_agent_and_workspaces_flags_call_configure_with_both(self):
+        with (
+            patch("ucode.cli.install_databricks_cli"),
+            patch("ucode.cli.install_tool_binary") as mock_install,
+            patch("ucode.cli.configure_workspace_command") as mock_cfg,
+        ):
+            result = runner.invoke(
+                app,
+                ["configure", "--agent", "claude", "--workspaces", "https://first.com"],
+            )
+        assert result.exit_code == 0, result.output
+        mock_install.assert_called_once_with("claude", strict=True, update_existing=True)
+        mock_cfg.assert_called_once_with("claude", workspaces=["https://first.com"])
+
     def test_agent_flag_calls_configure_with_tool(self):
         with (
             patch("ucode.cli.install_databricks_cli"),
@@ -469,6 +521,16 @@ class TestConfigureAgentFlag:
         assert result.exit_code != 0
         mock_cfg.assert_not_called()
 
+    def test_workspaces_flag_rejects_empty_list(self):
+        with (
+            patch("ucode.cli.install_databricks_cli"),
+            patch("ucode.cli.install_tool_binary"),
+            patch("ucode.cli.configure_workspace_command") as mock_cfg,
+        ):
+            result = runner.invoke(app, ["configure", "--workspaces", ","])
+        assert result.exit_code != 0
+        mock_cfg.assert_not_called()
+
 
 class TestConfigureAgentsSelection:
     def test_selected_tools_skip_picker(self, monkeypatch):
@@ -523,3 +585,48 @@ class TestConfigureAgentsSelection:
 
         with pytest.raises(RuntimeError, match="Codex"):
             cli_mod.configure_workspace_command(selected_tools=["claude", "codex"])
+
+    def test_multiple_workspaces_configure_all_and_use_first(self, monkeypatch):
+        import ucode.cli as cli_mod
+
+        states = {
+            "https://first.com": {**MINIMAL_STATE, "workspace": "https://first.com"},
+            "https://second.com": {**MINIMAL_STATE, "workspace": "https://second.com"},
+        }
+        configured_shared: list[tuple[str, tuple[str, ...] | None, bool]] = []
+
+        def fake_configure_shared_state(workspace, tools=None, force_login=False):
+            configured_shared.append(
+                (workspace, tuple(tools) if tools is not None else None, force_login)
+            )
+            return states[workspace]
+
+        saved: list[str] = []
+        configured_tools: list[tuple[str, list[str]]] = []
+        monkeypatch.setattr(cli_mod, "configure_shared_state", fake_configure_shared_state)
+        monkeypatch.setattr(cli_mod, "save_state", lambda state: saved.append(state["workspace"]))
+        monkeypatch.setattr(cli_mod, "check_gateway_endpoint", lambda state, tool: True)
+        monkeypatch.setattr(cli_mod, "prompt_for_tools", lambda available: ["codex"])
+        monkeypatch.setattr(cli_mod, "install_tool_binary", lambda *args, **kwargs: True)
+        monkeypatch.setattr(
+            cli_mod,
+            "configure_selected_tools",
+            lambda state, tools: (
+                configured_tools.append((state["workspace"], tools))
+                or {**state, "available_tools": tools}
+            ),
+        )
+        monkeypatch.setattr(cli_mod, "validate_all_tools", lambda state: None)
+
+        assert (
+            cli_mod.configure_workspace_command(
+                workspaces=["https://first.com", "https://second.com"]
+            )
+            == 0
+        )
+        assert configured_shared == [
+            ("https://first.com", None, True),
+            ("https://second.com", None, True),
+        ]
+        assert saved == ["https://first.com"]
+        assert configured_tools == [("https://first.com", ["codex"])]

@@ -106,6 +106,26 @@ def _parse_agents_option(agents: str) -> list[str]:
     return tools
 
 
+def _parse_workspaces_option(workspaces: str) -> list[str]:
+    workspace_urls: list[str] = []
+    for raw_workspace in workspaces.split(","):
+        raw_workspace = raw_workspace.strip()
+        if not raw_workspace:
+            continue
+        try:
+            workspace = normalize_workspace_url(raw_workspace)
+        except ValueError as exc:
+            raise RuntimeError(str(exc)) from exc
+        if workspace not in workspace_urls:
+            workspace_urls.append(workspace)
+    if not workspace_urls:
+        raise RuntimeError(
+            "No workspaces provided for --workspaces. Use a comma-separated list like "
+            "`--workspaces https://workspace.databricks.com`."
+        )
+    return workspace_urls
+
+
 def configure_shared_state(
     workspace: str, tools: list[str] | None = None, force_login: bool = False
 ) -> dict:
@@ -176,15 +196,30 @@ def configure_shared_state(
     return state
 
 
+def _configure_shared_workspace_states(
+    workspaces: list[str], tools: list[str] | None, *, force_login: bool
+) -> list[dict]:
+    if not workspaces:
+        raise RuntimeError("At least one workspace must be provided.")
+    states: list[dict] = []
+    for workspace in workspaces:
+        states.append(configure_shared_state(workspace, tools=tools, force_login=force_login))
+    return states
+
+
 def configure_workspace_command(
-    tool: str | None = None, selected_tools: list[str] | None = None
+    tool: str | None = None,
+    selected_tools: list[str] | None = None,
+    workspaces: list[str] | None = None,
 ) -> int:
     if tool is not None and selected_tools is not None:
         raise RuntimeError("Use either --agent or --agents, not both.")
 
+    workspace_urls = workspaces or [_prompt_for_configuration(tool)]
+
     if tool is not None:
-        workspace = _prompt_for_configuration(tool)
-        state = configure_shared_state(workspace, tools=[tool], force_login=True)
+        states = _configure_shared_workspace_states(workspace_urls, [tool], force_login=True)
+        state = states[0]
         state = configure_single_tool(tool, state)
         spec = TOOL_SPECS[tool]
         console.print(
@@ -210,8 +245,9 @@ def configure_workspace_command(
             raise RuntimeError(f"{spec['display']} validation failed — config reverted.")
         return 0
 
-    workspace = _prompt_for_configuration()
-    state = configure_shared_state(workspace, tools=selected_tools, force_login=True)
+    states = _configure_shared_workspace_states(workspace_urls, selected_tools, force_login=True)
+    state = states[0]
+    save_state(state)
 
     available_on_workspace: list[str] = []
     tools_to_check = selected_tools or list(TOOL_SPECS)
@@ -498,6 +534,13 @@ def configure(
             help="Configure a comma-separated list of agents without prompting (e.g. claude,codex).",
         ),
     ] = None,
+    workspaces: Annotated[
+        str | None,
+        typer.Option(
+            "--workspaces",
+            help="Configure a comma-separated list of workspaces without prompting.",
+        ),
+    ] = None,
 ) -> None:
     """Configure workspace URL and AI Gateway."""
     if ctx.invoked_subcommand is not None:
@@ -507,16 +550,29 @@ def configure(
         install_databricks_cli()
         if agent is not None and agents is not None:
             raise RuntimeError("Use either --agent or --agents, not both.")
+        workspace_urls = _parse_workspaces_option(workspaces) if workspaces is not None else None
         if agent is not None:
             tool = normalize_tool(agent)
             install_tool_binary(tool, strict=True, update_existing=True)
-            configure_workspace_command(tool)
+            if workspace_urls is None:
+                configure_workspace_command(tool)
+            else:
+                configure_workspace_command(tool, workspaces=workspace_urls)
         elif agents is not None:
-            configure_workspace_command(selected_tools=_parse_agents_option(agents))
+            selected_tools = _parse_agents_option(agents)
+            if workspace_urls is None:
+                configure_workspace_command(selected_tools=selected_tools)
+            else:
+                configure_workspace_command(
+                    selected_tools=selected_tools, workspaces=workspace_urls
+                )
         else:
             # Tool binaries are installed after the user picks which agents
             # they want, in configure_workspace_command.
-            configure_workspace_command()
+            if workspace_urls is None:
+                configure_workspace_command()
+            else:
+                configure_workspace_command(workspaces=workspace_urls)
     except RuntimeError as exc:
         print_err(str(exc))
         raise typer.Exit(1) from None
