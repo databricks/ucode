@@ -31,4 +31,7 @@ jobs:
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
       - uses: databricks/setup-cli@bdb89f81c11a5bd647fd55b585b7c396ec68a25a  # v1.0.0
       - run: uv tool install .
-      - run: uv run pytest tests/test_e2e.py -v
+      # Redirect stdin so any interactive `databricks auth login --no-browser`
+      # fallback EOFs instead of hanging the runner. CI must rely solely on
+      # the M2M env vars; if those don't yield a token, fail fast.
+      - run: uv run pytest tests/test_e2e.py -v < /dev/null
