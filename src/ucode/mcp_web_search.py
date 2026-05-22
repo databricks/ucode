@@ -119,7 +119,7 @@ def _call_responses_api(query: str) -> dict[str, Any]:
         },
     )
     try:
-        with urllib_request.urlopen(request, timeout=60) as response:
+        with urllib_request.urlopen(request, timeout=180) as response:
             raw = response.read().decode("utf-8")
     except urllib_error.HTTPError as exc:
         detail = ""
