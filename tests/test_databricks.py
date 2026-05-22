@@ -105,6 +105,8 @@ class TestBuildAuthShellCommand:
         assert "jq" in cmd
         assert ".access_token" in cmd
         assert "--force-refresh" in cmd
+        assert "DATABRICKS_BEARER" in cmd
+        assert "DATABRICKS_CONFIG_PROFILE" in cmd
 
     def test_returns_token_when_auth_succeeds(self, tmp_path):
         # Fake databricks binary that always returns a valid token JSON.
@@ -118,9 +120,30 @@ class TestBuildAuthShellCommand:
             ["sh", "-c", cmd],
             capture_output=True,
             text=True,
-            env={**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}"},
+            env={
+                **os.environ,
+                "PATH": f"{tmp_path}:{os.environ['PATH']}",
+                "DATABRICKS_BEARER": "",
+            },
         )
         assert result.stdout.strip() == "good-token"
+
+    def test_prefers_databricks_bearer(self, tmp_path):
+        fake = tmp_path / "databricks"
+        fake.write_text("#!/bin/sh\nexit 1\n")
+        fake.chmod(0o755)
+        cmd = build_auth_shell_command(WS)
+        result = subprocess.run(
+            ["sh", "-c", cmd],
+            capture_output=True,
+            text=True,
+            env={
+                **os.environ,
+                "PATH": f"{tmp_path}:{os.environ['PATH']}",
+                "DATABRICKS_BEARER": "bearer-token",
+            },
+        )
+        assert result.stdout.strip() == "bearer-token"
 
 
 class TestGetDatabricksToken:

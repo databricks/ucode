@@ -9,6 +9,7 @@ import logging.handlers
 import os
 import platform
 import re
+import shlex
 import shutil
 import subprocess
 from typing import cast
@@ -527,9 +528,16 @@ def list_databricks_apps(workspace: str) -> list[dict]:
 
 
 def build_auth_shell_command(workspace: str) -> str:
+    workspace_arg = shlex.quote(workspace.rstrip("/"))
+    cli_command = (
+        "env -u DATABRICKS_CONFIG_PROFILE "
+        f"databricks auth token --host {workspace_arg} --force-refresh --output json "
+        "| jq -r '.access_token'"
+    )
     return (
-        f"databricks auth token --host {workspace} --force-refresh --output json "
-        f"| jq -r '.access_token'"
+        'if [ -n "${DATABRICKS_BEARER:-}" ]; then '
+        'printf "%s\\n" "$DATABRICKS_BEARER"; '
+        f"else {cli_command}; fi"
     )
 
 
