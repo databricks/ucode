@@ -11,7 +11,10 @@ import pytest
 import ucode.databricks as db_mod
 from ucode.databricks import (
     AI_GATEWAY_V2_DOCS_URL,
+    _format_subprocess_result,
     _parse_databricks_cli_version,
+    _scrub_databrickscfg,
+    _scrub_json,
     build_auth_shell_command,
     build_databricks_cli_env,
     build_opencode_base_urls,
@@ -123,6 +126,102 @@ class TestBuildAuthShellCommand:
         assert result.stdout.strip() == "good-token"
 
 
+class TestFormatSubprocessResult:
+    def test_suppresses_stdout_on_success(self):
+        result = subprocess.CompletedProcess(
+            args=["databricks", "auth", "token"],
+            returncode=0,
+            stdout='{"access_token": "dapi-secret-do-not-leak", "token_type": "Bearer"}',
+            stderr="",
+        )
+        formatted = _format_subprocess_result(result)
+        assert "dapi-secret-do-not-leak" not in formatted
+        assert "rc=0" in formatted
+
+    def test_includes_stdout_on_failure(self):
+        result = subprocess.CompletedProcess(
+            args=["databricks", "auth", "token"],
+            returncode=1,
+            stdout="useful diagnostic output",
+            stderr="error: no matching profile",
+        )
+        formatted = _format_subprocess_result(result)
+        assert "rc=1" in formatted
+        assert "useful diagnostic output" in formatted
+        assert "no matching profile" in formatted
+
+
+class TestScrubDatabrickscfg:
+    def test_redacts_token_value(self):
+        text = "[DEFAULT]\nhost = https://example.databricks.com\ntoken = dapi-secret\n"
+        scrubbed = _scrub_databrickscfg(text)
+        assert "dapi-secret" not in scrubbed
+        assert "token = <redacted>" in scrubbed
+        assert "host = https://example.databricks.com" in scrubbed
+
+    def test_redacts_various_secret_keys(self):
+        text = (
+            "[p]\n"
+            "client_secret = secret-val-1\n"
+            "bearer_token = secret-val-2\n"
+            "api_key = secret-val-3\n"
+            "password = secret-val-4\n"
+            "auth_type = oauth-u2m\n"
+        )
+        scrubbed = _scrub_databrickscfg(text)
+        for secret in ("secret-val-1", "secret-val-2", "secret-val-3", "secret-val-4"):
+            assert secret not in scrubbed
+        assert "auth_type = oauth-u2m" in scrubbed
+
+    def test_preserves_comments_and_sections(self):
+        text = "# comment\n[DEFAULT]\nhost = https://x\n; another comment with token = leak\n"
+        scrubbed = _scrub_databrickscfg(text)
+        assert "# comment" in scrubbed
+        assert "[DEFAULT]" in scrubbed
+        assert "; another comment with token = leak" in scrubbed
+
+    def test_key_matching_is_case_insensitive(self):
+        text = "[p]\nTOKEN = upper\nAccess_Token = mixed\n"
+        scrubbed = _scrub_databrickscfg(text)
+        assert "upper" not in scrubbed
+        assert "mixed" not in scrubbed
+
+
+class TestScrubJson:
+    def test_redacts_secret_keys(self):
+        payload = {
+            "access_token": "dapi-secret",
+            "host": "https://example.databricks.com",
+        }
+        scrubbed = _scrub_json(payload)
+        assert isinstance(scrubbed, dict)
+        assert scrubbed["access_token"] == "<redacted>"
+        assert scrubbed["host"] == "https://example.databricks.com"
+
+    def test_recurses_into_nested_structures(self):
+        payload = {
+            "profiles": [
+                {"name": "DEFAULT", "client_secret": "abc"},
+                {"name": "other", "password": "pw"},
+            ]
+        }
+        scrubbed = _scrub_json(payload)
+        assert scrubbed == {
+            "profiles": [
+                {"name": "DEFAULT", "client_secret": "<redacted>"},
+                {"name": "other", "password": "<redacted>"},
+            ]
+        }
+
+    def test_passes_through_scalars_and_non_secret_keys(self):
+        assert _scrub_json("plain") == "plain"
+        assert _scrub_json(42) == 42
+        assert _scrub_json({"host": "x", "auth_type": "pat"}) == {
+            "host": "x",
+            "auth_type": "pat",
+        }
+
+
 class TestGetDatabricksToken:
     def _fake_databricks(self, tmp_path, script: str) -> dict:
         fake = tmp_path / "databricks"
@@ -139,27 +238,7 @@ class TestGetDatabricksToken:
         token = get_databricks_token(WS)
         assert token == "good-token"
 
-    def test_reauths_and_retries_when_token_empty(self, tmp_path, monkeypatch):
-        call_count = tmp_path / "calls"
-        call_count.write_text("0")
-        env = self._fake_databricks(
-            tmp_path,
-            f"count=$(cat {call_count})\n"
-            f"echo $((count + 1)) > {call_count}\n"
-            'case "$*" in\n'
-            '  *"auth login"*) exit 0 ;;\n'
-            "esac\n"
-            'if [ "$count" -eq 0 ]; then\n'
-            '  echo \'{"access_token": "", "token_type": "Bearer"}\'\n'
-            "else\n"
-            '  echo \'{"access_token": "refreshed-token", "token_type": "Bearer"}\'\n'
-            "fi",
-        )
-        monkeypatch.setattr("os.environ", env)
-        token = get_databricks_token(WS)
-        assert token == "refreshed-token"
-
-    def test_raises_when_reauth_also_fails(self, tmp_path, monkeypatch):
+    def test_raises_when_token_empty(self, tmp_path, monkeypatch):
         env = self._fake_databricks(
             tmp_path,
             'echo \'{"access_token": "", "token_type": "Bearer"}\'',

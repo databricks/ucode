@@ -3,6 +3,7 @@ discovery, AI Gateway v2 enforcement, SQL warehouse discovery, URL builders."""
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import logging.handlers
@@ -11,6 +12,7 @@ import platform
 import re
 import shutil
 import subprocess
+from pathlib import Path
 from typing import cast
 from urllib import error as urllib_error
 from urllib import request as urllib_request
@@ -85,6 +87,105 @@ def _debug(label: str, detail: str) -> None:
     logger = _get_debug_logger()
     if logger is not None:
         logger.debug("%s: %s", label, detail)
+
+
+_SECRET_KEY_PATTERN = re.compile(
+    r"(token|secret|password|bearer|api_key|apikey)", re.IGNORECASE
+)
+
+
+def _format_subprocess_result(
+    result: subprocess.CompletedProcess[str],
+) -> str:
+    """Format a CompletedProcess for the debug log without leaking tokens.
+
+    On success, stdout is suppressed (it often contains the access token).
+    On failure, stdout/stderr are included truncated."""
+    stderr = (result.stderr or "").strip()[:500]
+    if result.returncode == 0:
+        return f"rc=0 stderr={stderr!r}"
+    stdout = (result.stdout or "").strip()[:500]
+    return f"rc={result.returncode} stdout={stdout!r} stderr={stderr!r}"
+
+
+def _scrub_databrickscfg(text: str) -> str:
+    """Redact value of any INI key that looks secret-bearing."""
+    out: list[str] = []
+    for line in text.splitlines():
+        stripped = line.lstrip()
+        if "=" in stripped and not stripped.startswith(("#", ";")):
+            key = stripped.split("=", 1)[0].strip()
+            if _SECRET_KEY_PATTERN.search(key):
+                indent = line[: len(line) - len(stripped)]
+                out.append(f"{indent}{key} = <redacted>")
+                continue
+        out.append(line)
+    return "\n".join(out)
+
+
+def _scrub_json(value: object) -> object:
+    if isinstance(value, dict):
+        return {
+            k: ("<redacted>" if _SECRET_KEY_PATTERN.search(k) else _scrub_json(v))
+            for k, v in value.items()
+        }
+    if isinstance(value, list):
+        return [_scrub_json(v) for v in value]
+    return value
+
+
+@functools.cache
+def _log_auth_diagnostics() -> None:
+    """Dump CLI version, profiles, and ~/.databrickscfg (scrubbed) to the debug log.
+
+    No-op unless UCODE_DEBUG=1; cached so it runs at most once per process."""
+    if not _debug_enabled():
+        return
+
+    try:
+        version_result = subprocess.run(
+            ["databricks", "--version"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        version = (version_result.stdout or version_result.stderr or "").strip()
+        _debug("databricks --version", version[:200])
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        _debug("databricks --version", f"exception: {type(exc).__name__}: {exc}")
+
+    try:
+        profiles_result = subprocess.run(
+            ["databricks", "auth", "profiles", "--output", "json"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        _debug(
+            "databricks auth profiles",
+            f"rc={profiles_result.returncode} "
+            f"stderr={(profiles_result.stderr or '').strip()[:300]!r}",
+        )
+        if profiles_result.returncode == 0 and profiles_result.stdout:
+            try:
+                payload = json.loads(profiles_result.stdout)
+                _debug("profiles json", json.dumps(_scrub_json(payload))[:2000])
+            except json.JSONDecodeError as exc:
+                _debug("profiles json", f"decode error: {exc}")
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        _debug("databricks auth profiles", f"exception: {type(exc).__name__}: {exc}")
+
+    cfg_path = Path(os.environ.get("DATABRICKS_CONFIG_FILE") or "~/.databrickscfg").expanduser()
+    try:
+        if cfg_path.is_file():
+            raw = cfg_path.read_text(encoding="utf-8", errors="replace")
+            _debug(f"databrickscfg ({cfg_path})", _scrub_databrickscfg(raw)[:4000])
+        else:
+            _debug(f"databrickscfg ({cfg_path})", "not present")
+    except OSError as exc:
+        _debug(f"databrickscfg ({cfg_path})", f"read error: {exc}")
 
 
 def _http_get_json(
@@ -229,6 +330,7 @@ def install_databricks_cli() -> None:
 
 
 def has_valid_databricks_auth(workspace: str) -> bool:
+    _log_auth_diagnostics()
     try:
         env = build_databricks_cli_env(workspace)
         result = run(
@@ -239,11 +341,16 @@ def has_valid_databricks_auth(workspace: str) -> bool:
             env=env,
             timeout=15,
         )
+        _debug(
+            "has_valid_databricks_auth",
+            _format_subprocess_result(result),
+        )
         if result.returncode != 0:
             return False
         data = json.loads(result.stdout or "{}")
         return bool(data.get("access_token"))
-    except (json.JSONDecodeError, OSError, subprocess.TimeoutExpired):
+    except (json.JSONDecodeError, OSError, subprocess.TimeoutExpired) as exc:
+        _debug("has_valid_databricks_auth", f"exception: {type(exc).__name__}: {exc}")
         return False
 
 
@@ -311,37 +418,37 @@ def ensure_databricks_auth(workspace: str) -> None:
 
 
 def get_databricks_token(workspace: str, *, force_refresh: bool = False) -> str:
+    _log_auth_diagnostics()
     env = build_databricks_cli_env(workspace)
     cmd = ["databricks", "auth", "token", "--host", workspace, "--output", "json"]
     if force_refresh:
         cmd.append("--force-refresh")
 
-    def _fetch() -> str:
-        try:
-            result = run(
-                cmd,
-                capture_output=True,
-                text=True,
-                env=env,
-                timeout=15,
+    _debug(
+        "get_databricks_token.env",
+        "set="
+        + ",".join(
+            sorted(
+                k for k in env if k.startswith("DATABRICKS_") or k in {"BUNDLE_PROFILE"}
             )
-            return json.loads(result.stdout or "{}").get("access_token", "")
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, json.JSONDecodeError):
-            return ""
+        ),
+    )
 
-    token = _fetch()
-    if not token:
-        # Session may have expired — attempt non-interactive re-auth and retry once.
-        try:
-            run(
-                ["databricks", "auth", "login", "--host", workspace, "--no-browser"],
-                capture_output=True,
-                env=env,
-                timeout=30,
-            )
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
-            pass
-        token = _fetch()
+    token = ""
+    try:
+        result = run(
+            cmd,
+            check=False,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=15,
+        )
+        _debug("auth token", _format_subprocess_result(result))
+        if result.returncode == 0:
+            token = json.loads(result.stdout or "{}").get("access_token", "")
+    except (subprocess.TimeoutExpired, json.JSONDecodeError) as exc:
+        _debug("auth token", f"exception: {type(exc).__name__}: {exc}")
 
     if not token:
         profile_name = find_profile_name_for_host(workspace)
