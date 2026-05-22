@@ -19,6 +19,7 @@ def _strip_ansi(text: str) -> str:
     which makes rich split styled tokens like ``--agents`` with ANSI codes)."""
     return _ANSI_RE.sub("", text)
 
+
 runner = CliRunner()
 
 TOOLS = ["codex", "claude", "gemini", "opencode"]

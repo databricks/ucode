@@ -14,7 +14,7 @@ import shlex
 import shutil
 import subprocess
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast, overload
 from urllib import error as urllib_error
 from urllib import request as urllib_request
 from urllib.parse import urlparse
@@ -90,9 +90,7 @@ def _debug(label: str, detail: str) -> None:
         logger.debug("%s: %s", label, detail)
 
 
-_SECRET_KEY_PATTERN = re.compile(
-    r"(token|secret|password|bearer|api_key|apikey)", re.IGNORECASE
-)
+_SECRET_KEY_PATTERN = re.compile(r"(token|secret|password|bearer|api_key|apikey)", re.IGNORECASE)
 
 
 def _format_subprocess_result(
@@ -127,7 +125,11 @@ def _scrub_databrickscfg(text: str) -> str:
 def _scrub_json(value: object) -> object:
     if isinstance(value, dict):
         return {
-            k: ("<redacted>" if _SECRET_KEY_PATTERN.search(k) else _scrub_json(v))
+            k: (
+                "<redacted>"
+                if isinstance(k, str) and _SECRET_KEY_PATTERN.search(k)
+                else _scrub_json(v)
+            )
             for k, v in value.items()
         }
     if isinstance(value, list):
@@ -223,6 +225,30 @@ def _http_get_json(
     except urllib_error.URLError as exc:
         _debug(f"GET {url}", f"URLError: {exc.reason}")
         return None, f"network error: {exc.reason}"
+
+
+@overload
+def run(
+    args: list[str],
+    *,
+    check: bool = True,
+    capture_output: bool = False,
+    text: Literal[True],
+    env: dict[str, str] | None = None,
+    timeout: int | None = None,
+) -> subprocess.CompletedProcess[str]: ...
+
+
+@overload
+def run(
+    args: list[str],
+    *,
+    check: bool = True,
+    capture_output: bool = False,
+    text: Literal[False] = False,
+    env: dict[str, str] | None = None,
+    timeout: int | None = None,
+) -> subprocess.CompletedProcess[bytes]: ...
 
 
 def run(
@@ -429,9 +455,7 @@ def get_databricks_token(workspace: str, *, force_refresh: bool = False) -> str:
         "get_databricks_token.env",
         "set="
         + ",".join(
-            sorted(
-                k for k in env if k.startswith("DATABRICKS_") or k in {"BUNDLE_PROFILE"}
-            )
+            sorted(k for k in env if k.startswith("DATABRICKS_") or k in {"BUNDLE_PROFILE"})
         ),
     )
 
