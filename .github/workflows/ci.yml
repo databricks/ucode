@@ -31,6 +31,27 @@ jobs:
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
       - uses: databricks/setup-cli@bdb89f81c11a5bd647fd55b585b7c396ec68a25a  # v1.0.0
       - run: uv tool install .
+      - name: Probe M2M auth (surfaces the CLI's real error if M2M is broken)
+        run: |
+          set +e
+          echo "=== databricks --version ==="
+          databricks --version
+          echo
+          echo "=== env presence (values redacted) ==="
+          for v in DATABRICKS_HOST DATABRICKS_CLIENT_ID DATABRICKS_CLIENT_SECRET DATABRICKS_CONFIG_FILE DATABRICKS_AUTH_TYPE; do
+            if [ -n "${!v:-}" ]; then echo "$v=<set, ${#:-?} chars>"; else echo "$v=<unset>"; fi
+          done
+          echo
+          echo "=== ~/.databrickscfg presence ==="
+          ls -la ~/.databrickscfg 2>&1 || echo "no databrickscfg"
+          echo
+          echo "=== databricks auth token --host \$DATABRICKS_HOST ==="
+          databricks auth token --host "$DATABRICKS_HOST" --output json
+          echo "exit=$?"
+          echo
+          echo "=== databricks current-user me (uses M2M if env vars set) ==="
+          databricks current-user me 2>&1 | head -5
+          echo "exit=$?"
       # Redirect stdin so any interactive `databricks auth login --no-browser`
       # fallback EOFs instead of hanging the runner. CI must rely solely on
       # the M2M env vars; if those don't yield a token, fail fast.
