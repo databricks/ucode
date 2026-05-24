@@ -213,7 +213,7 @@ class TestConfigureSubset:
         monkeypatch.setattr(state_mod, "STATE_PATH", tmp_path / "state.json")
         # Don't actually run `databricks auth login`; the developer running
         # this suite is already authenticated.
-        monkeypatch.setattr("ucode.databricks.run_databricks_login", lambda ws: None)
+        monkeypatch.setattr("ucode.cli.run_databricks_login", lambda ws: None)
         # Skip the workspace prompt and the multi-select picker.
         monkeypatch.setattr(cli_mod, "_prompt_for_configuration", lambda tool=None: e2e_workspace)
         monkeypatch.setattr(cli_mod, "prompt_for_tools", lambda available: ["codex"])
@@ -248,7 +248,7 @@ class TestConfigureSubset:
 
         self._redirect_config_paths(monkeypatch, tmp_path)
         monkeypatch.setattr(state_mod, "STATE_PATH", tmp_path / "state.json")
-        monkeypatch.setattr("ucode.databricks.run_databricks_login", lambda ws: None)
+        monkeypatch.setattr("ucode.cli.run_databricks_login", lambda ws: None)
         monkeypatch.setattr(cli_mod, "_prompt_for_configuration", lambda tool=None: e2e_workspace)
         monkeypatch.setattr(
             cli_mod, "install_tool_binary", lambda tool, strict=False, update_existing=False: True
@@ -281,7 +281,7 @@ class TestConfigureSubset:
 
         codex_path = self._redirect_config_paths(monkeypatch, tmp_path)
         monkeypatch.setattr(state_mod, "STATE_PATH", tmp_path / "state.json")
-        monkeypatch.setattr("ucode.databricks.run_databricks_login", lambda ws: None)
+        monkeypatch.setattr("ucode.cli.run_databricks_login", lambda ws: None)
         monkeypatch.setattr(cli_mod, "_prompt_for_configuration", lambda tool=None: e2e_workspace)
         monkeypatch.setattr(cli_mod, "prompt_for_tools", lambda available: [])
         install_calls: list[str] = []

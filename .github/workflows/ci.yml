@@ -1,14 +1,56 @@
 name: CI
 
 on:
+  workflow_dispatch:
   pull_request:
   push:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
   test:
-    runs-on: linux-ubuntu-latest
+    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4.2.2
-      - uses: astral-sh/setup-uv@v5.4.1
-      - run: uv run pytest
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
+      - run: uv run pytest --ignore=tests/test_e2e.py
+
+  e2e:
+    if: vars.E2E_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    env:
+      UCODE_TEST_WORKSPACE: ${{ secrets.UCODE_TEST_WORKSPACE }}
+      DATABRICKS_HOST: ${{ secrets.UCODE_TEST_WORKSPACE }}
+      # DATABRICKS_BEARER is the CI escape hatch: `databricks auth token`
+      # only retrieves cached user-OAuth tokens, so on a hosted runner
+      # (no databrickscfg, no cached login) it can never produce a bearer.
+      # Pre-fetch one (e.g. via M2M OAuth client_credentials against
+      # /oidc/v1/token) and store it as a repo secret. Both
+      # has_valid_databricks_auth + get_databricks_token + the agents'
+      # apiKeyHelper short-circuit to this value when set. Tokens are
+      # short-lived (~1h); rotate when CI starts failing with 401s.
+      DATABRICKS_BEARER: ${{ secrets.DATABRICKS_BEARER }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
+      - uses: databricks/setup-cli@bdb89f81c11a5bd647fd55b585b7c396ec68a25a  # v1.0.0
+      # The agent launch tests `_require_binary("codex")` etc. and skip when
+      # the CLI isn't on PATH. Install all six so each TestXxxLaunch test
+      # actually runs instead of skipping.
+      - name: Install agent CLIs
+        run: npm install -g
+          @anthropic-ai/claude-code
+          @openai/codex
+          @google/gemini-cli
+          opencode-ai
+          @github/copilot
+          @earendil-works/pi-coding-agent
+      - run: uv tool install .
+      # Redirect stdin so any interactive `databricks auth login --no-browser`
+      # fallback EOFs instead of hanging the runner. With DATABRICKS_BEARER
+      # set, the auth code path doesn't shell out at all — this is a safety
+      # net for any code path we may have missed.
+      - run: uv run pytest tests/test_e2e.py -v < /dev/null
