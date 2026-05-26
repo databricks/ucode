@@ -21,7 +21,7 @@ jobs:
     env:
       ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
       ANTHROPIC_CUSTOM_HEADERS: |
-        ${{ secrets.ANTHROPIC_AUTH_HEADER }}
+        Authorization: Bearer ${{ secrets.ANTHROPIC_API_KEY }}
         x-databricks-use-coding-agent-mode: true
       ANTHROPIC_DEFAULT_OPUS_MODEL: databricks-claude-opus-4-7
       ANTHROPIC_DEFAULT_SONNET_MODEL: databricks-claude-sonnet-4-6
