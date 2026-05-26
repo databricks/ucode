@@ -19,6 +19,8 @@ from urllib import error as urllib_error
 from urllib import request as urllib_request
 from urllib.parse import urlparse
 
+from databricks.sql.exc import ServerOperationError
+
 from ucode.config_io import APP_DIR
 from ucode.ui import (
     err_console,
@@ -1037,10 +1039,30 @@ def run_usage_query(
                 cursor.execute(query)
                 columns = [desc[0] for desc in (cursor.description or [])]
                 rows = cast(list[tuple], cursor.fetchall())
+    except ServerOperationError as exc:
+        if _is_usage_table_access_error(exc):
+            raise RuntimeError(
+                "Unable to read `system.ai_gateway.usage`. Ask your workspace admin "
+                "to enable READ access to `system.ai_gateway.usage` for your account."
+            ) from exc
+        raise RuntimeError(f"Usage query failed: {exc}") from exc
     except Exception as exc:
         raise RuntimeError(f"Usage query failed: {exc}") from exc
 
     return columns, rows
+
+
+def _is_usage_table_access_error(exc: BaseException) -> bool:
+    """Return True when a `ServerOperationError` blocks reads of
+    `system.ai_gateway.usage` — gated on one of the bracketed error codes
+    `INSUFFICIENT_PERMISSIONS` plus a `system.ai_gateway` substring (identifier quoting 
+    stripped first)."""
+    normalized = str(exc).lower().translate(str.maketrans("", "", """`[]"'"""))
+    if "system.ai_gateway" not in normalized:
+        return False
+    return (
+        "insufficient_permissions" in normalized
+    )
 
 
 # ---------------------------------------------------------------------------
