@@ -611,9 +611,7 @@ class TestConfigureAgentsSelection:
         }
         configured_shared: list[tuple[str, str | None, tuple[str, ...] | None, bool]] = []
 
-        def fake_configure_shared_state(
-            workspace, profile=None, tools=None, force_login=False
-        ):
+        def fake_configure_shared_state(workspace, profile=None, tools=None, force_login=False):
             configured_shared.append(
                 (workspace, profile, tuple(tools) if tools is not None else None, force_login)
             )

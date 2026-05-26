@@ -511,9 +511,7 @@ def get_databricks_token(
     _debug(
         "get_databricks_token.env",
         "set="
-        + ",".join(
-            sorted(k for k in env if k.startswith("DATABRICKS_") or k in {"BUNDLE_PROFILE"})
-        )
+        + ",".join(sorted(k for k in env if k.startswith("DATABRICKS_") or k in {"BUNDLE_PROFILE"}))
         + f" profile={profile or '<none>'}",
     )
 
