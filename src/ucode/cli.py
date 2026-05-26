@@ -87,7 +87,8 @@ def _prompt_for_configuration(tool: str | None = None) -> tuple[str, str | None]
         desc = "Configure your Databricks workspace"
     else:
         desc = f"Configure {TOOL_SPECS[tool]['display']} to use your Databricks endpoint."
-    profiles = get_databricks_profiles()
+    with spinner("Loading Databricks workspaces and profiles..."):
+        profiles = get_databricks_profiles()
     return prompt_for_workspace(desc, profiles)
 
 
