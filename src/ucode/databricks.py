@@ -405,29 +405,51 @@ def has_valid_databricks_auth(workspace: str, profile: str | None = None) -> boo
 
 
 def get_databricks_profiles() -> list[tuple[str, str]]:
-    """Return [(host_url, profile_name), ...] from Databricks CLI profiles."""
+    """Return [(host_url, profile_name), ...] from Databricks CLI profiles.
+
+    Returns ``[]`` on any failure (CLI missing, timeout, non-zero exit, JSON
+    decode error). When ``UCODE_DEBUG=1`` each dropout path logs *why* the
+    result was empty so a silently-disappearing workspace picker is
+    diagnosable from ``~/.ucode/debug.log``.
+    """
     try:
         result = run(
             ["databricks", "auth", "profiles", "--output", "json"],
             check=False,
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=20,
         )
-        if result.returncode != 0:
-            return []
-        data = json.loads(result.stdout or "{}")
-        profiles = data.get("profiles") or []
-        seen: set[str] = set()
-        out: list[tuple[str, str]] = []
-        for p in profiles:
-            host = p.get("host", "").rstrip("/")
-            if host and host not in seen and p.get("auth_type") != "pat":
-                seen.add(host)
-                out.append((host, p["name"]))
-        return out
-    except (json.JSONDecodeError, OSError, subprocess.TimeoutExpired, KeyError):
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        _debug("get_databricks_profiles", f"subprocess error: {type(exc).__name__}: {exc}")
         return []
+    if result.returncode != 0:
+        _debug("get_databricks_profiles", _format_subprocess_result(result))
+        return []
+    try:
+        profiles = json.loads(result.stdout or "{}").get("profiles") or []
+    except json.JSONDecodeError as exc:
+        _debug("get_databricks_profiles", f"json decode error: {exc.msg}")
+        return []
+
+    # dict dedupes by host (first non-PAT profile wins).
+    out: dict[str, str] = {}
+    pat = 0
+    for p in profiles:
+        host = (p.get("host") or "").rstrip("/")
+        name = p.get("name")
+        if not host or not name:
+            continue
+        if p.get("auth_type") == "pat":
+            pat += 1
+            continue
+        out.setdefault(host, name)
+
+    _debug(
+        "get_databricks_profiles",
+        f"returned={len(out)} total={len(profiles)} pat={pat}",
+    )
+    return list(out.items())
 
 
 def find_profile_name_for_host(workspace: str) -> str | None:
