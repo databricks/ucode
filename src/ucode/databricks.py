@@ -1067,9 +1067,7 @@ def _is_usage_table_access_error(exc: BaseException) -> bool:
     normalized = str(exc).lower().translate(str.maketrans("", "", """`[]"'"""))
     if "system.ai_gateway" not in normalized:
         return False
-    return (
-        "insufficient_permissions" in normalized
-    )
+    return "insufficient_permissions" in normalized
 
 
 # ---------------------------------------------------------------------------
