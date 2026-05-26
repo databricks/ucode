@@ -9,7 +9,9 @@ jobs:
     runs-on: ubuntu-latest
     env:
       ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
-      ANTHROPIC_CUSTOM_HEADERS: ${{ secrets.ANTHROPIC_CUSTOM_HEADERS }}
+      ANTHROPIC_CUSTOM_HEADERS: |
+        ${{ secrets.ANTHROPIC_AUTH_HEADER }}
+        x-databricks-use-coding-agent-mode: true
       ANTHROPIC_DEFAULT_OPUS_MODEL: databricks-claude-opus-4-7
       ANTHROPIC_DEFAULT_SONNET_MODEL: databricks-claude-sonnet-4-6
       ANTHROPIC_DEFAULT_HAIKU_MODEL: databricks-claude-haiku-4-5
