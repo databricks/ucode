@@ -298,6 +298,47 @@ class TestInstallToolBinary:
 
         assert install_tool_binary("opencode", strict=True, update_existing=True) is True
 
+    def test_existing_old_codex_raises_clear_blocker(self, monkeypatch):
+        def fake_which(binary: str) -> str | None:
+            return f"/usr/bin/{binary}"
+
+        message = "Codex CLI must be updated to 0.134.0 or newer"
+        monkeypatch.setattr("ucode.agents.shutil.which", fake_which)
+        monkeypatch.setattr("ucode.agents.codex.minimum_version_error", lambda: message)
+        monkeypatch.setattr("ucode.agents.codex.required_update_message", lambda: None)
+
+        with pytest.raises(RuntimeError, match="Codex CLI must be updated"):
+            install_tool_binary("codex", strict=True, update_existing=False)
+
+    def test_configure_updates_existing_old_codex_without_optional_prompt(
+        self, monkeypatch, capsys
+    ):
+        calls: list[list[str]] = []
+        prompt_calls: list[str] = []
+
+        def fake_which(binary: str) -> str | None:
+            return f"/usr/bin/{binary}"
+
+        def fake_run(args, **kwargs):
+            calls.append(args)
+            return subprocess.CompletedProcess(args, 0)
+
+        monkeypatch.setattr("ucode.agents.shutil.which", fake_which)
+        monkeypatch.setattr("ucode.agents.subprocess.run", fake_run)
+        monkeypatch.setattr(
+            "ucode.agents.codex.required_update_message",
+            lambda: "Codex CLI 0.133.0 is older than required 0.134.0",
+        )
+        monkeypatch.setattr("ucode.agents.codex.minimum_version_error", lambda: None)
+        monkeypatch.setattr(
+            "ucode.agents.prompt_yes_no", lambda prompt: prompt_calls.append(prompt) or False
+        )
+
+        assert install_tool_binary("codex", strict=False, update_existing=True) is True
+        assert calls == [["npm", "install", "-g", "@openai/codex"]]
+        assert prompt_calls == []
+        assert "older than required" in capsys.readouterr().out
+
     def test_ensure_tool_binary_available_raises_when_missing(self, monkeypatch):
         monkeypatch.setattr("ucode.agents.shutil.which", lambda _: None)
 

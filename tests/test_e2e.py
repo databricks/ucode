@@ -182,7 +182,7 @@ class TestConfigureSubset:
 
         codex_dir = tmp_path / "codex_home" / ".codex"
         codex_dir.mkdir(parents=True, exist_ok=True)
-        monkeypatch.setattr(codex, "CODEX_CONFIG_PATH", codex_dir / "config.toml")
+        monkeypatch.setattr(codex, "CODEX_CONFIG_PATH", codex_dir / "ucode.config.toml")
         monkeypatch.setattr(codex, "CODEX_BACKUP_PATH", tmp_path / "codex.backup.toml")
 
         monkeypatch.setattr(claude, "CLAUDE_SETTINGS_PATH", tmp_path / "claude-settings.json")
@@ -200,7 +200,7 @@ class TestConfigureSubset:
         monkeypatch.setattr(pi, "PI_CONFIG_PATH", tmp_path / "pi-models.json")
         monkeypatch.setattr(pi, "PI_BACKUP_PATH", tmp_path / "pi-models.backup.json")
 
-        return codex_dir / "config.toml"
+        return codex_dir / "ucode.config.toml"
 
     def test_only_picks_codex_writes_only_codex_config(self, tmp_path, monkeypatch, e2e_workspace):
         """User selects only codex → only codex's config file is written and
@@ -342,7 +342,7 @@ class TestCodexLaunch:
         monkeypatch.setattr(config_io_mod, "APP_DIR", tmp_path)
         config_dir = tmp_path / "codex_home" / ".codex"
         config_dir.mkdir(parents=True)
-        config_path = config_dir / "config.toml"
+        config_path = config_dir / "ucode.config.toml"
         backup_path = tmp_path / "codex-config.backup.toml"
         monkeypatch.setattr(codex, "CODEX_CONFIG_PATH", config_path)
         monkeypatch.setattr(codex, "CODEX_BACKUP_PATH", backup_path)

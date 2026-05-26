@@ -212,7 +212,7 @@ class TestCodexUserAgent:
         _require_binary("codex")
         config_dir = tmp_path / "codex_home" / ".codex"
         config_dir.mkdir(parents=True)
-        config_path = config_dir / "config.toml"
+        config_path = config_dir / "ucode.config.toml"
 
         monkeypatch.setattr(config_io_mod, "APP_DIR", tmp_path)
         monkeypatch.setattr(codex, "CODEX_CONFIG_PATH", config_path)

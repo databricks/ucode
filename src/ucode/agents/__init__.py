@@ -21,6 +21,7 @@ from ucode.databricks import (
     install_databricks_cli,
 )
 from ucode.state import load_state, save_state
+from ucode.telemetry import agent_version
 from ucode.ui import (
     console,
     print_err,
@@ -86,7 +87,22 @@ def _update_installed_tool_binary(tool: str) -> bool:
         return False
 
     print_success(f"{spec['display']} is up to date")
+    agent_version.cache_clear()
     return bool(shutil.which(binary))
+
+
+def _minimum_version_error(tool: str) -> str | None:
+    checker = getattr(_MODULES[tool], "minimum_version_error", None)
+    if not callable(checker):
+        return None
+    return checker()
+
+
+def _required_update_message(tool: str) -> str | None:
+    checker = getattr(_MODULES[tool], "required_update_message", None)
+    if not callable(checker):
+        return None
+    return checker()
 
 
 def _confirm_update_installed_tool_binary(tool: str) -> bool:
@@ -105,8 +121,18 @@ def install_tool_binary(tool: str, *, strict: bool = True, update_existing: bool
     package = spec["package"]
 
     if shutil.which(binary):
-        if update_existing and _confirm_update_installed_tool_binary(tool):
-            _update_installed_tool_binary(tool)
+        if update_existing:
+            required_update = _required_update_message(tool)
+            if required_update:
+                print_warning(required_update)
+                if not _update_installed_tool_binary(tool):
+                    raise RuntimeError(_minimum_version_error(tool) or required_update)
+            elif _confirm_update_installed_tool_binary(tool):
+                _update_installed_tool_binary(tool)
+
+        version_error = _minimum_version_error(tool)
+        if version_error:
+            raise RuntimeError(version_error)
         return True
 
     if not shutil.which("npm"):
