@@ -1046,6 +1046,13 @@ def run_usage_query(
                 "to enable READ access to `system.ai_gateway.usage` for your account."
             ) from exc
         raise RuntimeError(f"Usage query failed: {exc}") from exc
+    except ServerOperationError as exc:
+        if _is_usage_table_access_error(exc):
+            raise RuntimeError(
+                "Unable to read `system.ai_gateway.usage`. Ask your workspace admin "
+                "to enable READ access to `system.ai_gateway.usage` for your account."
+            ) from exc
+        raise RuntimeError(f"Usage query failed: {exc}") from exc
     except Exception as exc:
         raise RuntimeError(f"Usage query failed: {exc}") from exc
 
@@ -1055,12 +1062,14 @@ def run_usage_query(
 def _is_usage_table_access_error(exc: BaseException) -> bool:
     """Return True when a `ServerOperationError` blocks reads of
     `system.ai_gateway.usage` — gated on one of the bracketed error codes
-    `INSUFFICIENT_PERMISSIONS` plus a `system.ai_gateway` substring (identifier quoting
+    `INSUFFICIENT_PERMISSIONS` plus a `system.ai_gateway` substring (identifier quoting 
     stripped first)."""
     normalized = str(exc).lower().translate(str.maketrans("", "", """`[]"'"""))
     if "system.ai_gateway" not in normalized:
         return False
-    return "insufficient_permissions" in normalized
+    return (
+        "insufficient_permissions" in normalized
+    )
 
 
 # ---------------------------------------------------------------------------
