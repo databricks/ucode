@@ -622,7 +622,7 @@ def _extract_connection_page(payload: object) -> tuple[list[dict], str | None]:
     return [item for item in raw_connections if isinstance(item, dict)], next_page_token
 
 
-def list_databricks_connections(workspace: str) -> list[dict]:
+def list_databricks_connections(workspace: str, profile: str | None = None) -> list[dict]:
     env = build_databricks_cli_env(workspace)
     connections: list[dict] = []
     page_token: str | None = None
@@ -634,6 +634,7 @@ def list_databricks_connections(workspace: str) -> list[dict]:
                 "databricks",
                 "connections",
                 "list",
+                *_profile_args(profile),
                 "--max-results",
                 "0",
                 "--output",
@@ -684,7 +685,7 @@ def _extract_genie_spaces_page(payload: object) -> tuple[list[dict], str | None]
     return [item for item in raw_spaces if isinstance(item, dict)], next_page_token
 
 
-def list_genie_spaces(workspace: str) -> list[dict]:
+def list_genie_spaces(workspace: str, profile: str | None = None) -> list[dict]:
     env = build_databricks_cli_env(workspace)
     spaces: list[dict] = []
     page_token: str | None = None
@@ -696,6 +697,7 @@ def list_genie_spaces(workspace: str) -> list[dict]:
                 "databricks",
                 "genie",
                 "list-spaces",
+                *_profile_args(profile),
                 "--page-size",
                 "100",
                 "--output",
@@ -743,7 +745,7 @@ def _extract_apps_payload(payload: object) -> list[dict]:
     raise RuntimeError("Databricks apps listing returned invalid JSON.")
 
 
-def list_databricks_apps(workspace: str) -> list[dict]:
+def list_databricks_apps(workspace: str, profile: str | None = None) -> list[dict]:
     env = build_databricks_cli_env(workspace)
     try:
         result = run(
@@ -751,6 +753,7 @@ def list_databricks_apps(workspace: str) -> list[dict]:
                 "databricks",
                 "apps",
                 "list",
+                *_profile_args(profile),
                 "--limit",
                 "1000",
                 "--output",
@@ -1039,13 +1042,6 @@ def run_usage_query(
                 cursor.execute(query)
                 columns = [desc[0] for desc in (cursor.description or [])]
                 rows = cast(list[tuple], cursor.fetchall())
-    except ServerOperationError as exc:
-        if _is_usage_table_access_error(exc):
-            raise RuntimeError(
-                "Unable to read `system.ai_gateway.usage`. Ask your workspace admin "
-                "to enable READ access to `system.ai_gateway.usage` for your account."
-            ) from exc
-        raise RuntimeError(f"Usage query failed: {exc}") from exc
     except ServerOperationError as exc:
         if _is_usage_table_access_error(exc):
             raise RuntimeError(

@@ -375,6 +375,20 @@ class TestListDatabricksConnections:
         assert calls[0]["kwargs"]["env"]["DATABRICKS_HOST"] == WS
         assert calls[1]["args"][-2:] == ["--page-token", "next-page"]
 
+    def test_passes_profile_when_provided(self, monkeypatch):
+        calls: list[list[str]] = []
+
+        def fake_run(args, **kwargs):
+            calls.append(args)
+            return subprocess.CompletedProcess(args, 0, stdout=json.dumps({"connections": []}))
+
+        monkeypatch.setattr(db_mod, "run", fake_run)
+
+        list_databricks_connections(WS, "my-profile")
+
+        assert "--profile" in calls[0]
+        assert calls[0][calls[0].index("--profile") + 1] == "my-profile"
+
     def test_raises_on_invalid_json(self, monkeypatch):
         def fake_run(args, **kwargs):
             return subprocess.CompletedProcess(args, 0, stdout="not-json")
@@ -418,6 +432,20 @@ class TestListGenieSpaces:
         assert calls[0]["kwargs"]["env"]["DATABRICKS_HOST"] == WS
         assert calls[1]["args"][-2:] == ["--page-token", "next-page"]
 
+    def test_passes_profile_when_provided(self, monkeypatch):
+        calls: list[list[str]] = []
+
+        def fake_run(args, **kwargs):
+            calls.append(args)
+            return subprocess.CompletedProcess(args, 0, stdout=json.dumps({"spaces": []}))
+
+        monkeypatch.setattr(db_mod, "run", fake_run)
+
+        list_genie_spaces(WS, "my-profile")
+
+        assert "--profile" in calls[0]
+        assert calls[0][calls[0].index("--profile") + 1] == "my-profile"
+
     def test_raises_on_invalid_json(self, monkeypatch):
         def fake_run(args, **kwargs):
             return subprocess.CompletedProcess(args, 0, stdout="not-json")
@@ -460,6 +488,20 @@ class TestListDatabricksApps:
             "json",
         ]
         assert calls[0]["kwargs"]["env"]["DATABRICKS_HOST"] == WS
+
+    def test_passes_profile_when_provided(self, monkeypatch):
+        calls: list[list[str]] = []
+
+        def fake_run(args, **kwargs):
+            calls.append(args)
+            return subprocess.CompletedProcess(args, 0, stdout=json.dumps([]))
+
+        monkeypatch.setattr(db_mod, "run", fake_run)
+
+        list_databricks_apps(WS, "my-profile")
+
+        assert "--profile" in calls[0]
+        assert calls[0][calls[0].index("--profile") + 1] == "my-profile"
 
     def test_accepts_object_wrapped_apps(self, monkeypatch):
         def fake_run(args, **kwargs):
