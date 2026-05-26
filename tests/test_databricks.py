@@ -471,27 +471,68 @@ class TestEnsureAiGatewayV2:
         mock_resp.read.return_value = body.encode("utf-8")
         return mock_resp
 
+    @staticmethod
+    def _http_error(code: int, msg: str, body: str = ""):
+        import io
+        from unittest.mock import MagicMock
+        from urllib.error import HTTPError
+
+        fp = io.BytesIO(body.encode("utf-8")) if body else None
+        return HTTPError(url="", code=code, msg=msg, hdrs=MagicMock(), fp=fp)
+
     def test_raises_on_404(self):
-        from unittest.mock import MagicMock, patch
-        from urllib.error import HTTPError
+        from unittest.mock import patch
 
-        exc = HTTPError(url="", code=404, msg="Not Found", hdrs=MagicMock(), fp=None)
+        exc = self._http_error(404, "Not Found")
         with patch("ucode.databricks.urllib_request.urlopen", side_effect=exc):
             from ucode.databricks import ensure_ai_gateway_v2
 
-            with pytest.raises(RuntimeError, match=AI_GATEWAY_V2_DOCS_URL):
+            with pytest.raises(RuntimeError, match=AI_GATEWAY_V2_DOCS_URL) as excinfo:
                 ensure_ai_gateway_v2(WS, "fake-token")
+            assert "not enabled" in str(excinfo.value)
 
-    def test_raises_on_401(self):
-        from unittest.mock import MagicMock, patch
-        from urllib.error import HTTPError
+    def test_raises_on_401_with_auth_hint(self):
+        from unittest.mock import patch
 
-        exc = HTTPError(url="", code=401, msg="Unauthorized", hdrs=MagicMock(), fp=None)
+        exc = self._http_error(401, "Unauthorized")
         with patch("ucode.databricks.urllib_request.urlopen", side_effect=exc):
             from ucode.databricks import ensure_ai_gateway_v2
 
-            with pytest.raises(RuntimeError, match="401"):
+            with pytest.raises(RuntimeError, match="401") as excinfo:
                 ensure_ai_gateway_v2(WS, "fake-token")
+            message = str(excinfo.value)
+            assert "rejected" in message.lower()
+            assert "databricks auth login" in message
+
+    def test_raises_on_400_invalid_token_with_auth_hint(self):
+        """400 + body `Invalid Token` is the misleading-error case from issue #84."""
+        from unittest.mock import patch
+
+        exc = self._http_error(400, "Bad Request", body="Invalid Token")
+        with patch("ucode.databricks.urllib_request.urlopen", side_effect=exc):
+            from ucode.databricks import ensure_ai_gateway_v2
+
+            with pytest.raises(RuntimeError) as excinfo:
+                ensure_ai_gateway_v2(WS, "fake-token")
+            message = str(excinfo.value)
+            # The bug we are fixing: must NOT collapse to the generic
+            # "v2 not available" message — must call out the auth failure
+            # and point at re-login.
+            assert "Invalid Token" in message
+            assert "rejected" in message.lower()
+            assert "databricks auth login" in message
+
+    def test_400_without_invalid_token_falls_through_to_generic(self):
+        """A 400 that is *not* an auth failure should still surface the body."""
+        from unittest.mock import patch
+
+        exc = self._http_error(400, "Bad Request", body="some other detail")
+        with patch("ucode.databricks.urllib_request.urlopen", side_effect=exc):
+            from ucode.databricks import ensure_ai_gateway_v2
+
+            with pytest.raises(RuntimeError, match=AI_GATEWAY_V2_DOCS_URL) as excinfo:
+                ensure_ai_gateway_v2(WS, "fake-token")
+            assert "some other detail" in str(excinfo.value)
 
     def test_raises_on_url_error(self):
         from unittest.mock import patch
@@ -529,6 +570,44 @@ class TestEnsureAiGatewayV2:
             from ucode.databricks import ensure_ai_gateway_v2
 
             ensure_ai_gateway_v2(WS, "fake-token")  # should not raise
+
+
+class TestHttpGetJsonReason:
+    """The `reason` string returned by `_http_get_json` must include the response body
+    so callers (e.g. ensure_ai_gateway_v2) can route on it. Before issue #84's fix
+    the body was logged only when UCODE_DEBUG=1 and dropped from the bubbled error."""
+
+    @staticmethod
+    def _http_error(code: int, msg: str, body: str = ""):
+        import io
+        from unittest.mock import MagicMock
+        from urllib.error import HTTPError
+
+        fp = io.BytesIO(body.encode("utf-8")) if body else None
+        return HTTPError(url="", code=code, msg=msg, hdrs=MagicMock(), fp=fp)
+
+    def test_reason_includes_body_on_http_error(self):
+        from unittest.mock import patch
+
+        from ucode.databricks import _http_get_json
+
+        exc = self._http_error(400, "Bad Request", body="Invalid Token")
+        with patch("ucode.databricks.urllib_request.urlopen", side_effect=exc):
+            payload, reason = _http_get_json("https://x/y", "tok")
+        assert payload is None
+        assert "HTTP 400" in reason
+        assert "Invalid Token" in reason
+
+    def test_reason_without_body_is_status_only(self):
+        from unittest.mock import patch
+
+        from ucode.databricks import _http_get_json
+
+        exc = self._http_error(404, "Not Found")
+        with patch("ucode.databricks.urllib_request.urlopen", side_effect=exc):
+            payload, reason = _http_get_json("https://x/y", "tok")
+        assert payload is None
+        assert reason == "HTTP 404 Not Found"
 
 
 class TestParseDatabricksCliVersion:
