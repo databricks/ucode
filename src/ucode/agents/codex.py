@@ -25,7 +25,7 @@ from ucode.telemetry import agent_version, ucode_version
 CODEX_CONFIG_DIR = Path.home() / ".codex"
 CODEX_CONFIG_PATH = CODEX_CONFIG_DIR / "config.toml"
 CODEX_BACKUP_PATH = APP_DIR / "codex-config.backup.toml"
-LEGACY_CODEX_PROFILE_NAME = "ucode"
+CODEX_PROFILE_NAME = "ucode"
 CODEX_MODEL_PROVIDER_NAME = "ucode-databricks"
 
 SPEC: ToolSpec = {
@@ -37,8 +37,7 @@ SPEC: ToolSpec = {
 }
 
 MANAGED_KEYS: list[list[str]] = [
-    ["model"],
-    ["model_provider"],
+    ["profiles", CODEX_PROFILE_NAME],
     ["model_providers", CODEX_MODEL_PROVIDER_NAME],
     ["model_providers", CODEX_MODEL_PROVIDER_NAME, "http_headers"],
 ]
@@ -53,26 +52,28 @@ def render_overlay(
 ) -> dict:
     auth_command = build_auth_shell_command(workspace, databricks_profile)
     base_url = build_tool_base_url("codex", workspace)
-    overlay: dict = {"model_provider": CODEX_MODEL_PROVIDER_NAME}
+    codex_profile_cfg: dict[str, str] = {"model_provider": CODEX_MODEL_PROVIDER_NAME}
     if model:
-        overlay["model"] = model
-    overlay["model_providers"] = {
-        CODEX_MODEL_PROVIDER_NAME: {
-            "name": "Databricks AI Gateway",
-            "base_url": base_url,
-            "wire_api": "responses",
-            "http_headers": {
-                "User-Agent": f"ucode/{ucode_version()} codex/{agent_version('codex')}",
-            },
-            "auth": {
-                "command": "sh",
-                "args": ["-c", auth_command],
-                "timeout_ms": 5000,
-                "refresh_interval_ms": 900000,
-            },
-        }
+        codex_profile_cfg["model"] = model
+    return {
+        "profiles": {CODEX_PROFILE_NAME: codex_profile_cfg},
+        "model_providers": {
+            CODEX_MODEL_PROVIDER_NAME: {
+                "name": "Databricks AI Gateway",
+                "base_url": base_url,
+                "wire_api": "responses",
+                "http_headers": {
+                    "User-Agent": f"ucode/{ucode_version()} codex/{agent_version('codex')}",
+                },
+                "auth": {
+                    "command": "sh",
+                    "args": ["-c", auth_command],
+                    "timeout_ms": 5000,
+                    "refresh_interval_ms": 900000,
+                },
+            }
+        },
     }
-    return overlay
 
 
 def write_tool_config(state: dict, model: str | None = None) -> dict:
@@ -81,11 +82,6 @@ def write_tool_config(state: dict, model: str | None = None) -> dict:
         state["workspace"], model or default_model(state), state.get("profile")
     )
     doc = read_toml_safe(CODEX_CONFIG_PATH)
-    legacy_profiles = doc.get("profiles")
-    if isinstance(legacy_profiles, dict):
-        legacy_profiles.pop(LEGACY_CODEX_PROFILE_NAME, None)
-        if not legacy_profiles:
-            doc.pop("profiles", None)
     deep_merge_dict(doc, overlay)
     write_toml_file(CODEX_CONFIG_PATH, doc)
     state = mark_tool_managed(state, "codex", MANAGED_KEYS)
@@ -103,12 +99,14 @@ def launch(state: dict, tool_args: list[str]) -> None:
     workspace = state.get("workspace")
     if workspace:
         os.environ["OAUTH_TOKEN"] = get_databricks_token(workspace, state.get("profile"))
-    os.execvp(binary, [binary, *tool_args])
+    os.execvp(binary, [binary, "--profile", CODEX_PROFILE_NAME, *tool_args])
 
 
 def validate_cmd(binary: str) -> list[str]:
     return [
         binary,
+        "--profile",
+        CODEX_PROFILE_NAME,
         "exec",
         "--skip-git-repo-check",
         "say hi in 5 words or less",
