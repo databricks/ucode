@@ -148,6 +148,20 @@ class TestBuildAuthShellCommand:
         )
         assert result.stdout.strip() == "bearer-token"
 
+    def test_embeds_profile_when_provided(self):
+        cmd = build_auth_shell_command(WS, profile="stablebox")
+        assert "--profile stablebox" in cmd
+        # We do not strip DATABRICKS_CONFIG_PROFILE when we are explicit about
+        # which profile to use — the --profile flag wins.
+        assert "env -u DATABRICKS_CONFIG_PROFILE" not in cmd
+
+    def test_quotes_profile_shell_metacharacters(self):
+        cmd = build_auth_shell_command(WS, profile="weird name; rm -rf /")
+        # shlex.quote should wrap the value so the rest of the command cannot
+        # be interpreted as a shell injection.
+        assert "rm -rf /" in cmd
+        assert "'weird name; rm -rf /'" in cmd
+
 
 class TestFormatSubprocessResult:
     def test_suppresses_stdout_on_success(self):
@@ -289,6 +303,22 @@ class TestGetDatabricksToken:
         monkeypatch.setattr("os.environ", env)
         with pytest.raises(RuntimeError, match="no access token"):
             get_databricks_token(WS)
+
+    def test_passes_profile_flag_when_provided(self, tmp_path, monkeypatch):
+        # Fake CLI that records its argv to a file so we can assert the
+        # --profile flag is forwarded to `databricks auth token`.
+        argv_log = tmp_path / "argv"
+        env = self._fake_databricks(
+            tmp_path,
+            f'printf "%s\\n" "$@" >> {argv_log}\n'
+            'echo \'{"access_token": "good-token", "token_type": "Bearer"}\'',
+        )
+        monkeypatch.setattr("os.environ", env)
+        token = get_databricks_token(WS, profile="stablebox")
+        assert token == "good-token"
+        argv = argv_log.read_text().splitlines()
+        assert "--profile" in argv
+        assert argv[argv.index("--profile") + 1] == "stablebox"
 
     def test_error_suggests_logout_when_matching_profile_exists(self, tmp_path, monkeypatch):
         env = self._fake_databricks(

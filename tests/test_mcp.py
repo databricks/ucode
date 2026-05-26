@@ -404,7 +404,7 @@ class TestConfigureMcpCommand:
             },
         )
         monkeypatch.setattr(mcp.shutil, "which", lambda binary: f"/usr/bin/{binary}")
-        monkeypatch.setattr(mcp, "ensure_databricks_auth", lambda workspace: None)
+        monkeypatch.setattr(mcp, "ensure_databricks_auth", lambda workspace, profile=None: None)
         monkeypatch.setattr(mcp, "available_mcp_clients", lambda: ["claude"])
         monkeypatch.setattr(mcp, "discover_external_mcp_connection_names", lambda workspace: [])
         monkeypatch.setattr(mcp, "discover_genie_mcp_servers", lambda workspace: [])
@@ -428,7 +428,7 @@ class TestConfigureMcpCommand:
             lambda: {"workspace": WS, "available_tools": ALL_MCP_CLIENTS},
         )
         monkeypatch.setattr(mcp.shutil, "which", lambda binary: f"/usr/bin/{binary}")
-        monkeypatch.setattr(mcp, "ensure_databricks_auth", lambda workspace: None)
+        monkeypatch.setattr(mcp, "ensure_databricks_auth", lambda workspace, profile=None: None)
         monkeypatch.setattr(
             mcp,
             "available_mcp_clients",
@@ -484,7 +484,7 @@ class TestConfigureMcpCommand:
 
         monkeypatch.setattr(mcp, "load_state", lambda: {**CLAUDE_STATE})
         monkeypatch.setattr(mcp.shutil, "which", lambda binary: f"/usr/bin/{binary}")
-        monkeypatch.setattr(mcp, "ensure_databricks_auth", lambda workspace: None)
+        monkeypatch.setattr(mcp, "ensure_databricks_auth", lambda workspace, profile=None: None)
         monkeypatch.setattr(mcp, "available_mcp_clients", lambda: ["claude"])
         monkeypatch.setattr(mcp, "discover_external_mcp_connection_names", lambda workspace: [])
         monkeypatch.setattr(
@@ -536,7 +536,7 @@ class TestConfigureMcpCommand:
 
         monkeypatch.setattr(mcp, "load_state", lambda: {**CLAUDE_STATE})
         monkeypatch.setattr(mcp.shutil, "which", lambda binary: f"/usr/bin/{binary}")
-        monkeypatch.setattr(mcp, "ensure_databricks_auth", lambda workspace: None)
+        monkeypatch.setattr(mcp, "ensure_databricks_auth", lambda workspace, profile=None: None)
         monkeypatch.setattr(mcp, "available_mcp_clients", lambda: ["claude"])
         monkeypatch.setattr(mcp, "discover_external_mcp_connection_names", lambda workspace: [])
         monkeypatch.setattr(mcp, "discover_genie_mcp_servers", lambda workspace: [])
@@ -588,7 +588,7 @@ class TestConfigureMcpCommand:
 
         monkeypatch.setattr(mcp, "load_state", lambda: {**CLAUDE_STATE})
         monkeypatch.setattr(mcp.shutil, "which", lambda binary: f"/usr/bin/{binary}")
-        monkeypatch.setattr(mcp, "ensure_databricks_auth", lambda workspace: None)
+        monkeypatch.setattr(mcp, "ensure_databricks_auth", lambda workspace, profile=None: None)
         monkeypatch.setattr(mcp, "available_mcp_clients", lambda: ["claude"])
         monkeypatch.setattr(
             mcp,
@@ -631,7 +631,7 @@ class TestConfigureMcpCommand:
             lambda: {"workspace": WS, "available_tools": ["claude", "codex"]},
         )
         monkeypatch.setattr(mcp.shutil, "which", lambda binary: f"/usr/bin/{binary}")
-        monkeypatch.setattr(mcp, "ensure_databricks_auth", lambda workspace: None)
+        monkeypatch.setattr(mcp, "ensure_databricks_auth", lambda workspace, profile=None: None)
         monkeypatch.setattr(mcp, "available_mcp_clients", lambda: ALL_MCP_CLIENTS)
         monkeypatch.setattr(mcp, "discover_external_mcp_connection_names", lambda workspace: [])
         monkeypatch.setattr(mcp, "discover_genie_mcp_servers", lambda workspace: [])
@@ -663,7 +663,7 @@ class TestConfigureMcpCommand:
         configured: list[tuple[str, str, str, dict]] = []
         monkeypatch.setattr(mcp, "load_state", lambda: {**CLAUDE_STATE})
         monkeypatch.setattr(mcp.shutil, "which", lambda binary: f"/usr/bin/{binary}")
-        monkeypatch.setattr(mcp, "ensure_databricks_auth", lambda workspace: None)
+        monkeypatch.setattr(mcp, "ensure_databricks_auth", lambda workspace, profile=None: None)
         monkeypatch.setattr(mcp, "available_mcp_clients", lambda: ["claude"])
         monkeypatch.setattr(mcp, "discover_external_mcp_connection_names", lambda workspace: [])
         monkeypatch.setattr(mcp, "discover_genie_mcp_servers", lambda workspace: [])
@@ -717,7 +717,7 @@ class TestConfigureMcpCommand:
 
         monkeypatch.setattr(mcp, "load_state", lambda: state)
         monkeypatch.setattr(mcp.shutil, "which", lambda binary: f"/usr/bin/{binary}")
-        monkeypatch.setattr(mcp, "ensure_databricks_auth", lambda workspace: None)
+        monkeypatch.setattr(mcp, "ensure_databricks_auth", lambda workspace, profile=None: None)
         monkeypatch.setattr(mcp, "available_mcp_clients", lambda: ["claude"])
         monkeypatch.setattr(mcp, "discover_external_mcp_connection_names", lambda workspace: [])
         monkeypatch.setattr(mcp, "discover_genie_mcp_servers", lambda workspace: [])

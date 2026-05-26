@@ -420,8 +420,8 @@ class TestConfigureAgentFlag:
         assert result.exit_code == 0, result.output
         mock_cfg.assert_called_once_with(
             workspaces=[
-                "https://first.databricks.com",
-                "https://second.databricks.com",
+                ("https://first.databricks.com", None),
+                ("https://second.databricks.com", None),
             ]
         )
 
@@ -437,7 +437,7 @@ class TestConfigureAgentFlag:
             )
         assert result.exit_code == 0, result.output
         mock_cfg.assert_called_once_with(
-            selected_tools=["claude", "codex"], workspaces=["https://first.com"]
+            selected_tools=["claude", "codex"], workspaces=[("https://first.com", None)]
         )
 
     def test_agent_and_workspaces_flags_call_configure_with_both(self):
@@ -452,7 +452,7 @@ class TestConfigureAgentFlag:
             )
         assert result.exit_code == 0, result.output
         mock_install.assert_called_once_with("claude", strict=True, update_existing=True)
-        mock_cfg.assert_called_once_with("claude", workspaces=["https://first.com"])
+        mock_cfg.assert_called_once_with("claude", workspaces=[("https://first.com", None)])
 
     def test_agent_flag_calls_configure_with_tool(self):
         with (
@@ -550,7 +550,9 @@ class TestConfigureAgentsSelection:
 
         state = {**MINIMAL_STATE, "available_tools": []}
         monkeypatch.setattr(
-            cli_mod, "_prompt_for_configuration", lambda tool=None: "https://example.com"
+            cli_mod,
+            "_prompt_for_configuration",
+            lambda tool=None: ("https://example.com", None),
         )
         monkeypatch.setattr(cli_mod, "configure_shared_state", lambda *args, **kwargs: state)
         monkeypatch.setattr(
@@ -584,7 +586,9 @@ class TestConfigureAgentsSelection:
 
         state = {**MINIMAL_STATE, "available_tools": []}
         monkeypatch.setattr(
-            cli_mod, "_prompt_for_configuration", lambda tool=None: "https://example.com"
+            cli_mod,
+            "_prompt_for_configuration",
+            lambda tool=None: ("https://example.com", None),
         )
         monkeypatch.setattr(cli_mod, "configure_shared_state", lambda *args, **kwargs: state)
         monkeypatch.setattr(cli_mod, "check_gateway_endpoint", lambda state, tool: tool == "claude")
@@ -605,11 +609,11 @@ class TestConfigureAgentsSelection:
             "https://first.com": {**MINIMAL_STATE, "workspace": "https://first.com"},
             "https://second.com": {**MINIMAL_STATE, "workspace": "https://second.com"},
         }
-        configured_shared: list[tuple[str, tuple[str, ...] | None, bool]] = []
+        configured_shared: list[tuple[str, str | None, tuple[str, ...] | None, bool]] = []
 
-        def fake_configure_shared_state(workspace, tools=None, force_login=False):
+        def fake_configure_shared_state(workspace, profile=None, tools=None, force_login=False):
             configured_shared.append(
-                (workspace, tuple(tools) if tools is not None else None, force_login)
+                (workspace, profile, tuple(tools) if tools is not None else None, force_login)
             )
             return states[workspace]
 
@@ -632,13 +636,13 @@ class TestConfigureAgentsSelection:
 
         assert (
             cli_mod.configure_workspace_command(
-                workspaces=["https://first.com", "https://second.com"]
+                workspaces=[("https://first.com", None), ("https://second.com", None)]
             )
             == 0
         )
         assert configured_shared == [
-            ("https://first.com", None, True),
-            ("https://second.com", None, True),
+            ("https://first.com", None, None, True),
+            ("https://second.com", None, None, True),
         ]
         assert saved == ["https://first.com"]
         assert configured_tools == [("https://first.com", ["codex"])]

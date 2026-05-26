@@ -102,9 +102,10 @@ def build_agent_state(state: dict) -> dict[str, dict]:
     if not isinstance(workspace, str) or not workspace:
         return {}
 
+    profile = state.get("profile") if isinstance(state.get("profile"), str) else None
     base_urls_value = state.get("base_urls")
     base_urls = base_urls_value if isinstance(base_urls_value, dict) else {}
-    auth_command = build_auth_shell_command(workspace)
+    auth_command = build_auth_shell_command(workspace, profile)
     claude_models_value = state.get("claude_models")
     claude_models: dict = claude_models_value if isinstance(claude_models_value, dict) else {}
     codex_models_value = state.get("codex_models")

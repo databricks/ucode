@@ -33,6 +33,7 @@ from ucode.databricks import (
     discover_gemini_models,
     ensure_ai_gateway_v2,
     ensure_databricks_auth,
+    find_profile_name_for_host,
     get_databricks_profiles,
     get_databricks_token,
     install_databricks_cli,
@@ -81,12 +82,13 @@ def _print_discovery_diagnostics(state: dict) -> None:
     print_note("Re-run with `UCODE_DEBUG=1` to log raw discovery responses to ~/.ucode/debug.log.")
 
 
-def _prompt_for_configuration(tool: str | None = None) -> str:
+def _prompt_for_configuration(tool: str | None = None) -> tuple[str, str | None]:
     if tool is None:
         desc = "Configure your Databricks workspace"
     else:
         desc = f"Configure {TOOL_SPECS[tool]['display']} to use your Databricks endpoint."
-    profiles = get_databricks_profiles()
+    with spinner("Loading Databricks workspaces and profiles..."):
+        profiles = get_databricks_profiles()
     return prompt_for_workspace(desc, profiles)
 
 
@@ -106,8 +108,14 @@ def _parse_agents_option(agents: str) -> list[str]:
     return tools
 
 
-def _parse_workspaces_option(workspaces: str) -> list[str]:
-    workspace_urls: list[str] = []
+def _parse_workspaces_option(workspaces: str) -> list[tuple[str, str | None]]:
+    """Parse `--workspaces` into [(url, profile_name | None), ...].
+
+    `--workspaces` supplies bare URLs; the matching profile (if any) is
+    resolved later via `find_profile_name_for_host`.
+    """
+    workspace_entries: list[tuple[str, str | None]] = []
+    seen: set[str] = set()
     for raw_workspace in workspaces.split(","):
         raw_workspace = raw_workspace.strip()
         if not raw_workspace:
@@ -116,32 +124,44 @@ def _parse_workspaces_option(workspaces: str) -> list[str]:
             workspace = normalize_workspace_url(raw_workspace)
         except ValueError as exc:
             raise RuntimeError(str(exc)) from exc
-        if workspace not in workspace_urls:
-            workspace_urls.append(workspace)
-    if not workspace_urls:
+        if workspace not in seen:
+            seen.add(workspace)
+            workspace_entries.append((workspace, None))
+    if not workspace_entries:
         raise RuntimeError(
             "No workspaces provided for --workspaces. Use a comma-separated list like "
             "`--workspaces https://workspace.databricks.com`."
         )
-    return workspace_urls
+    return workspace_entries
 
 
 def configure_shared_state(
-    workspace: str, tools: list[str] | None = None, force_login: bool = False
+    workspace: str,
+    profile: str | None = None,
+    tools: list[str] | None = None,
+    force_login: bool = False,
 ) -> dict:
     """Log into Databricks, enforce AI Gateway v2, fetch model lists, persist state.
 
     If tools is provided, only fetch models for those tools. Otherwise fetch all.
     If force_login is True, always run databricks auth login (used by explicit configure).
+    ``profile`` is the Databricks CLI profile name to address — passed via
+    ``--profile`` to every CLI invocation so ambiguous `~/.databrickscfg`
+    entries (e.g. DEFAULT and a named profile both pointing at the same host)
+    don't error out. If ``None``, we resolve it from the host after login.
     """
     workspace = normalize_workspace_url(workspace)
     fetch_all = tools is None
     if force_login:
-        run_databricks_login(workspace)
+        run_databricks_login(workspace, profile)
     else:
-        ensure_databricks_auth(workspace)
+        ensure_databricks_auth(workspace, profile)
+    # After login the profile exists in ~/.databrickscfg, so a host->profile
+    # lookup is reliable. Persist it so subsequent CLI calls disambiguate.
+    if profile is None:
+        profile = find_profile_name_for_host(workspace)
     with spinner("Verifying Unity AI Gateway..."):
-        token = get_databricks_token(workspace)
+        token = get_databricks_token(workspace, profile)
         ensure_ai_gateway_v2(workspace, token)
     print_success("Unity AI Gateway detected")
 
@@ -176,6 +196,10 @@ def configure_shared_state(
     # Merge into existing workspace state so prior tool configs are preserved.
     state = load_state()
     state["workspace"] = workspace
+    if profile:
+        state["profile"] = profile
+    else:
+        state.pop("profile", None)
     state["base_urls"] = build_shared_base_urls(workspace)
     if want_claude:
         state["claude_models"] = claude_models
@@ -197,28 +221,33 @@ def configure_shared_state(
 
 
 def _configure_shared_workspace_states(
-    workspaces: list[str], tools: list[str] | None, *, force_login: bool
+    workspaces: list[tuple[str, str | None]],
+    tools: list[str] | None,
+    *,
+    force_login: bool,
 ) -> list[dict]:
     if not workspaces:
         raise RuntimeError("At least one workspace must be provided.")
     states: list[dict] = []
-    for workspace in workspaces:
-        states.append(configure_shared_state(workspace, tools=tools, force_login=force_login))
+    for workspace, profile in workspaces:
+        states.append(
+            configure_shared_state(workspace, profile=profile, tools=tools, force_login=force_login)
+        )
     return states
 
 
 def configure_workspace_command(
     tool: str | None = None,
     selected_tools: list[str] | None = None,
-    workspaces: list[str] | None = None,
+    workspaces: list[tuple[str, str | None]] | None = None,
 ) -> int:
     if tool is not None and selected_tools is not None:
         raise RuntimeError("Use either --agent or --agents, not both.")
 
-    workspace_urls = workspaces or [_prompt_for_configuration(tool)]
+    workspace_entries = workspaces or [_prompt_for_configuration(tool)]
 
     if tool is not None:
-        states = _configure_shared_workspace_states(workspace_urls, [tool], force_login=True)
+        states = _configure_shared_workspace_states(workspace_entries, [tool], force_login=True)
         state = states[0]
         state = configure_single_tool(tool, state)
         spec = TOOL_SPECS[tool]
@@ -245,7 +274,7 @@ def configure_workspace_command(
             raise RuntimeError(f"{spec['display']} validation failed — config reverted.")
         return 0
 
-    states = _configure_shared_workspace_states(workspace_urls, selected_tools, force_login=True)
+    states = _configure_shared_workspace_states(workspace_entries, selected_tools, force_login=True)
     state = states[0]
     save_state(state)
 
@@ -318,6 +347,9 @@ def status() -> int:
 
     print_heading("Provider")
     print_kv("Workspace URL", workspace or "not configured")
+    profile = state.get("profile")
+    if profile:
+        print_kv("CLI profile", profile)
 
     print_heading("Coding Agents")
     for tool, spec in TOOL_SPECS.items():
@@ -409,9 +441,10 @@ def _auto_configure_tool(tool: str) -> None:
     """First-time setup for a single tool — mirrors configure_workspace_command."""
     existing = load_state()
     workspace = existing.get("workspace")
+    profile = existing.get("profile")
     if not workspace:
-        workspace = _prompt_for_configuration(tool)
-    state = configure_shared_state(workspace, tools=[tool])
+        workspace, profile = _prompt_for_configuration(tool)
+    state = configure_shared_state(workspace, profile=profile, tools=[tool])
 
     state = configure_single_tool(tool, state)
 
@@ -455,7 +488,9 @@ def _launch_tool(tool_name: str, ctx: typer.Context) -> None:
         # endpoints show up without a manual `ucode configure` (and so that
         # tools like pi which read multiple model bundles never run on
         # stale state from before a tool added a new bundle).
-        state = configure_shared_state(state["workspace"], tools=[tool])
+        state = configure_shared_state(
+            state["workspace"], profile=state.get("profile"), tools=[tool]
+        )
         state, resolved_model = resolve_launch_model(tool, state, None)
         state = configure_tool(tool, state, resolved_model)
         print_section(f"ucode with {TOOL_SPECS[tool]['display']}")
@@ -550,29 +585,29 @@ def configure(
         install_databricks_cli()
         if agent is not None and agents is not None:
             raise RuntimeError("Use either --agent or --agents, not both.")
-        workspace_urls = _parse_workspaces_option(workspaces) if workspaces is not None else None
+        workspace_entries = _parse_workspaces_option(workspaces) if workspaces is not None else None
         if agent is not None:
             tool = normalize_tool(agent)
             install_tool_binary(tool, strict=True, update_existing=True)
-            if workspace_urls is None:
+            if workspace_entries is None:
                 configure_workspace_command(tool)
             else:
-                configure_workspace_command(tool, workspaces=workspace_urls)
+                configure_workspace_command(tool, workspaces=workspace_entries)
         elif agents is not None:
             selected_tools = _parse_agents_option(agents)
-            if workspace_urls is None:
+            if workspace_entries is None:
                 configure_workspace_command(selected_tools=selected_tools)
             else:
                 configure_workspace_command(
-                    selected_tools=selected_tools, workspaces=workspace_urls
+                    selected_tools=selected_tools, workspaces=workspace_entries
                 )
         else:
             # Tool binaries are installed after the user picks which agents
             # they want, in configure_workspace_command.
-            if workspace_urls is None:
+            if workspace_entries is None:
                 configure_workspace_command()
             else:
-                configure_workspace_command(workspaces=workspace_urls)
+                configure_workspace_command(workspaces=workspace_entries)
     except RuntimeError as exc:
         print_err(str(exc))
         raise typer.Exit(1) from None

@@ -213,9 +213,11 @@ class TestConfigureSubset:
         monkeypatch.setattr(state_mod, "STATE_PATH", tmp_path / "state.json")
         # Don't actually run `databricks auth login`; the developer running
         # this suite is already authenticated.
-        monkeypatch.setattr("ucode.cli.run_databricks_login", lambda ws: None)
+        monkeypatch.setattr("ucode.cli.run_databricks_login", lambda ws, profile=None: None)
         # Skip the workspace prompt and the multi-select picker.
-        monkeypatch.setattr(cli_mod, "_prompt_for_configuration", lambda tool=None: e2e_workspace)
+        monkeypatch.setattr(
+            cli_mod, "_prompt_for_configuration", lambda tool=None: (e2e_workspace, None)
+        )
         monkeypatch.setattr(cli_mod, "prompt_for_tools", lambda available: ["codex"])
         # Skip binary install + post-config validation; we're testing the
         # selection plumbing, not the agent binaries themselves.
@@ -248,8 +250,10 @@ class TestConfigureSubset:
 
         self._redirect_config_paths(monkeypatch, tmp_path)
         monkeypatch.setattr(state_mod, "STATE_PATH", tmp_path / "state.json")
-        monkeypatch.setattr("ucode.cli.run_databricks_login", lambda ws: None)
-        monkeypatch.setattr(cli_mod, "_prompt_for_configuration", lambda tool=None: e2e_workspace)
+        monkeypatch.setattr("ucode.cli.run_databricks_login", lambda ws, profile=None: None)
+        monkeypatch.setattr(
+            cli_mod, "_prompt_for_configuration", lambda tool=None: (e2e_workspace, None)
+        )
         monkeypatch.setattr(
             cli_mod, "install_tool_binary", lambda tool, strict=False, update_existing=False: True
         )
@@ -281,8 +285,10 @@ class TestConfigureSubset:
 
         codex_path = self._redirect_config_paths(monkeypatch, tmp_path)
         monkeypatch.setattr(state_mod, "STATE_PATH", tmp_path / "state.json")
-        monkeypatch.setattr("ucode.cli.run_databricks_login", lambda ws: None)
-        monkeypatch.setattr(cli_mod, "_prompt_for_configuration", lambda tool=None: e2e_workspace)
+        monkeypatch.setattr("ucode.cli.run_databricks_login", lambda ws, profile=None: None)
+        monkeypatch.setattr(
+            cli_mod, "_prompt_for_configuration", lambda tool=None: (e2e_workspace, None)
+        )
         monkeypatch.setattr(cli_mod, "prompt_for_tools", lambda available: [])
         install_calls: list[str] = []
         monkeypatch.setattr(
@@ -447,7 +453,7 @@ class TestGeminiLaunch:
                 mp.setattr("ucode.state.save_state", lambda s: None)
                 mp.setattr(
                     "ucode.agents.gemini.get_databricks_token",
-                    lambda ws, **kwargs: e2e_token,
+                    lambda ws, profile=None, **kwargs: e2e_token,
                 )
                 state = {**e2e_state, "workspace": e2e_workspace}
                 gemini.write_tool_config(state, model, token=e2e_token)
@@ -530,7 +536,7 @@ class TestOpencodeLaunch:
                 mp.setattr("ucode.state.save_state", lambda s: None)
                 mp.setattr(
                     "ucode.agents.opencode.get_databricks_token",
-                    lambda ws, **kwargs: e2e_token,
+                    lambda ws, profile=None, **kwargs: e2e_token,
                 )
                 opencode.write_tool_config(
                     {**e2e_state, "workspace": e2e_workspace},
@@ -605,7 +611,7 @@ class TestCopilotLaunch:
                 mp.setattr("ucode.state.save_state", lambda s: None)
                 mp.setattr(
                     "ucode.agents.copilot.get_databricks_token",
-                    lambda ws: e2e_token,
+                    lambda ws, profile=None, **kwargs: e2e_token,
                 )
                 copilot.write_tool_config(
                     {**e2e_state, "workspace": e2e_workspace}, model, token=e2e_token
@@ -672,7 +678,7 @@ class TestPiLaunch:
                 mp.setattr("ucode.state.save_state", lambda s: None)
                 mp.setattr(
                     "ucode.agents.pi.get_databricks_token",
-                    lambda ws, **kwargs: e2e_token,
+                    lambda ws, profile=None, **kwargs: e2e_token,
                 )
                 pi.write_tool_config(
                     {**e2e_state, "workspace": e2e_workspace},

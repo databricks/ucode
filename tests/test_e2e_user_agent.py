@@ -267,7 +267,8 @@ class TestOpencodeUserAgent:
         with pytest.MonkeyPatch().context() as mp:
             mp.setattr("ucode.state.save_state", lambda s: None)
             mp.setattr(
-                "ucode.agents.opencode.get_databricks_token", lambda ws, **kwargs: "test-token"
+                "ucode.agents.opencode.get_databricks_token",
+                lambda ws, profile=None, **kwargs: "test-token",
             )
             opencode.write_tool_config(state, "test-claude-model", token="test-token")
 
@@ -338,7 +339,10 @@ class TestPiUserAgent:
         }
         with pytest.MonkeyPatch().context() as mp:
             mp.setattr("ucode.state.save_state", lambda s: None)
-            mp.setattr("ucode.agents.pi.get_databricks_token", lambda ws, **kwargs: "test-token")
+            mp.setattr(
+                "ucode.agents.pi.get_databricks_token",
+                lambda ws, profile=None, **kwargs: "test-token",
+            )
             pi.write_tool_config(state, "test-claude-model", token="test-token")
 
         env = pi.build_runtime_env("test-token")
