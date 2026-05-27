@@ -203,7 +203,7 @@ def prompt_for_workspace(
         choice = questionary.select(
             "Select workspace:", choices=choices, style=style, pointer="›", qmark=""
         ).ask()
-        if choice is not None:
+        if isinstance(choice, tuple):
             host, profile_name = choice
             return normalize_workspace_url(host), profile_name
 

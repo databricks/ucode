@@ -380,6 +380,10 @@ def has_valid_databricks_auth(workspace: str, profile: str | None = None) -> boo
     if os.environ.get("DATABRICKS_BEARER", "").strip():
         return True
     _log_auth_diagnostics()
+    # Mirror run_databricks_login: when ~/.databrickscfg has multiple
+    # profiles for the same host, `databricks auth token --host …` refuses
+    # to disambiguate without --profile, so resolve it from the host here.
+    profile = profile or find_profile_name_for_host(workspace)
     try:
         env = build_databricks_cli_env(workspace)
         result = run(
@@ -524,6 +528,9 @@ def get_databricks_token(
         return bearer
 
     _log_auth_diagnostics()
+    # See has_valid_databricks_auth: resolve the profile from the host when
+    # the caller didn't supply one, so duplicate-host cfgs don't break us.
+    profile = profile or find_profile_name_for_host(workspace)
     env = build_databricks_cli_env(workspace)
     cmd = [
         "databricks",
@@ -588,13 +595,12 @@ def get_databricks_token(
         token = _fetch()
 
     if not token:
-        profile_name = profile or find_profile_name_for_host(workspace)
         stale_profile_hint = ""
-        if profile_name:
+        if profile:
             stale_profile_hint = (
                 " The saved Databricks CLI profile may be stale or invalid. Try:\n"
-                f"  databricks auth logout --profile {profile_name}\n"
-                f"  databricks auth login --host {workspace} --profile {profile_name}"
+                f"  databricks auth logout --profile {profile}\n"
+                f"  databricks auth login --host {workspace} --profile {profile}"
             )
         raise RuntimeError(
             f"Databricks CLI returned no access token for {workspace}. "
