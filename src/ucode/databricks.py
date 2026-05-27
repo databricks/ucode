@@ -631,7 +631,7 @@ def _extract_connection_page(payload: object) -> tuple[list[dict], str | None]:
     return [item for item in raw_connections if isinstance(item, dict)], next_page_token
 
 
-def list_databricks_connections(workspace: str) -> list[dict]:
+def list_databricks_connections(workspace: str, profile: str | None = None) -> list[dict]:
     env = build_databricks_cli_env(workspace)
     connections: list[dict] = []
     page_token: str | None = None
@@ -643,6 +643,7 @@ def list_databricks_connections(workspace: str) -> list[dict]:
                 "databricks",
                 "connections",
                 "list",
+                *_profile_args(profile),
                 "--max-results",
                 "0",
                 "--output",
@@ -693,7 +694,7 @@ def _extract_genie_spaces_page(payload: object) -> tuple[list[dict], str | None]
     return [item for item in raw_spaces if isinstance(item, dict)], next_page_token
 
 
-def list_genie_spaces(workspace: str) -> list[dict]:
+def list_genie_spaces(workspace: str, profile: str | None = None) -> list[dict]:
     env = build_databricks_cli_env(workspace)
     spaces: list[dict] = []
     page_token: str | None = None
@@ -705,6 +706,7 @@ def list_genie_spaces(workspace: str) -> list[dict]:
                 "databricks",
                 "genie",
                 "list-spaces",
+                *_profile_args(profile),
                 "--page-size",
                 "100",
                 "--output",
@@ -752,7 +754,7 @@ def _extract_apps_payload(payload: object) -> list[dict]:
     raise RuntimeError("Databricks apps listing returned invalid JSON.")
 
 
-def list_databricks_apps(workspace: str) -> list[dict]:
+def list_databricks_apps(workspace: str, profile: str | None = None) -> list[dict]:
     env = build_databricks_cli_env(workspace)
     try:
         result = run(
@@ -760,6 +762,7 @@ def list_databricks_apps(workspace: str) -> list[dict]:
                 "databricks",
                 "apps",
                 "list",
+                *_profile_args(profile),
                 "--limit",
                 "1000",
                 "--output",
