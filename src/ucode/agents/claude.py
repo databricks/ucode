@@ -22,6 +22,7 @@ from ucode.databricks import (
 )
 from ucode.state import mark_tool_managed, save_state
 from ucode.telemetry import agent_version, ucode_version
+from ucode.ui import print_warning
 
 CLAUDE_CONFIG_DIR = Path.home() / ".claude"
 CLAUDE_SETTINGS_PATH = CLAUDE_CONFIG_DIR / "ucode-settings.json"
@@ -128,10 +129,14 @@ def render_overlay(
     return overlay, keys
 
 
-def _register_web_search_mcp(workspace: str, search_model: str, profile: str | None = None) -> None:
+def _register_web_search_mcp(workspace: str, search_model: str, profile: str | None = None) -> bool:
     """Register (or replace) the web_search MCP server in Claude Code's user
     scope via `claude mcp add-json`. Removes any prior entry first so re-runs
-    pick up changes to the workspace, model, or ucode binary path."""
+    pick up changes to the workspace, model, or ucode binary path.
+
+    Returns True if registration succeeded. Failures are non-blocking: we warn
+    and return False so the rest of `ucode claude` setup can complete.
+    """
     # Imported lazily to avoid a circular import via ucode.mcp -> ucode.agents.
     from ucode.mcp import (
         MCP_CLEANUP_SCOPES,
@@ -146,7 +151,12 @@ def _register_web_search_mcp(workspace: str, search_model: str, profile: str | N
             # Best-effort cleanup of stale entries — keep going.
             pass
     entry = _web_search_mcp_entry(workspace, search_model, profile)
-    add_claude_mcp_server(WEB_SEARCH_MCP_NAME, entry)
+    try:
+        add_claude_mcp_server(WEB_SEARCH_MCP_NAME, entry)
+    except RuntimeError as exc:
+        print_warning(f"{exc} Web search will be unavailable; re-run `ucode claude` to retry.")
+        return False
+    return True
 
 
 def _unregister_web_search_mcp() -> None:
