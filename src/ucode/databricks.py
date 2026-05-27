@@ -382,6 +382,10 @@ def has_valid_databricks_auth(workspace: str, profile: str | None = None) -> boo
     if os.environ.get("DATABRICKS_BEARER", "").strip():
         return True
     _log_auth_diagnostics()
+    # Mirror run_databricks_login: when ~/.databrickscfg has multiple
+    # profiles for the same host, `databricks auth token --host …` refuses
+    # to disambiguate without --profile, so resolve it from the host here.
+    profile = profile or find_profile_name_for_host(workspace)
     try:
         env = build_databricks_cli_env(workspace, profile)
         result = run(
@@ -526,6 +530,9 @@ def get_databricks_token(
         return bearer
 
     _log_auth_diagnostics()
+    # See has_valid_databricks_auth: resolve the profile from the host when
+    # the caller didn't supply one, so duplicate-host cfgs don't break us.
+    profile = profile or find_profile_name_for_host(workspace)
     env = build_databricks_cli_env(workspace, profile)
     cmd = [
         "databricks",
