@@ -5,6 +5,8 @@ Reads from `system.ai_gateway.usage` via a Databricks SQL warehouse.
 
 from __future__ import annotations
 
+import json
+from collections.abc import Mapping
 from datetime import date, datetime, timedelta
 from typing import cast
 
@@ -22,6 +24,7 @@ from ucode.ui import (
     heading,
     label,
     print_heading,
+    print_note,
     render_box_table,
     spinner,
     value,
@@ -33,6 +36,7 @@ USAGE_SUMMARY_DAYS = 30
 
 def build_usage_report_query() -> str:
     return f"""
+WITH usage_events AS (
 SELECT
   current_user() AS requester_name,
   CASE
@@ -43,11 +47,10 @@ SELECT
     ELSE 'other'
   END AS tool,
   date(event_time) AS usage_day,
-  SUM(COALESCE(total_tokens, 0)) AS total_tokens_used,
-  COUNT(DISTINCT request_id) AS sessions,
-  MIN(event_time) AS first_event_time,
-  MAX(event_time) AS last_event_time,
-  CONCAT_WS(', ', SORT_ARRAY(COLLECT_SET(destination_model))) AS models
+  request_id,
+  event_time,
+  destination_model,
+  COALESCE(total_tokens, 0) AS total_tokens_used
 FROM system.ai_gateway.usage
 WHERE event_time >= current_timestamp() - interval {USAGE_SUMMARY_DAYS} days
   AND requester = current_user()
@@ -57,8 +60,62 @@ WHERE event_time >= current_timestamp() - interval {USAGE_SUMMARY_DAYS} days
     OR lower(user_agent) LIKE '%gemini%'
     OR lower(user_agent) LIKE '%opencode%'
   )
-GROUP BY 1, 2, 3
-ORDER BY usage_day DESC, tool ASC
+),
+daily_usage AS (
+  SELECT
+    requester_name,
+    tool,
+    usage_day,
+    SUM(total_tokens_used) AS total_tokens_used,
+    COUNT(DISTINCT request_id) AS sessions,
+    MIN(event_time) AS first_event_time,
+    MAX(event_time) AS last_event_time
+  FROM usage_events
+  GROUP BY 1, 2, 3
+),
+model_usage AS (
+  SELECT
+    requester_name,
+    tool,
+    usage_day,
+    destination_model,
+    SUM(total_tokens_used) AS model_tokens_used
+  FROM usage_events
+  WHERE destination_model IS NOT NULL AND destination_model != ''
+  GROUP BY 1, 2, 3, 4
+),
+model_rollup AS (
+  SELECT
+    requester_name,
+    tool,
+    usage_day,
+    CONCAT_WS(', ', SORT_ARRAY(COLLECT_SET(destination_model))) AS models,
+    TO_JSON(
+      SORT_ARRAY(
+        COLLECT_LIST(
+          NAMED_STRUCT('model', destination_model, 'tokens', model_tokens_used)
+        )
+      )
+    ) AS model_tokens
+  FROM model_usage
+  GROUP BY 1, 2, 3
+)
+SELECT
+  daily_usage.requester_name,
+  daily_usage.tool,
+  daily_usage.usage_day,
+  daily_usage.total_tokens_used,
+  daily_usage.sessions,
+  daily_usage.first_event_time,
+  daily_usage.last_event_time,
+  COALESCE(model_rollup.models, '') AS models,
+  COALESCE(model_rollup.model_tokens, '[]') AS model_tokens
+FROM daily_usage
+LEFT JOIN model_rollup
+  ON daily_usage.requester_name = model_rollup.requester_name
+  AND daily_usage.tool = model_rollup.tool
+  AND daily_usage.usage_day = model_rollup.usage_day
+ORDER BY daily_usage.usage_day DESC, daily_usage.tool ASC
 """.strip()
 
 
@@ -68,6 +125,21 @@ def build_current_user_query() -> str:
 
 def parse_usage_rows(columns: list[str], rows: list[tuple]) -> list[dict[str, object]]:
     return [dict(zip(columns, row, strict=False)) for row in rows]
+
+
+def configured_usage_tools(state: dict, tool_displays: dict[str, str]) -> list[str]:
+    configured = state.get("available_tools") or state.get("managed_configs", {}).keys()
+    if not isinstance(configured, list):
+        configured = list(configured)
+    return [tool for tool in tool_displays if tool in configured]
+
+
+def filter_records_for_tools(
+    records: list[dict[str, object]],
+    tools: list[str],
+) -> list[dict[str, object]]:
+    configured = set(tools)
+    return [record for record in records if record.get("tool") in configured]
 
 
 def coerce_date(value_obj: object) -> date | None:
@@ -134,6 +206,80 @@ def summarize_models(tool: str, raw_models: object) -> str:
     return ", ".join(parts) if parts else "-"
 
 
+def _coerce_model_token_item(tool: str, item: object) -> tuple[str, int] | None:
+    if not isinstance(item, Mapping):
+        return None
+    item_mapping = cast(Mapping[str, object], item)
+
+    raw_model = item_mapping.get("model")
+    if not isinstance(raw_model, str) or not raw_model.strip():
+        return None
+
+    raw_tokens = item_mapping.get("tokens")
+    try:
+        token_total = int(cast(int | float | str, raw_tokens or 0))
+    except (TypeError, ValueError):
+        token_total = 0
+
+    model_name = simplify_model_name(tool, raw_model)
+    if model_name == "-":
+        return None
+    return model_name, token_total
+
+
+def extract_model_token_breakdown(
+    tool: str,
+    raw_model_tokens: object,
+    raw_models: object = None,
+    total_tokens: int = 0,
+) -> list[tuple[str, int]]:
+    items: object
+    if isinstance(raw_model_tokens, str) and raw_model_tokens.strip():
+        try:
+            items = json.loads(raw_model_tokens)
+        except json.JSONDecodeError:
+            items = []
+    else:
+        items = raw_model_tokens
+
+    model_tokens: dict[str, int] = {}
+    if isinstance(items, list):
+        for item in items:
+            coerced = _coerce_model_token_item(tool, item)
+            if not coerced:
+                continue
+            model_name, token_total = coerced
+            model_tokens[model_name] = model_tokens.get(model_name, 0) + token_total
+
+    if model_tokens:
+        return sorted(model_tokens.items(), key=lambda item: (-item[1], item[0].lower()))
+
+    models = extract_model_names(tool, raw_models)
+    if len(models) == 1 and total_tokens:
+        return [(models[0], total_tokens)]
+    return [(model_name, 0) for model_name in models]
+
+
+def summarize_model_tokens(
+    tool: str,
+    raw_model_tokens: object,
+    raw_models: object,
+    total_tokens: int,
+) -> str:
+    model_tokens = extract_model_token_breakdown(
+        tool,
+        raw_model_tokens,
+        raw_models,
+        total_tokens,
+    )
+    if not model_tokens:
+        return "-"
+    return ", ".join(
+        f"{model_name} ({format_token_count(token_total)})" if token_total else model_name
+        for model_name, token_total in model_tokens
+    )
+
+
 def empty_tool_day(tool: str, usage_day: date) -> dict[str, object]:
     return {
         "tool": tool,
@@ -143,7 +289,24 @@ def empty_tool_day(tool: str, usage_day: date) -> dict[str, object]:
         "first_event_time": None,
         "last_event_time": None,
         "models": "-",
+        "model_tokens": "[]",
     }
+
+
+def has_tool_usage_last_week(records: list[dict[str, object]], tool: str) -> bool:
+    today = date.today()
+    week_start = today - timedelta(days=USAGE_BREAKDOWN_DAYS - 1)
+    for record in records:
+        if record.get("tool") != tool:
+            continue
+        usage_day = coerce_date(record.get("usage_day"))
+        if not usage_day or usage_day < week_start:
+            continue
+        token_total = int(cast(int, record.get("total_tokens_used") or 0))
+        session_total = int(cast(int, record.get("sessions") or 0))
+        if token_total or session_total:
+            return True
+    return False
 
 
 def build_tool_breakdown_rows(records: list[dict[str, object]], tool: str) -> list[list[str]]:
@@ -174,7 +337,12 @@ def build_tool_breakdown_rows(records: list[dict[str, object]], tool: str) -> li
                 format_token_count(token_total) if token_total else "-",
                 str(session_total) if session_total else "-",
                 format_duration(duration),
-                summarize_models(tool, record.get("models")),
+                summarize_model_tokens(
+                    tool,
+                    record.get("model_tokens"),
+                    record.get("models"),
+                    token_total,
+                ),
             ]
         )
 
@@ -232,9 +400,14 @@ def render_usage_summary(
             ):
                 active_tools_last_week.append(tool)
             if isinstance(tool, str):
-                for model_name in extract_model_names(tool, record.get("models")):
+                for model_name, model_token_total in extract_model_token_breakdown(
+                    tool,
+                    record.get("model_tokens"),
+                    record.get("models"),
+                    token_total,
+                ):
                     weekly_model_tokens[model_name] = (
-                        weekly_model_tokens.get(model_name, 0) + token_total
+                        weekly_model_tokens.get(model_name, 0) + model_token_total
                     )
         if usage_day == today:
             daily_total += token_total
@@ -291,13 +464,25 @@ def usage() -> int:
     requester_name = find_requester_name(workspace, resolved_http_path, token, records)
 
     tool_displays = {tool: spec["display"] for tool, spec in TOOL_SPECS.items()}
-    console.print(render_usage_summary(records, requester_name, tool_displays))
+    configured_tools = configured_usage_tools(state, tool_displays)
+    configured_tool_displays = {tool: tool_displays[tool] for tool in configured_tools}
+    records = filter_records_for_tools(records, configured_tools)
+
+    console.print(render_usage_summary(records, requester_name, configured_tool_displays))
 
     table_headers = ["Date", "Day", "Tokens", "Sessions", "Duration", "Models"]
     table_widths = [8, 5, 10, 8, 8, 24]
 
-    for tool, spec in TOOL_SPECS.items():
-        print_heading(f"{spec['display']} · Last {USAGE_BREAKDOWN_DAYS} Days")
+    if not configured_tools:
+        print_note("No coding agents configured. Run `ucode configure` to set up agents.")
+        return 0
+
+    for tool in configured_tools:
+        display = tool_displays[tool]
+        print_heading(f"{display} · Last {USAGE_BREAKDOWN_DAYS} Days")
+        if not has_tool_usage_last_week(records, tool):
+            print_note(f"No usage for {display} in the last {USAGE_BREAKDOWN_DAYS} days.")
+            continue
         console.print(
             render_box_table(
                 table_headers,
