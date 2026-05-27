@@ -51,6 +51,22 @@ class TestBuildDatabricksCliEnv:
         env = build_databricks_cli_env(WS)
         assert env["DATABRICKS_HOST"] == WS
 
+    def test_strips_ambient_profile_without_explicit_profile(self, monkeypatch):
+        monkeypatch.setenv("DATABRICKS_CONFIG_PROFILE", "other-workspace")
+
+        env = build_databricks_cli_env(WS)
+
+        assert env["DATABRICKS_HOST"] == WS
+        assert "DATABRICKS_CONFIG_PROFILE" not in env
+
+    def test_preserves_ambient_profile_with_explicit_profile(self, monkeypatch):
+        monkeypatch.setenv("DATABRICKS_CONFIG_PROFILE", "other-workspace")
+
+        env = build_databricks_cli_env(WS, profile="stablebox")
+
+        assert env["DATABRICKS_HOST"] == WS
+        assert env["DATABRICKS_CONFIG_PROFILE"] == "other-workspace"
+
 
 class TestBuildToolBaseUrl:
     def test_codex(self):
@@ -274,6 +290,36 @@ class TestGetDatabricksToken:
         monkeypatch.setattr("os.environ", env)
         token = get_databricks_token(WS)
         assert token == "good-token"
+
+    def test_strips_ambient_profile_when_profile_not_provided(self, tmp_path, monkeypatch):
+        profile_log = tmp_path / "profile"
+        env = self._fake_databricks(
+            tmp_path,
+            f'printf "%s" "${{DATABRICKS_CONFIG_PROFILE:-}}" > {profile_log}\n'
+            'echo \'{"access_token": "good-token", "token_type": "Bearer"}\'',
+        )
+        env["DATABRICKS_CONFIG_PROFILE"] = "other-workspace"
+        monkeypatch.setattr("os.environ", env)
+
+        token = get_databricks_token(WS)
+
+        assert token == "good-token"
+        assert profile_log.read_text() == ""
+
+    def test_has_valid_auth_strips_ambient_profile_without_explicit_profile(
+        self, tmp_path, monkeypatch
+    ):
+        profile_log = tmp_path / "profile"
+        env = self._fake_databricks(
+            tmp_path,
+            f'printf "%s" "${{DATABRICKS_CONFIG_PROFILE:-}}" > {profile_log}\n'
+            'echo \'{"access_token": "good-token", "token_type": "Bearer"}\'',
+        )
+        env["DATABRICKS_CONFIG_PROFILE"] = "other-workspace"
+        monkeypatch.setattr("os.environ", env)
+
+        assert db_mod.has_valid_databricks_auth(WS)
+        assert profile_log.read_text() == ""
 
     def test_reauths_and_retries_when_token_empty(self, tmp_path, monkeypatch):
         call_count = tmp_path / "calls"

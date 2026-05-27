@@ -278,9 +278,11 @@ def run(
     )
 
 
-def build_databricks_cli_env(workspace: str) -> dict[str, str]:
+def build_databricks_cli_env(workspace: str, profile: str | None = None) -> dict[str, str]:
     env = os.environ.copy()
     env["DATABRICKS_HOST"] = workspace
+    if profile is None:
+        env.pop("DATABRICKS_CONFIG_PROFILE", None)
     return env
 
 
@@ -385,7 +387,7 @@ def has_valid_databricks_auth(workspace: str, profile: str | None = None) -> boo
     # to disambiguate without --profile, so resolve it from the host here.
     profile = profile or find_profile_name_for_host(workspace)
     try:
-        env = build_databricks_cli_env(workspace)
+        env = build_databricks_cli_env(workspace, profile)
         result = run(
             [
                 "databricks",
@@ -492,7 +494,7 @@ def run_databricks_login(workspace: str, profile: str | None = None) -> None:
             workspace,
             *_profile_args(profile_name),
         ]
-        run(cmd, env=build_databricks_cli_env(workspace), timeout=300)
+        run(cmd, env=build_databricks_cli_env(workspace, profile_name), timeout=300)
     except subprocess.CalledProcessError as exc:
         raise RuntimeError("`databricks auth login` failed.") from exc
     except subprocess.TimeoutExpired as exc:
@@ -531,7 +533,7 @@ def get_databricks_token(
     # See has_valid_databricks_auth: resolve the profile from the host when
     # the caller didn't supply one, so duplicate-host cfgs don't break us.
     profile = profile or find_profile_name_for_host(workspace)
-    env = build_databricks_cli_env(workspace)
+    env = build_databricks_cli_env(workspace, profile)
     cmd = [
         "databricks",
         "auth",
@@ -595,12 +597,13 @@ def get_databricks_token(
         token = _fetch()
 
     if not token:
+        profile_name = profile or find_profile_name_for_host(workspace)
         stale_profile_hint = ""
-        if profile:
+        if profile_name:
             stale_profile_hint = (
                 " The saved Databricks CLI profile may be stale or invalid. Try:\n"
-                f"  databricks auth logout --profile {profile}\n"
-                f"  databricks auth login --host {workspace} --profile {profile}"
+                f"  databricks auth logout --profile {profile_name}\n"
+                f"  databricks auth login --host {workspace} --profile {profile_name}"
             )
         raise RuntimeError(
             f"Databricks CLI returned no access token for {workspace}. "
