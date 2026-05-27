@@ -41,6 +41,7 @@ SPEC: ToolSpec = {
 PROVIDER_KEYS: list[list[str]] = [
     ["provider", "databricks-anthropic"],
     ["provider", "databricks-google"],
+    ["provider", "databricks-openai"],
 ]
 
 
@@ -50,7 +51,11 @@ def is_update_available() -> tuple[str, str] | None:
 
 def _resolve_model_selector(model: str, opencode_models: dict[str, list[str]]) -> str:
     """Return an OpenCode model selector in provider/model form when possible."""
-    if model.startswith("databricks-anthropic/") or model.startswith("databricks-google/"):
+    if (
+        model.startswith("databricks-anthropic/")
+        or model.startswith("databricks-google/")
+        or model.startswith("databricks-openai/")
+    ):
         return model
 
     anthropic_models = opencode_models.get("anthropic") or []
@@ -60,6 +65,10 @@ def _resolve_model_selector(model: str, opencode_models: dict[str, list[str]]) -
     gemini_models = opencode_models.get("gemini") or []
     if model in gemini_models:
         return f"databricks-google/{model}"
+
+    openai_models = opencode_models.get("openai") or []
+    if model in openai_models:
+        return f"databricks-openai/{model}"
 
     return model
 
@@ -82,6 +91,7 @@ def render_overlay(
 
     anthropic_models = opencode_models.get("anthropic") or []
     gemini_models = opencode_models.get("gemini") or []
+    openai_models = opencode_models.get("openai") or []
 
     providers: dict = {}
     keys: list[list[str]] = [["model"]]
@@ -116,6 +126,28 @@ def render_overlay(
             "models": {m: {"headers": ua_header} for m in gemini_models},
         }
         keys.append(["provider", "databricks-google"])
+    if openai_models:
+        # @ai-sdk/openai supports both the Responses API and the legacy
+        # chat-completions API. Databricks GPT-5 / Codex models are
+        # Responses-only on /ai-gateway/codex/v1, so the per-model flag
+        # `useResponsesApi: true` lives in models.<m>.options where opencode
+        # reads it (provider-level options is read by the SDK only).
+        providers["databricks-openai"] = {
+            "npm": "@ai-sdk/openai",
+            "options": {
+                "baseURL": opencode_base_urls["openai"],
+                "apiKey": token,
+                "headers": auth_headers,
+            },
+            "models": {
+                m: {
+                    "headers": ua_header,
+                    "options": {"useResponsesApi": True},
+                }
+                for m in openai_models
+            },
+        }
+        keys.append(["provider", "databricks-openai"])
 
     overlay: dict = {"model": _resolve_model_selector(model, opencode_models)}
     if providers:
@@ -196,6 +228,9 @@ def default_model(state: dict) -> str | None:
     anthropic = opencode_models.get("anthropic") or []
     if anthropic:
         return anthropic[0]
+    openai = opencode_models.get("openai") or []
+    if openai:
+        return openai[0]
     gemini = opencode_models.get("gemini") or []
     return gemini[0] if gemini else None
 
