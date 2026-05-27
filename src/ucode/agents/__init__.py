@@ -18,10 +18,10 @@ import subprocess
 
 from ucode.config_io import ToolSpec
 from ucode.databricks import (
+    get_databricks_token,
     install_databricks_cli,
 )
 from ucode.state import load_state, save_state
-from ucode.telemetry import agent_version
 from ucode.ui import (
     console,
     print_err,
@@ -33,12 +33,13 @@ from ucode.ui import (
     spinner,
 )
 
-from . import claude, codex, copilot, gemini, opencode, pi
+from . import claude, codex, copilot, cursor, gemini, opencode, pi
 
 _MODULES = {
     "codex": codex,
     "claude": claude,
     "gemini": gemini,
+    "cursor": cursor,
     "opencode": opencode,
     "copilot": copilot,
     "pi": pi,
@@ -54,6 +55,7 @@ TOOL_ALIASES = {
     "gemini-cli": "gemini",
     "opencode": "opencode",
     "copilot": "copilot",
+    "cursor": "cursor",
     "pi": "pi",
 }
 
@@ -65,7 +67,7 @@ def normalize_tool(tool: str) -> str:
     normalized = TOOL_ALIASES.get(tool.strip().lower())
     if not normalized:
         raise RuntimeError(
-            f"Unsupported tool '{tool}'. Use one of: codex, claude, gemini, opencode, copilot, pi."
+            f"Unsupported tool '{tool}'. Use one of: codex, claude, gemini, cursor, opencode, copilot, pi."
         )
     return normalized
 
@@ -87,22 +89,7 @@ def _update_installed_tool_binary(tool: str) -> bool:
         return False
 
     print_success(f"{spec['display']} is up to date")
-    agent_version.cache_clear()
     return bool(shutil.which(binary))
-
-
-def _minimum_version_error(tool: str) -> str | None:
-    checker = getattr(_MODULES[tool], "minimum_version_error", None)
-    if not callable(checker):
-        return None
-    return checker()
-
-
-def _required_update_message(tool: str) -> str | None:
-    checker = getattr(_MODULES[tool], "required_update_message", None)
-    if not callable(checker):
-        return None
-    return checker()
 
 
 def _confirm_update_installed_tool_binary(tool: str) -> bool:
@@ -120,20 +107,29 @@ def install_tool_binary(tool: str, *, strict: bool = True, update_existing: bool
     binary = spec["binary"]
     package = spec["package"]
 
-    if shutil.which(binary):
-        if update_existing:
-            required_update = _required_update_message(tool)
-            if required_update:
-                print_warning(required_update)
-                if not _update_installed_tool_binary(tool):
-                    raise RuntimeError(_minimum_version_error(tool) or required_update)
-            elif _confirm_update_installed_tool_binary(tool):
-                _update_installed_tool_binary(tool)
+    if tool == "cursor":
+        if cursor.is_installed():
+            return True
+        message = (
+            f"{spec['display']} is not installed. Download from https://cursor.com/download "
+            "or install the Cursor CLI."
+        )
+        if strict:
+            raise RuntimeError(message)
+        print_warning(message)
+        return False
 
-        version_error = _minimum_version_error(tool)
-        if version_error:
-            raise RuntimeError(version_error)
+    if shutil.which(binary):
+        if update_existing and _confirm_update_installed_tool_binary(tool):
+            _update_installed_tool_binary(tool)
         return True
+
+    if not package:
+        message = f"`{binary}` is not installed."
+        if strict:
+            raise RuntimeError(message)
+        print_warning(message)
+        return False
 
     if not shutil.which("npm"):
         message = f"`{binary}` is not installed and npm is not available to install it."
@@ -166,6 +162,8 @@ def install_tool_binary(tool: str, *, strict: bool = True, update_existing: bool
 def ensure_tool_binary_available(tool: str) -> None:
     spec = TOOL_SPECS[tool]
     binary = spec["binary"]
+    if tool == "cursor" and cursor.is_installed():
+        return
     if shutil.which(binary):
         return
     raise RuntimeError(
@@ -212,6 +210,8 @@ def configure_tool(tool: str, state: dict, model: str | None = None) -> dict:
             result = copilot.write_tool_config(state, model)
         elif tool == "pi":
             result = pi.write_tool_config(state, model)
+        elif tool == "cursor":
+            result = cursor.write_tool_config(state, model)
         else:
             result = opencode.write_tool_config(state, model)
     # gemini/opencode/copilot/pi return (state, token); codex/claude return state
@@ -242,28 +242,9 @@ def check_gateway_endpoint(state: dict, tool: str) -> bool:
             or bool(state.get("codex_models"))
             or bool(state.get("gemini_models"))
         )
+    if tool == "cursor":
+        return bool(state.get("cursor_models"))
     return False
-
-
-_TOOL_DISCOVERY_SOURCES: dict[str, tuple[str, ...]] = {
-    "claude": ("claude",),
-    "opencode": ("claude", "gemini"),
-    "codex": ("codex",),
-    "gemini": ("gemini",),
-    "copilot": ("claude", "codex"),
-    "pi": ("claude", "codex", "gemini"),
-}
-
-
-def _availability_failure_detail(tool: str, state: dict) -> str:
-    reasons = state.get("_discovery_reasons") or {}
-    if not reasons:
-        return ""
-    sources = _TOOL_DISCOVERY_SOURCES.get(tool, ())
-    parts = [f"{source} discovery: {reasons[source]}" for source in sources if reasons.get(source)]
-    if not parts:
-        return ""
-    return " (" + "; ".join(parts) + ")"
 
 
 def configure_single_tool(tool: str, state: dict) -> dict:
@@ -271,10 +252,7 @@ def configure_single_tool(tool: str, state: dict) -> dict:
     with spinner(f"Checking {TOOL_SPECS[tool]['display']} availability..."):
         ok = check_gateway_endpoint(state, tool)
     if not ok:
-        detail = _availability_failure_detail(tool, state)
-        raise RuntimeError(
-            f"{TOOL_SPECS[tool]['display']} is not available on this workspace.{detail}"
-        )
+        raise RuntimeError(f"{TOOL_SPECS[tool]['display']} is not available on this workspace.")
     if tool == "codex":
         state = configure_tool("codex", state)
     else:
@@ -348,6 +326,23 @@ def ensure_provider_state(tool: str) -> dict:
 
 def validate_tool(tool: str) -> tuple[bool, str]:
     """Invoke a tool with a simple prompt to verify it works. Returns (ok, error_msg)."""
+    if tool == "cursor":
+        state = load_state()
+        workspace = state.get("workspace")
+        if not workspace:
+            return False, "no workspace configured"
+        models = list(state.get("cursor_models") or [])
+        try:
+            token = get_databricks_token(workspace)
+            return cursor.validate_gateway(
+                workspace,
+                token,
+                models,
+                model=state.get("cursor_selected_model"),
+            )
+        except RuntimeError as exc:
+            return False, str(exc)
+
     spec = TOOL_SPECS[tool]
     binary = spec["binary"]
     module = _MODULES[tool]

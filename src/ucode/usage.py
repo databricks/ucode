@@ -272,10 +272,9 @@ def usage() -> int:
     if not workspace:
         raise RuntimeError("Workspace is not configured. Run `ucode configure` first.")
 
-    profile = state.get("profile")
-    ensure_databricks_auth(workspace, profile)
+    ensure_databricks_auth(workspace)
     with spinner("Retrieving Databricks access token..."):
-        token = get_databricks_token(workspace, profile)
+        token = get_databricks_token(workspace)
 
     with spinner("Discovering SQL warehouse..."):
         resolved_http_path = discover_sql_warehouse_http_path(workspace, token, quiet=False)

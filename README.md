@@ -1,6 +1,6 @@
 # Unity AI Gateway Coding CLI (ucode)
 
-`ucode` is a lightweight launcher for running Codex, Claude Code, Gemini CLI, OpenCode, GitHub Copilot CLI, and Pi through Databricks.
+`ucode` is a lightweight launcher for running Codex, Claude Code, Gemini CLI, Cursor, OpenCode, GitHub Copilot CLI, and Pi through Databricks.
 
 ## Requirements
 
@@ -23,6 +23,7 @@ Just run the tool you want:
 ucode codex      # OpenAI Codex
 ucode claude     # Claude Code
 ucode gemini     # Gemini CLI
+ucode cursor     # Cursor IDE (Databricks models via AI Gateway)
 ucode opencode   # OpenCode
 ucode copilot    # GitHub Copilot CLI
 ucode pi         # Pi
@@ -37,6 +38,14 @@ ucode claude -r          # resume last session
 ucode codex --full-auto
 ```
 
+### Choosing a model
+
+**Option 2: Pass model flag through ucode**
+
+```bash
+ucode claude -- --model databricks-claude-opus-4-6
+```
+
 All agents route through Databricks AI Gateway using your workspace credentials — no API keys required.
 
 To configure all tools at once:
@@ -44,22 +53,6 @@ To configure all tools at once:
 ```bash
 ucode configure
 ```
-
-To configure specific tools without the picker, pass a comma-separated list:
-
-```bash
-ucode configure --agents claude,codex
-```
-
-Available agent names are `codex`, `claude`, `gemini`, `opencode`, `copilot`, and `pi`.
-
-To configure without the workspace picker, pass a comma-separated list of workspaces:
-
-```bash
-ucode configure --workspaces https://first.databricks.com,https://second.databricks.com
-```
-
-When multiple workspaces are provided, `ucode` logs into and saves state for each workspace. Launch commands such as `ucode codex` use the first workspace in the list.
 
 ### MCP servers (optional)
 
@@ -88,8 +81,6 @@ Discovered external MCP connections are listed directly. MCP auth uses a Databri
 | `ucode usage` | Show AI Gateway usage summary |
 | `ucode revert` | Clear saved state and restore backed-up config files |
 | `ucode configure --dry-run` | Preview config files without writing them |
-| `ucode configure --agents claude,codex` | Configure specific agents without the interactive picker |
-| `ucode configure --workspaces https://first.databricks.com,https://second.databricks.com` | Configure workspaces without the interactive picker |
 
 ## Managed Local Files
 

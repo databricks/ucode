@@ -3,25 +3,19 @@ discovery, AI Gateway v2 enforcement, SQL warehouse discovery, URL builders."""
 
 from __future__ import annotations
 
-import functools
 import json
 import logging
-import logging.handlers
 import os
 import platform
 import re
-import shlex
 import shutil
 import subprocess
-from pathlib import Path
-from typing import Literal, cast, overload
+from typing import cast
 from urllib import error as urllib_error
 from urllib import request as urllib_request
 from urllib.parse import urlparse
 
-from ucode.config_io import APP_DIR
 from ucode.ui import (
-    err_console,
     normalize_workspace_url,
     print_kv,
     print_note,
@@ -40,221 +34,6 @@ WINDOWS_DATABRICKS_INSTALL_URL = (
 AI_GATEWAY_V2_DOCS_URL = "https://docs.databricks.com/aws/en/ai-gateway/overview-beta"
 MIN_DATABRICKS_CLI_VERSION = (0, 298, 0)
 TOKEN_REFRESH_INTERVAL_SECONDS = 1800
-
-
-def _debug_enabled() -> bool:
-    return os.environ.get("UCODE_DEBUG") == "1"
-
-
-_DEBUG_LOGGER: logging.Logger | None = None
-
-
-def _get_debug_logger() -> logging.Logger | None:
-    """Lazily configure a rotating file logger when UCODE_DEBUG=1.
-
-    Returns the logger on first call (and caches it), or None if debug is
-    disabled or the log file could not be opened. A one-time breadcrumb is
-    printed to stderr so the user knows where to tail."""
-    global _DEBUG_LOGGER
-    if _DEBUG_LOGGER is not None or not _debug_enabled():
-        return _DEBUG_LOGGER
-
-    log_path = APP_DIR / "debug.log"
-    try:
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        handler = logging.handlers.RotatingFileHandler(
-            log_path,
-            maxBytes=1_000_000,
-            backupCount=3,
-            encoding="utf-8",
-        )
-        handler.setFormatter(
-            logging.Formatter("%(asctime)s %(message)s", datefmt="%Y-%m-%dT%H:%M:%S")
-        )
-    except OSError:
-        return None
-
-    logger = logging.getLogger("ucode.debug")
-    logger.setLevel(logging.DEBUG)
-    logger.addHandler(handler)
-    logger.propagate = False
-    _DEBUG_LOGGER = logger
-    err_console.print(f"[dim]\\[ucode debug] logging to {log_path}[/dim]")
-    return _DEBUG_LOGGER
-
-
-def _debug(label: str, detail: str) -> None:
-    """When UCODE_DEBUG=1, append a timestamped entry to ~/.ucode/debug.log."""
-    logger = _get_debug_logger()
-    if logger is not None:
-        logger.debug("%s: %s", label, detail)
-
-
-_SECRET_KEY_PATTERN = re.compile(r"(token|secret|password|bearer|api_key|apikey)", re.IGNORECASE)
-
-
-def _format_subprocess_result(
-    result: subprocess.CompletedProcess[str],
-) -> str:
-    """Format a CompletedProcess for the debug log without leaking tokens.
-
-    On success, stdout is suppressed (it often contains the access token).
-    On failure, stdout/stderr are included truncated."""
-    stderr = (result.stderr or "").strip()[:500]
-    if result.returncode == 0:
-        return f"rc=0 stderr={stderr!r}"
-    stdout = (result.stdout or "").strip()[:500]
-    return f"rc={result.returncode} stdout={stdout!r} stderr={stderr!r}"
-
-
-def _scrub_databrickscfg(text: str) -> str:
-    """Redact value of any INI key that looks secret-bearing."""
-    out: list[str] = []
-    for line in text.splitlines():
-        stripped = line.lstrip()
-        if "=" in stripped and not stripped.startswith(("#", ";")):
-            key = stripped.split("=", 1)[0].strip()
-            if _SECRET_KEY_PATTERN.search(key):
-                indent = line[: len(line) - len(stripped)]
-                out.append(f"{indent}{key} = <redacted>")
-                continue
-        out.append(line)
-    return "\n".join(out)
-
-
-def _scrub_json(value: object) -> object:
-    if isinstance(value, dict):
-        return {
-            k: (
-                "<redacted>"
-                if isinstance(k, str) and _SECRET_KEY_PATTERN.search(k)
-                else _scrub_json(v)
-            )
-            for k, v in value.items()
-        }
-    if isinstance(value, list):
-        return [_scrub_json(v) for v in value]
-    return value
-
-
-@functools.cache
-def _log_auth_diagnostics() -> None:
-    """Dump CLI version, profiles, and ~/.databrickscfg (scrubbed) to the debug log.
-
-    No-op unless UCODE_DEBUG=1; cached so it runs at most once per process."""
-    if not _debug_enabled():
-        return
-
-    try:
-        version_result = subprocess.run(
-            ["databricks", "--version"],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        version = (version_result.stdout or version_result.stderr or "").strip()
-        _debug("databricks --version", version[:200])
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        _debug("databricks --version", f"exception: {type(exc).__name__}: {exc}")
-
-    try:
-        profiles_result = subprocess.run(
-            ["databricks", "auth", "profiles", "--output", "json"],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        _debug(
-            "databricks auth profiles",
-            f"rc={profiles_result.returncode} "
-            f"stderr={(profiles_result.stderr or '').strip()[:300]!r}",
-        )
-        if profiles_result.returncode == 0 and profiles_result.stdout:
-            try:
-                payload = json.loads(profiles_result.stdout)
-                _debug("profiles json", json.dumps(_scrub_json(payload))[:2000])
-            except json.JSONDecodeError as exc:
-                _debug("profiles json", f"decode error: {exc}")
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        _debug("databricks auth profiles", f"exception: {type(exc).__name__}: {exc}")
-
-    cfg_path = Path(os.environ.get("DATABRICKS_CONFIG_FILE") or "~/.databrickscfg").expanduser()
-    try:
-        if cfg_path.is_file():
-            raw = cfg_path.read_text(encoding="utf-8", errors="replace")
-            _debug(f"databrickscfg ({cfg_path})", _scrub_databrickscfg(raw)[:4000])
-        else:
-            _debug(f"databrickscfg ({cfg_path})", "not present")
-    except OSError as exc:
-        _debug(f"databrickscfg ({cfg_path})", f"read error: {exc}")
-
-
-def _http_get_json(
-    url: str, token: str, *, timeout: int = 10
-) -> tuple[dict | list | None, str | None]:
-    """GET a JSON endpoint. Returns (payload, None) on success, (None, reason) on failure.
-
-    Honors UCODE_DEBUG=1 to append status + truncated body to ~/.ucode/debug.log.
-    """
-    request = urllib_request.Request(
-        url,
-        headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
-    )
-    try:
-        with urllib_request.urlopen(request, timeout=timeout) as response:
-            body = response.read().decode("utf-8")
-        _debug(f"GET {url}", f"HTTP 200, {len(body)} bytes")
-        if _debug_enabled():
-            _debug("body", body[:4000])
-        try:
-            return json.loads(body), None
-        except json.JSONDecodeError as exc:
-            return None, f"response was not valid JSON ({exc.msg})"
-    except urllib_error.HTTPError as exc:
-        body = ""
-        try:
-            body = exc.read().decode("utf-8", errors="replace") if exc.fp else ""
-        except Exception:
-            body = ""
-        _debug(f"GET {url}", f"HTTP {exc.code} {exc.reason}")
-        if _debug_enabled() and body:
-            _debug("body", body[:4000])
-        reason = f"HTTP {exc.code} {exc.reason}"
-        # Surface the response body too — gateway auth failures return 400
-        # with body `Invalid Token`, which is invisible without this.
-        body_excerpt = body.strip()[:200]
-        if body_excerpt:
-            reason = f"{reason}: {body_excerpt}"
-        return None, reason
-    except urllib_error.URLError as exc:
-        _debug(f"GET {url}", f"URLError: {exc.reason}")
-        return None, f"network error: {exc.reason}"
-
-
-@overload
-def run(
-    args: list[str],
-    *,
-    check: bool = True,
-    capture_output: bool = False,
-    text: Literal[True],
-    env: dict[str, str] | None = None,
-    timeout: int | None = None,
-) -> subprocess.CompletedProcess[str]: ...
-
-
-@overload
-def run(
-    args: list[str],
-    *,
-    check: bool = True,
-    capture_output: bool = False,
-    text: Literal[False] = False,
-    env: dict[str, str] | None = None,
-    timeout: int | None = None,
-) -> subprocess.CompletedProcess[bytes]: ...
 
 
 def run(
@@ -362,100 +141,48 @@ def install_databricks_cli() -> None:
     ensure_databricks_cli_version()
 
 
-def _profile_args(profile: str | None) -> list[str]:
-    """Return ``["--profile", profile]`` when set, otherwise an empty list.
-
-    Centralizing this keeps every `databricks` CLI invocation in this module
-    consistent when a workspace's `~/.databrickscfg` has more than one profile
-    pointing at the same host."""
-    return ["--profile", profile] if profile else []
-
-
-def has_valid_databricks_auth(workspace: str, profile: str | None = None) -> bool:
-    # Honor the CI short-circuit (see ``get_databricks_token``): if a
-    # pre-fetched bearer is available, treat auth as valid and skip the
-    # `databricks auth token` shell-out (which only knows user-OAuth).
-    if os.environ.get("DATABRICKS_BEARER", "").strip():
-        return True
-    _log_auth_diagnostics()
+def has_valid_databricks_auth(workspace: str) -> bool:
     try:
         env = build_databricks_cli_env(workspace)
         result = run(
-            [
-                "databricks",
-                "auth",
-                "token",
-                "--host",
-                workspace,
-                *_profile_args(profile),
-                "--output",
-                "json",
-            ],
+            ["databricks", "auth", "token", "--host", workspace, "--output", "json"],
             check=False,
             capture_output=True,
             text=True,
             env=env,
             timeout=15,
         )
-        _debug(
-            "has_valid_databricks_auth",
-            _format_subprocess_result(result),
-        )
         if result.returncode != 0:
             return False
         data = json.loads(result.stdout or "{}")
         return bool(data.get("access_token"))
-    except (json.JSONDecodeError, OSError, subprocess.TimeoutExpired) as exc:
-        _debug("has_valid_databricks_auth", f"exception: {type(exc).__name__}: {exc}")
+    except (json.JSONDecodeError, OSError, subprocess.TimeoutExpired):
         return False
 
 
 def get_databricks_profiles() -> list[tuple[str, str]]:
-    """Return [(host_url, profile_name), ...] from Databricks CLI profiles.
-
-    Returns ``[]`` on any failure (CLI missing, timeout, non-zero exit, JSON
-    decode error). When ``UCODE_DEBUG=1`` each dropout path logs *why* the
-    result was empty so a silently-disappearing workspace picker is
-    diagnosable from ``~/.ucode/debug.log``.
-    """
+    """Return [(host_url, profile_name), ...] from Databricks CLI profiles."""
     try:
         result = run(
             ["databricks", "auth", "profiles", "--output", "json"],
-            check=False,
             capture_output=True,
             text=True,
-            timeout=20,
+            timeout=10,
         )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        _debug("get_databricks_profiles", f"subprocess error: {type(exc).__name__}: {exc}")
+        if result.returncode != 0:
+            return []
+        data = json.loads(result.stdout or "{}")
+        profiles = data.get("profiles") or []
+        seen: set[str] = set()
+        out: list[tuple[str, str]] = []
+        for p in profiles:
+            host = p.get("host", "").rstrip("/")
+            if host and host not in seen and p.get("auth_type") != "pat":
+                seen.add(host)
+                out.append((host, p["name"]))
+        return out
+    except (json.JSONDecodeError, OSError, subprocess.TimeoutExpired, KeyError):
         return []
-    if result.returncode != 0:
-        _debug("get_databricks_profiles", _format_subprocess_result(result))
-        return []
-    try:
-        profiles = json.loads(result.stdout or "{}").get("profiles") or []
-    except json.JSONDecodeError as exc:
-        _debug("get_databricks_profiles", f"json decode error: {exc.msg}")
-        return []
-
-    # dict dedupes by host (first non-PAT profile wins).
-    out: dict[str, str] = {}
-    pat = 0
-    for p in profiles:
-        host = (p.get("host") or "").rstrip("/")
-        name = p.get("name")
-        if not host or not name:
-            continue
-        if p.get("auth_type") == "pat":
-            pat += 1
-            continue
-        out.setdefault(host, name)
-
-    _debug(
-        "get_databricks_profiles",
-        f"returned={len(out)} total={len(profiles)} pat={pat}",
-    )
-    return list(out.items())
 
 
 def find_profile_name_for_host(workspace: str) -> str | None:
@@ -467,25 +194,16 @@ def find_profile_name_for_host(workspace: str) -> str | None:
     return None
 
 
-def run_databricks_login(workspace: str, profile: str | None = None) -> None:
-    """Run databricks auth login unconditionally.
-
-    When ``profile`` is provided, it is passed via ``--profile``. Otherwise we
-    fall back to looking up an existing profile by host so a stored session is
-    refreshed in place rather than overwriting another profile's tokens."""
+def run_databricks_login(workspace: str) -> None:
+    """Run databricks auth login unconditionally."""
     print_section("Databricks Login")
     print_kv("Workspace", workspace)
     print_note("A browser may open for `databricks auth login`.")
     try:
-        profile_name = profile or find_profile_name_for_host(workspace)
-        cmd = [
-            "databricks",
-            "auth",
-            "login",
-            "--host",
-            workspace,
-            *_profile_args(profile_name),
-        ]
+        cmd = ["databricks", "auth", "login", "--host", workspace]
+        profile_name = find_profile_name_for_host(workspace)
+        if profile_name:
+            cmd += ["--profile", profile_name]
         run(cmd, env=build_databricks_cli_env(workspace), timeout=300)
     except subprocess.CalledProcessError as exc:
         raise RuntimeError("`databricks auth login` failed.") from exc
@@ -494,99 +212,51 @@ def run_databricks_login(workspace: str, profile: str | None = None) -> None:
     print_success("Databricks authentication complete")
 
 
-def ensure_databricks_auth(workspace: str, profile: str | None = None) -> None:
+def ensure_databricks_auth(workspace: str) -> None:
     """Check auth and login only if needed (used by launch path)."""
     with spinner("Checking Databricks auth..."):
-        auth_is_valid = has_valid_databricks_auth(workspace, profile)
+        auth_is_valid = has_valid_databricks_auth(workspace)
     if auth_is_valid:
         print_success(f"Databricks auth already available for {workspace}")
         return
-    run_databricks_login(workspace, profile)
+    run_databricks_login(workspace)
 
 
-def get_databricks_token(
-    workspace: str,
-    profile: str | None = None,
-    *,
-    force_refresh: bool = False,
-) -> str:
-    # ``DATABRICKS_BEARER`` is the CI escape hatch: when set, skip the
-    # `databricks auth token` subprocess entirely and return the pre-fetched
-    # bearer directly. Used by the e2e job, where the protected runner has
-    # no `databricks auth login` cache and `databricks auth token` only knows
-    # how to read user-OAuth caches (not M2M client_credentials). Mirrors the
-    # same short-circuit baked into ``build_auth_shell_command``.
-    bearer = os.environ.get("DATABRICKS_BEARER", "").strip()
-    if bearer:
-        _debug("get_databricks_token", "using DATABRICKS_BEARER env var")
-        return bearer
-
-    _log_auth_diagnostics()
+def get_databricks_token(workspace: str, *, force_refresh: bool = False) -> str:
     env = build_databricks_cli_env(workspace)
-    cmd = [
-        "databricks",
-        "auth",
-        "token",
-        "--host",
-        workspace,
-        *_profile_args(profile),
-        "--output",
-        "json",
-    ]
+    cmd = ["databricks", "auth", "token", "--host", workspace, "--output", "json"]
     if force_refresh:
         cmd.append("--force-refresh")
-
-    _debug(
-        "get_databricks_token.env",
-        "set="
-        + ",".join(sorted(k for k in env if k.startswith("DATABRICKS_") or k in {"BUNDLE_PROFILE"}))
-        + f" profile={profile or '<none>'}",
-    )
 
     def _fetch() -> str:
         try:
             result = run(
                 cmd,
-                check=False,
                 capture_output=True,
                 text=True,
                 env=env,
                 timeout=15,
             )
-            _debug("auth token", _format_subprocess_result(result))
-            if result.returncode == 0:
-                return json.loads(result.stdout or "{}").get("access_token", "")
-        except (subprocess.TimeoutExpired, json.JSONDecodeError) as exc:
-            _debug("auth token", f"exception: {type(exc).__name__}: {exc}")
-        return ""
+            return json.loads(result.stdout or "{}").get("access_token", "")
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, json.JSONDecodeError):
+            return ""
 
     token = _fetch()
     if not token:
         # Session may have expired — attempt non-interactive re-auth and retry once.
-        _debug("auth token", "empty on first fetch; attempting auth login --no-browser")
         try:
-            reauth = run(
-                [
-                    "databricks",
-                    "auth",
-                    "login",
-                    "--host",
-                    workspace,
-                    *_profile_args(profile),
-                    "--no-browser",
-                ],
+            run(
+                ["databricks", "auth", "login", "--host", workspace, "--no-browser"],
                 capture_output=True,
-                text=True,
                 env=env,
                 timeout=30,
             )
-            _debug("auth login", _format_subprocess_result(reauth))
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
-            _debug("auth login", f"exception: {type(exc).__name__}: {exc}")
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            pass
         token = _fetch()
 
     if not token:
-        profile_name = profile or find_profile_name_for_host(workspace)
+        profile_name = find_profile_name_for_host(workspace)
         stale_profile_hint = ""
         if profile_name:
             stale_profile_hint = (
@@ -768,42 +438,26 @@ def list_databricks_apps(workspace: str) -> list[dict]:
         raise RuntimeError("Databricks apps listing returned invalid JSON.") from exc
 
 
-def build_auth_shell_command(workspace: str, profile: str | None = None) -> str:
-    workspace_arg = shlex.quote(workspace.rstrip("/"))
-    if profile:
-        profile_arg = shlex.quote(profile)
-        cli_command = (
-            f"databricks auth token --host {workspace_arg} "
-            f"--profile {profile_arg} --force-refresh --output json "
-            "| jq -r '.access_token'"
-        )
-    else:
-        cli_command = (
-            "env -u DATABRICKS_CONFIG_PROFILE "
-            f"databricks auth token --host {workspace_arg} --force-refresh --output json "
-            "| jq -r '.access_token'"
-        )
+def build_auth_shell_command(workspace: str) -> str:
     return (
-        'if [ -n "${DATABRICKS_BEARER:-}" ]; then '
-        'printf "%s\\n" "$DATABRICKS_BEARER"; '
-        f"else {cli_command}; fi"
+        f"databricks auth token --host {workspace} --force-refresh --output json "
+        f"| jq -r '.access_token'"
     )
 
 
-def discover_claude_models(workspace: str, token: str) -> tuple[dict[str, str], str | None]:
-    """Discover Claude families on this workspace's AI Gateway.
-
-    Returns (models_by_family, reason). reason is None on success; otherwise it
-    describes why the dict is empty (HTTP error, network error, or no models
-    matching the expected naming convention).
-    """
+def fetch_ai_gateway_claude_models(workspace: str, token: str) -> dict[str, str]:
     hostname = workspace_hostname(workspace)
-    payload, reason = _http_get_json(f"https://{hostname}/ai-gateway/anthropic/v1/models", token)
-    if payload is None:
-        return {}, reason
+    request = urllib_request.Request(
+        f"https://{hostname}/ai-gateway/anthropic/v1/models",
+        headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+    )
+    try:
+        with urllib_request.urlopen(request, timeout=10) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except (urllib_error.URLError, urllib_error.HTTPError, json.JSONDecodeError):
+        return {}
 
-    data = cast(dict, payload) if isinstance(payload, dict) else {}
-    raw_ids = [
+    models = [
         m["id"]
         for m in data.get("data", [])
         if isinstance(m.get("id"), str) and not m["id"].endswith("-anthropic")
@@ -812,145 +466,76 @@ def discover_claude_models(workspace: str, token: str) -> tuple[dict[str, str], 
     result: dict[str, str] = {}
     for family, key in [("opus", "opus"), ("sonnet", "sonnet"), ("haiku", "haiku")]:
         candidates = sorted(
-            [m for m in raw_ids if f"databricks-claude-{family}-" in m],
+            [m for m in models if f"databricks-claude-{family}-" in m],
             reverse=True,
         )
         if candidates:
             result[key] = candidates[0]
-    if result:
-        return result, None
-    if not raw_ids:
-        return {}, "AI Gateway returned no Claude model ids"
-    sample = ", ".join(raw_ids[:5])
-    return {}, (
-        "AI Gateway returned model ids but none matched "
-        f"`databricks-claude-{{opus,sonnet,haiku}}-*` (got: {sample})"
-    )
-
-
-def fetch_ai_gateway_claude_models(workspace: str, token: str) -> dict[str, str]:
-    """Backwards-compatible wrapper that discards the diagnostic reason."""
-    models, _ = discover_claude_models(workspace, token)
-    return models
-
-
-def discover_endpoints_with_api_type(
-    workspace: str, token: str, api_type: str
-) -> tuple[list[str], str | None]:
-    """List endpoint names whose served_entities expose api_type with v2 support.
-
-    Returns (endpoints, reason). reason is None on success; otherwise it
-    describes why the list is empty.
-    """
-    hostname = workspace_hostname(workspace)
-    payload, reason = _http_get_json(
-        f"https://{hostname}/api/2.0/serving-endpoints:foundation-models", token
-    )
-    if payload is None:
-        return [], reason
-
-    data = cast(dict, payload) if isinstance(payload, dict) else {}
-    endpoints = data.get("endpoints", [])
-    out: list[str] = []
-    saw_endpoint_without_v2 = False
-    for ep in endpoints:
-        name = ep.get("name", "")
-        entities = ep.get("config", {}).get("served_entities", [])
-        api_types: set[str] = set()
-        any_v2 = False
-        for se in entities:
-            fm = se.get("foundation_model", {})
-            if fm.get("ai_gateway_v2_supported") is True:
-                any_v2 = True
-                api_types.update(fm.get("api_types", []))
-        if not any_v2 and entities:
-            saw_endpoint_without_v2 = True
-        if api_type in api_types:
-            out.append(name)
-    if out:
-        return sorted(out), None
-    if not endpoints:
-        return [], "foundation-models listing returned no endpoints"
-    if saw_endpoint_without_v2:
-        return [], (
-            f"no endpoint exposes api_type `{api_type}` with "
-            "`ai_gateway_v2_supported=true` (workspace has v1-only endpoints)"
-        )
-    return [], f"no endpoint exposes api_type `{api_type}`"
+    return result
 
 
 def _fetch_endpoints_with_api_type(workspace: str, token: str, api_type: str) -> list[str]:
-    """Backwards-compatible wrapper that discards the diagnostic reason."""
-    endpoints, _ = discover_endpoints_with_api_type(workspace, token, api_type)
-    return endpoints
+    """Generic helper: list endpoint names whose served_entities expose api_type."""
+    hostname = workspace_hostname(workspace)
+    request = urllib_request.Request(
+        f"https://{hostname}/api/2.0/serving-endpoints:foundation-models",
+        headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+    )
+    try:
+        with urllib_request.urlopen(request, timeout=10) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except (urllib_error.URLError, urllib_error.HTTPError, json.JSONDecodeError):
+        return []
 
-
-def discover_gemini_models(workspace: str, token: str) -> tuple[list[str], str | None]:
-    return discover_endpoints_with_api_type(workspace, token, "gemini/v1/generateContent")
-
-
-def discover_codex_models(workspace: str, token: str) -> tuple[list[str], str | None]:
-    return discover_endpoints_with_api_type(workspace, token, "openai/v1/responses")
+    out: list[str] = []
+    for ep in data.get("endpoints", []):
+        name = ep.get("name", "")
+        entities = ep.get("config", {}).get("served_entities", [])
+        api_types: set[str] = set()
+        for se in entities:
+            fm = se.get("foundation_model", {})
+            if fm.get("ai_gateway_v2_supported") is True:
+                api_types.update(fm.get("api_types", []))
+        if api_type in api_types:
+            out.append(name)
+    return sorted(out)
 
 
 def fetch_gemini_models(workspace: str, token: str) -> list[str]:
-    models, _ = discover_gemini_models(workspace, token)
-    return models
+    return _fetch_endpoints_with_api_type(workspace, token, "gemini/v1/generateContent")
 
 
 def fetch_codex_models(workspace: str, token: str) -> list[str]:
-    models, _ = discover_codex_models(workspace, token)
-    return models
+    return _fetch_endpoints_with_api_type(workspace, token, "openai/v1/responses")
+
+
+def fetch_cursor_models(workspace: str, token: str) -> list[str]:
+    return _fetch_endpoints_with_api_type(workspace, token, "cursor/v1/chat/completions")
 
 
 def ensure_ai_gateway_v2(workspace: str, token: str) -> None:
     """Probe AI Gateway v2 and raise if unavailable.
 
-    Uses the dedicated v2 listing endpoint `GET /api/ai-gateway/v2/endpoints`:
-    a 200 response (even with an empty list) means v2 is wired up on this
-    workspace — a "no endpoints provisioned" case will surface naturally in
-    downstream discovery. Failure branches:
-
-    - 401 / 403 / 400 with `Invalid Token`: the token is bad for *this*
-      workspace.
-    - 404: AI Gateway V2 is not enabled on this workspace — point at the docs.
-    - other (5xx, network errors): surface the reason verbatim.
+    Replaces the prior detect/fall-back pattern: v2 is now mandatory.
     """
     hostname = workspace_hostname(workspace)
-    url = f"https://{hostname}/api/ai-gateway/v2/endpoints?page_size=1"
-    payload, reason = _http_get_json(url, token)
-    if payload is not None:
-        return
-    reason_str = reason or "unknown error"
-    if _looks_like_auth_failure(reason_str):
-        raise RuntimeError(
-            f"Databricks rejected the access token for {workspace} ({reason_str}). "
-            f"Try:\n"
-            f"  databricks auth logout --host {workspace}\n"
-            f"  databricks auth login --host {workspace}"
-        )
-    if "HTTP 404" in reason_str:
-        raise RuntimeError(
-            "Databricks Unity AI Gateway is not enabled on this workspace "
-            f"({reason_str}). See {AI_GATEWAY_V2_DOCS_URL}"
-        )
-    raise RuntimeError(
-        "Databricks Unity AI Gateway probe failed on this workspace "
-        f"({reason_str}). See {AI_GATEWAY_V2_DOCS_URL}"
+    request = urllib_request.Request(
+        f"https://{hostname}/ai-gateway/anthropic/v1/messages",
+        method="HEAD",
+        headers={"Authorization": f"Bearer {token}"},
     )
-
-
-def _looks_like_auth_failure(reason: str) -> bool:
-    """True when the gateway response signals the token is not accepted.
-
-    Covers 401/403 directly and the gateway's 400 + `Invalid Token` body
-    (which happens when the bearer is valid but issued for a different
-    workspace)."""
-    if "HTTP 401" in reason or "HTTP 403" in reason:
-        return True
-    if "HTTP 400" in reason and "invalid token" in reason.lower():
-        return True
-    return False
+    try:
+        urllib_request.urlopen(request, timeout=10)
+        return
+    except urllib_error.HTTPError as exc:
+        if exc.code != 404:
+            return
+    except urllib_error.URLError:
+        pass
+    raise RuntimeError(
+        "Databricks AI Gateway V2 is required but not available on this workspace. "
+        f"See {AI_GATEWAY_V2_DOCS_URL}"
+    )
 
 
 def discover_sql_warehouse_http_path(
@@ -1055,6 +640,8 @@ def build_tool_base_url(tool: str, workspace: str) -> str:
         return f"{workspace}/ai-gateway/anthropic"
     if tool == "gemini":
         return f"{workspace}/ai-gateway/gemini"
+    if tool == "cursor":
+        return f"{workspace}/ai-gateway/cursor/v1"
     if tool == "opencode":
         raise RuntimeError(
             "OpenCode has multiple base URLs — use build_opencode_base_urls() instead."
@@ -1107,6 +694,7 @@ def build_shared_base_urls(workspace: str) -> dict[str, str | dict[str, str]]:
         "codex": build_tool_base_url("codex", workspace),
         "claude": build_tool_base_url("claude", workspace),
         "gemini": build_tool_base_url("gemini", workspace),
+        "cursor": build_tool_base_url("cursor", workspace),
         "opencode": build_opencode_base_urls(workspace),
         "copilot": build_copilot_base_url(workspace),
         "pi": build_pi_base_urls(workspace),

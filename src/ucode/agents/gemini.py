@@ -84,9 +84,7 @@ def write_tool_config(
 ) -> tuple[dict, str]:
     backup_existing_file(GEMINI_ENV_PATH, GEMINI_BACKUP_PATH)
     if token is None:
-        token = get_databricks_token(
-            state["workspace"], state.get("profile"), force_refresh=force_refresh
-        )
+        token = get_databricks_token(state["workspace"], force_refresh=force_refresh)
     overlay = render_env_overlay(state["workspace"], model, token)
     existing = parse_dotenv(GEMINI_ENV_PATH)
     existing.update(overlay)
@@ -161,5 +159,5 @@ def validate_env(state: dict) -> dict[str, str]:
     model = default_model(state)
     if not model:
         raise RuntimeError("No Gemini model is configured.")
-    token = get_databricks_token(workspace, state.get("profile"))
+    token = get_databricks_token(workspace)
     return build_runtime_env(workspace, model, token)

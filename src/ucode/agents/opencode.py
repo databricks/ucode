@@ -102,7 +102,7 @@ def render_overlay(
                 "apiKey": token,
                 "headers": auth_headers,
             },
-            "models": dict.fromkeys(anthropic_models, anthropic_model_overlay),
+            "models": {m: anthropic_model_overlay for m in anthropic_models},
         }
         keys.append(["provider", "databricks-anthropic"])
     if gemini_models:
@@ -132,9 +132,7 @@ def write_tool_config(
 ) -> tuple[dict, str]:
     backup_existing_file(OPENCODE_CONFIG_PATH, OPENCODE_BACKUP_PATH)
     if token is None:
-        token = get_databricks_token(
-            state["workspace"], state.get("profile"), force_refresh=force_refresh
-        )
+        token = get_databricks_token(state["workspace"], force_refresh=force_refresh)
     opencode_base_urls = state.get("base_urls", {}).get("opencode") or build_opencode_base_urls(
         state["workspace"]
     )
@@ -257,4 +255,4 @@ def validate_env(state: dict) -> dict[str, str]:
     workspace = state.get("workspace")
     if not workspace:
         raise RuntimeError("No workspace configured.")
-    return build_runtime_env(get_databricks_token(workspace, state.get("profile")))
+    return build_runtime_env(get_databricks_token(workspace))

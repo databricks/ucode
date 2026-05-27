@@ -89,14 +89,13 @@ def _call_responses_api(query: str) -> dict[str, Any]:
     suitable for surfacing as a tool error."""
     workspace = os.environ.get("DATABRICKS_HOST", "").strip()
     model = os.environ.get("UCODE_WEB_SEARCH_MODEL", "").strip()
-    profile = os.environ.get("DATABRICKS_CONFIG_PROFILE", "").strip() or None
     if not workspace:
         raise RuntimeError("DATABRICKS_HOST env var is not set.")
     if not model:
         raise RuntimeError("UCODE_WEB_SEARCH_MODEL env var is not set.")
 
     try:
-        token = get_databricks_token(workspace, profile)
+        token = get_databricks_token(workspace)
     except RuntimeError as exc:
         raise RuntimeError(f"Failed to acquire Databricks token: {exc}") from exc
 
@@ -120,7 +119,7 @@ def _call_responses_api(query: str) -> dict[str, Any]:
         },
     )
     try:
-        with urllib_request.urlopen(request, timeout=180) as response:
+        with urllib_request.urlopen(request, timeout=60) as response:
             raw = response.read().decode("utf-8")
     except urllib_error.HTTPError as exc:
         detail = ""

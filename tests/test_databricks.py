@@ -11,10 +11,7 @@ import pytest
 import ucode.databricks as db_mod
 from ucode.databricks import (
     AI_GATEWAY_V2_DOCS_URL,
-    _format_subprocess_result,
     _parse_databricks_cli_version,
-    _scrub_databrickscfg,
-    _scrub_json,
     build_auth_shell_command,
     build_databricks_cli_env,
     build_opencode_base_urls,
@@ -65,6 +62,10 @@ class TestBuildToolBaseUrl:
         url = build_tool_base_url("gemini", WS)
         assert url == f"{WS}/ai-gateway/gemini"
 
+    def test_cursor(self):
+        url = build_tool_base_url("cursor", WS)
+        assert url == f"{WS}/ai-gateway/cursor/v1"
+
     def test_opencode_raises(self):
         with pytest.raises(RuntimeError, match="multiple base URLs"):
             build_tool_base_url("opencode", WS)
@@ -87,6 +88,7 @@ class TestBuildSharedBaseUrls:
         assert "codex" in urls
         assert "claude" in urls
         assert "gemini" in urls
+        assert "cursor" in urls
         assert "opencode" in urls
 
     def test_opencode_is_dict(self):
@@ -108,8 +110,6 @@ class TestBuildAuthShellCommand:
         assert "jq" in cmd
         assert ".access_token" in cmd
         assert "--force-refresh" in cmd
-        assert "DATABRICKS_BEARER" in cmd
-        assert "DATABRICKS_CONFIG_PROFILE" in cmd
 
     def test_returns_token_when_auth_succeeds(self, tmp_path):
         # Fake databricks binary that always returns a valid token JSON.
@@ -123,140 +123,9 @@ class TestBuildAuthShellCommand:
             ["sh", "-c", cmd],
             capture_output=True,
             text=True,
-            env={
-                **os.environ,
-                "PATH": f"{tmp_path}:{os.environ['PATH']}",
-                "DATABRICKS_BEARER": "",
-            },
+            env={**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}"},
         )
         assert result.stdout.strip() == "good-token"
-
-    def test_prefers_databricks_bearer(self, tmp_path):
-        fake = tmp_path / "databricks"
-        fake.write_text("#!/bin/sh\nexit 1\n")
-        fake.chmod(0o755)
-        cmd = build_auth_shell_command(WS)
-        result = subprocess.run(
-            ["sh", "-c", cmd],
-            capture_output=True,
-            text=True,
-            env={
-                **os.environ,
-                "PATH": f"{tmp_path}:{os.environ['PATH']}",
-                "DATABRICKS_BEARER": "bearer-token",
-            },
-        )
-        assert result.stdout.strip() == "bearer-token"
-
-    def test_embeds_profile_when_provided(self):
-        cmd = build_auth_shell_command(WS, profile="stablebox")
-        assert "--profile stablebox" in cmd
-        # We do not strip DATABRICKS_CONFIG_PROFILE when we are explicit about
-        # which profile to use — the --profile flag wins.
-        assert "env -u DATABRICKS_CONFIG_PROFILE" not in cmd
-
-    def test_quotes_profile_shell_metacharacters(self):
-        cmd = build_auth_shell_command(WS, profile="weird name; rm -rf /")
-        # shlex.quote should wrap the value so the rest of the command cannot
-        # be interpreted as a shell injection.
-        assert "rm -rf /" in cmd
-        assert "'weird name; rm -rf /'" in cmd
-
-
-class TestFormatSubprocessResult:
-    def test_suppresses_stdout_on_success(self):
-        result = subprocess.CompletedProcess(
-            args=["databricks", "auth", "token"],
-            returncode=0,
-            stdout='{"access_token": "dapi-secret-do-not-leak", "token_type": "Bearer"}',
-            stderr="",
-        )
-        formatted = _format_subprocess_result(result)
-        assert "dapi-secret-do-not-leak" not in formatted
-        assert "rc=0" in formatted
-
-    def test_includes_stdout_on_failure(self):
-        result = subprocess.CompletedProcess(
-            args=["databricks", "auth", "token"],
-            returncode=1,
-            stdout="useful diagnostic output",
-            stderr="error: no matching profile",
-        )
-        formatted = _format_subprocess_result(result)
-        assert "rc=1" in formatted
-        assert "useful diagnostic output" in formatted
-        assert "no matching profile" in formatted
-
-
-class TestScrubDatabrickscfg:
-    def test_redacts_token_value(self):
-        text = "[DEFAULT]\nhost = https://example.databricks.com\ntoken = dapi-secret\n"
-        scrubbed = _scrub_databrickscfg(text)
-        assert "dapi-secret" not in scrubbed
-        assert "token = <redacted>" in scrubbed
-        assert "host = https://example.databricks.com" in scrubbed
-
-    def test_redacts_various_secret_keys(self):
-        text = (
-            "[p]\n"
-            "client_secret = secret-val-1\n"
-            "bearer_token = secret-val-2\n"
-            "api_key = secret-val-3\n"
-            "password = secret-val-4\n"
-            "auth_type = oauth-u2m\n"
-        )
-        scrubbed = _scrub_databrickscfg(text)
-        for secret in ("secret-val-1", "secret-val-2", "secret-val-3", "secret-val-4"):
-            assert secret not in scrubbed
-        assert "auth_type = oauth-u2m" in scrubbed
-
-    def test_preserves_comments_and_sections(self):
-        text = "# comment\n[DEFAULT]\nhost = https://x\n; another comment with token = leak\n"
-        scrubbed = _scrub_databrickscfg(text)
-        assert "# comment" in scrubbed
-        assert "[DEFAULT]" in scrubbed
-        assert "; another comment with token = leak" in scrubbed
-
-    def test_key_matching_is_case_insensitive(self):
-        text = "[p]\nTOKEN = upper\nAccess_Token = mixed\n"
-        scrubbed = _scrub_databrickscfg(text)
-        assert "upper" not in scrubbed
-        assert "mixed" not in scrubbed
-
-
-class TestScrubJson:
-    def test_redacts_secret_keys(self):
-        payload = {
-            "access_token": "dapi-secret",
-            "host": "https://example.databricks.com",
-        }
-        scrubbed = _scrub_json(payload)
-        assert isinstance(scrubbed, dict)
-        assert scrubbed["access_token"] == "<redacted>"
-        assert scrubbed["host"] == "https://example.databricks.com"
-
-    def test_recurses_into_nested_structures(self):
-        payload = {
-            "profiles": [
-                {"name": "DEFAULT", "client_secret": "abc"},
-                {"name": "other", "password": "pw"},
-            ]
-        }
-        scrubbed = _scrub_json(payload)
-        assert scrubbed == {
-            "profiles": [
-                {"name": "DEFAULT", "client_secret": "<redacted>"},
-                {"name": "other", "password": "<redacted>"},
-            ]
-        }
-
-    def test_passes_through_scalars_and_non_secret_keys(self):
-        assert _scrub_json("plain") == "plain"
-        assert _scrub_json(42) == 42
-        assert _scrub_json({"host": "x", "auth_type": "pat"}) == {
-            "host": "x",
-            "auth_type": "pat",
-        }
 
 
 class TestGetDatabricksToken:
@@ -303,22 +172,6 @@ class TestGetDatabricksToken:
         monkeypatch.setattr("os.environ", env)
         with pytest.raises(RuntimeError, match="no access token"):
             get_databricks_token(WS)
-
-    def test_passes_profile_flag_when_provided(self, tmp_path, monkeypatch):
-        # Fake CLI that records its argv to a file so we can assert the
-        # --profile flag is forwarded to `databricks auth token`.
-        argv_log = tmp_path / "argv"
-        env = self._fake_databricks(
-            tmp_path,
-            f'printf "%s\\n" "$@" >> {argv_log}\n'
-            'echo \'{"access_token": "good-token", "token_type": "Bearer"}\'',
-        )
-        monkeypatch.setattr("os.environ", env)
-        token = get_databricks_token(WS, profile="stablebox")
-        assert token == "good-token"
-        argv = argv_log.read_text().splitlines()
-        assert "--profile" in argv
-        assert argv[argv.index("--profile") + 1] == "stablebox"
 
     def test_error_suggests_logout_when_matching_profile_exists(self, tmp_path, monkeypatch):
         env = self._fake_databricks(
@@ -484,85 +337,18 @@ class TestListDatabricksApps:
 
 
 class TestEnsureAiGatewayV2:
-    """Test ensure_ai_gateway_v2 without real network calls.
-
-    The probe is `GET /api/ai-gateway/v2/endpoints`: a successful JSON
-    response means v2 is wired up (even if `endpoints` is empty), while
-    404/401/403/network errors all raise a RuntimeError with the docs URL.
-    """
-
-    @staticmethod
-    def _mock_json_response(body: str):
-        from unittest.mock import MagicMock
-
-        mock_resp = MagicMock()
-        mock_resp.__enter__ = lambda s: s
-        mock_resp.__exit__ = MagicMock(return_value=False)
-        mock_resp.read.return_value = body.encode("utf-8")
-        return mock_resp
-
-    @staticmethod
-    def _http_error(code: int, msg: str, body: str = ""):
-        import io
-        from unittest.mock import MagicMock
-        from urllib.error import HTTPError
-
-        fp = io.BytesIO(body.encode("utf-8")) if body else None
-        return HTTPError(url="", code=code, msg=msg, hdrs=MagicMock(), fp=fp)
+    """Test ensure_ai_gateway_v2 without real network calls."""
 
     def test_raises_on_404(self):
-        from unittest.mock import patch
+        from unittest.mock import MagicMock, patch
+        from urllib.error import HTTPError
 
-        exc = self._http_error(404, "Not Found")
+        exc = HTTPError(url="", code=404, msg="Not Found", hdrs=MagicMock(), fp=None)
         with patch("ucode.databricks.urllib_request.urlopen", side_effect=exc):
             from ucode.databricks import ensure_ai_gateway_v2
 
-            with pytest.raises(RuntimeError, match=AI_GATEWAY_V2_DOCS_URL) as excinfo:
+            with pytest.raises(RuntimeError, match=AI_GATEWAY_V2_DOCS_URL):
                 ensure_ai_gateway_v2(WS, "fake-token")
-            assert "not enabled" in str(excinfo.value)
-
-    def test_raises_on_401_with_auth_hint(self):
-        from unittest.mock import patch
-
-        exc = self._http_error(401, "Unauthorized")
-        with patch("ucode.databricks.urllib_request.urlopen", side_effect=exc):
-            from ucode.databricks import ensure_ai_gateway_v2
-
-            with pytest.raises(RuntimeError, match="401") as excinfo:
-                ensure_ai_gateway_v2(WS, "fake-token")
-            message = str(excinfo.value)
-            assert "rejected" in message.lower()
-            assert "databricks auth login" in message
-
-    def test_raises_on_400_invalid_token_with_auth_hint(self):
-        """400 + body `Invalid Token` is the misleading-error case from issue #84."""
-        from unittest.mock import patch
-
-        exc = self._http_error(400, "Bad Request", body="Invalid Token")
-        with patch("ucode.databricks.urllib_request.urlopen", side_effect=exc):
-            from ucode.databricks import ensure_ai_gateway_v2
-
-            with pytest.raises(RuntimeError) as excinfo:
-                ensure_ai_gateway_v2(WS, "fake-token")
-            message = str(excinfo.value)
-            # The bug we are fixing: must NOT collapse to the generic
-            # "v2 not available" message — must call out the auth failure
-            # and point at re-login.
-            assert "Invalid Token" in message
-            assert "rejected" in message.lower()
-            assert "databricks auth login" in message
-
-    def test_400_without_invalid_token_falls_through_to_generic(self):
-        """A 400 that is *not* an auth failure should still surface the body."""
-        from unittest.mock import patch
-
-        exc = self._http_error(400, "Bad Request", body="some other detail")
-        with patch("ucode.databricks.urllib_request.urlopen", side_effect=exc):
-            from ucode.databricks import ensure_ai_gateway_v2
-
-            with pytest.raises(RuntimeError, match=AI_GATEWAY_V2_DOCS_URL) as excinfo:
-                ensure_ai_gateway_v2(WS, "fake-token")
-            assert "some other detail" in str(excinfo.value)
 
     def test_raises_on_url_error(self):
         from unittest.mock import patch
@@ -577,67 +363,27 @@ class TestEnsureAiGatewayV2:
             with pytest.raises(RuntimeError, match=AI_GATEWAY_V2_DOCS_URL):
                 ensure_ai_gateway_v2(WS, "fake-token")
 
-    def test_succeeds_with_endpoints_list(self):
-        from unittest.mock import patch
-
-        with patch(
-            "ucode.databricks.urllib_request.urlopen",
-            return_value=self._mock_json_response('{"endpoints": [{"name": "foo"}]}'),
-        ):
-            from ucode.databricks import ensure_ai_gateway_v2
-
-            ensure_ai_gateway_v2(WS, "fake-token")  # should not raise
-
-    def test_succeeds_with_empty_endpoints_list(self):
-        from unittest.mock import patch
-
-        # A 200 with no endpoints still means v2 is wired up on this workspace —
-        # downstream discovery will surface "no models" with a clearer reason.
-        with patch(
-            "ucode.databricks.urllib_request.urlopen",
-            return_value=self._mock_json_response('{"endpoints": []}'),
-        ):
-            from ucode.databricks import ensure_ai_gateway_v2
-
-            ensure_ai_gateway_v2(WS, "fake-token")  # should not raise
-
-
-class TestHttpGetJsonReason:
-    """The `reason` string returned by `_http_get_json` must include the response body
-    so callers (e.g. ensure_ai_gateway_v2) can route on it. Before issue #84's fix
-    the body was logged only when UCODE_DEBUG=1 and dropped from the bubbled error."""
-
-    @staticmethod
-    def _http_error(code: int, msg: str, body: str = ""):
-        import io
-        from unittest.mock import MagicMock
+    def test_succeeds_on_non_404_http_error(self):
+        from unittest.mock import MagicMock, patch
         from urllib.error import HTTPError
 
-        fp = io.BytesIO(body.encode("utf-8")) if body else None
-        return HTTPError(url="", code=code, msg=msg, hdrs=MagicMock(), fp=fp)
-
-    def test_reason_includes_body_on_http_error(self):
-        from unittest.mock import patch
-
-        from ucode.databricks import _http_get_json
-
-        exc = self._http_error(400, "Bad Request", body="Invalid Token")
+        # 405 Method Not Allowed → still means v2 is there (method mismatch, not missing route)
+        exc = HTTPError(url="", code=405, msg="Method Not Allowed", hdrs=MagicMock(), fp=None)
         with patch("ucode.databricks.urllib_request.urlopen", side_effect=exc):
-            payload, reason = _http_get_json("https://x/y", "tok")
-        assert payload is None
-        assert "HTTP 400" in reason
-        assert "Invalid Token" in reason
+            from ucode.databricks import ensure_ai_gateway_v2
 
-    def test_reason_without_body_is_status_only(self):
-        from unittest.mock import patch
+            ensure_ai_gateway_v2(WS, "fake-token")  # should not raise
 
-        from ucode.databricks import _http_get_json
+    def test_succeeds_when_urlopen_returns(self):
+        from unittest.mock import MagicMock, patch
 
-        exc = self._http_error(404, "Not Found")
-        with patch("ucode.databricks.urllib_request.urlopen", side_effect=exc):
-            payload, reason = _http_get_json("https://x/y", "tok")
-        assert payload is None
-        assert reason == "HTTP 404 Not Found"
+        mock_resp = MagicMock()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        with patch("ucode.databricks.urllib_request.urlopen", return_value=mock_resp):
+            from ucode.databricks import ensure_ai_gateway_v2
+
+            ensure_ai_gateway_v2(WS, "fake-token")  # should not raise
 
 
 class TestParseDatabricksCliVersion:

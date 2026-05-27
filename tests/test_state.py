@@ -10,7 +10,6 @@ import pytest
 import ucode.state as state_mod
 from ucode.state import (
     STATE_VERSION,
-    build_agent_state,
     clear_state,
     hydrate_state,
     load_full_state,
@@ -26,12 +25,6 @@ FAKE_URLS = {
     "gemini": f"{FAKE_WS}/ai-gateway/gemini",
     "opencode": {
         "anthropic": f"{FAKE_WS}/ai-gateway/anthropic/v1",
-        "gemini": f"{FAKE_WS}/ai-gateway/gemini/v1beta",
-    },
-    "copilot": f"{FAKE_WS}/ai-gateway/mlflow/v1",
-    "pi": {
-        "claude": f"{FAKE_WS}/ai-gateway/anthropic",
-        "openai": f"{FAKE_WS}/ai-gateway/codex/v1",
         "gemini": f"{FAKE_WS}/ai-gateway/gemini/v1beta",
     },
 }
@@ -147,7 +140,7 @@ class TestClearState:
 class TestHydrateState:
     def test_empty_input_returns_empty(self):
         result = hydrate_state({})
-        assert result == {"managed_configs": {}, "base_urls": {}, "agents": {}}
+        assert result == {"managed_configs": {}, "base_urls": {}}
 
     def test_non_dict_returns_empty(self):
         assert hydrate_state(None) == {}  # type: ignore[arg-type]
@@ -160,28 +153,6 @@ class TestHydrateState:
     def test_no_base_urls_when_no_workspace(self):
         result = hydrate_state({"claude_models": {}})
         assert result["base_urls"] == {}
-        assert result["agents"] == {}
-
-    def test_populates_agent_state_when_workspace_present(self):
-        result = hydrate_state(
-            {
-                "workspace": FAKE_WS,
-                "claude_models": {"opus": "claude-opus"},
-                "codex_models": ["gpt-5"],
-            }
-        )
-
-        assert result["agents"]["claude"]["model"] == "claude-opus"
-        assert result["agents"]["claude"]["base_url"] == FAKE_URLS["claude"]
-        assert result["agents"]["claude"]["auth_command"].startswith("if [ -n")
-        assert result["agents"]["codex"]["model"] == "gpt-5"
-        assert result["agents"]["codex"]["base_url"] == FAKE_URLS["codex"]
-        assert (
-            result["agents"]["codex"]["auth"]["args"][1]
-            == result["agents"]["codex"]["auth_command"]
-        )
-        assert result["agents"]["pi"]["model"] == "claude-opus"
-        assert result["agents"]["pi"]["base_urls"] == FAKE_URLS["pi"]
 
     def test_normalizes_managed_configs_dict_entry(self):
         state = {"managed_configs": {"claude": {"keys": [["env", "X"]]}}}
@@ -198,12 +169,6 @@ class TestHydrateState:
         result = hydrate_state(state)
         assert "codex" not in result["managed_configs"]
         assert "claude" not in result["managed_configs"]
-
-
-class TestBuildAgentState:
-    def test_returns_empty_without_workspace(self):
-        result = build_agent_state({"base_urls": FAKE_URLS})
-        assert result == {}
 
 
 # ---------------------------------------------------------------------------
