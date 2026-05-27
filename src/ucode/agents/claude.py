@@ -106,6 +106,13 @@ def render_overlay(
         "ANTHROPIC_BASE_URL": base_url,
         "ANTHROPIC_CUSTOM_HEADERS": custom_headers,
         "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1",
+        # Suppress Claude Code's client-side `thinking.type=enabled` field.
+        # The Databricks AI Gateway rejects it for adaptive-only models (Opus 4.7
+        # family) which require `thinking.type=adaptive` + `output_config.effort`.
+        # Claude Code's model detection doesn't recognize the `databricks-` prefix
+        # on gateway model ids, so it sends the legacy shape and the request 400s.
+        # The gateway still applies adaptive reasoning server-side where required.
+        "CLAUDE_CODE_DISABLE_THINKING": "1",
         "CLAUDE_CODE_API_KEY_HELPER_TTL_MS": "900000",
     }
     if claude_models:
