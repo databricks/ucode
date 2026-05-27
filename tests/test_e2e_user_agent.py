@@ -20,7 +20,6 @@ import shutil
 import subprocess
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 
 import pytest
 
@@ -30,18 +29,6 @@ from ucode.telemetry import agent_version, ucode_version
 def _require_binary(binary: str):
     if not shutil.which(binary):
         pytest.skip(f"`{binary}` is not installed")
-
-
-def _codex_home_for_e2e(tmp_path: Path) -> Path:
-    """Return an isolated Codex home outside pytest's temporary directory.
-
-    Newer Codex releases refuse to create helper binaries when
-    ``CODEX_HOME`` is under ``/tmp``. Keep the e2e config isolated from
-    the user's real ``~/.codex`` while avoiding Codex's temp-home guard.
-    """
-    codex_home = Path.home() / ".cache" / "ucode-e2e" / tmp_path.name / "codex_home"
-    codex_home.mkdir(parents=True, exist_ok=True)
-    return codex_home
 
 
 class _CapturedRequest:
@@ -223,9 +210,9 @@ class TestCodexUserAgent:
         from ucode.agents import codex
 
         _require_binary("codex")
-        codex_home = _codex_home_for_e2e(tmp_path)
-        config_dir = codex_home
-        config_path = config_dir / "config.toml"
+        config_dir = tmp_path / "codex_home" / ".codex"
+        config_dir.mkdir(parents=True)
+        config_path = config_dir / "ucode.config.toml"
 
         monkeypatch.setattr(config_io_mod, "APP_DIR", tmp_path)
         monkeypatch.setattr(codex, "CODEX_CONFIG_PATH", config_path)
@@ -242,10 +229,7 @@ class TestCodexUserAgent:
             "CODEX_HOME": str(config_dir),
             "OPENAI_API_KEY": "test-key-not-real",
         }
-        try:
-            result = _run_until_first_request(codex.validate_cmd("codex"), env)
-        finally:
-            shutil.rmtree(codex_home, ignore_errors=True)
+        result = _run_until_first_request(codex.validate_cmd("codex"), env)
 
         req = capture_server.first_request_with_path_prefix("/ai-gateway/codex")
         assert req is not None, _no_request_msg(capture_server, result)
