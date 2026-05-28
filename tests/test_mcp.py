@@ -610,6 +610,171 @@ class TestConfigureMcpCommand:
         assert "space to toggle" in output
         assert saved_states == []
 
+    def test_drops_stale_foreign_workspace_mcp_entries(self, monkeypatch, capsys):
+        saved_states: list[dict] = []
+        cleanup_calls: list[tuple[str, str]] = []
+        other_ws = "https://other-workspace.cloud.databricks.com"
+        stale_entry = {
+            "name": "databricks-genie-foreign",
+            "url": f"{other_ws}/api/2.0/mcp/genie/foreign",
+            "auth": "env:OAUTH_TOKEN",
+            "clients": ["claude", "codex"],
+        }
+        kept_entry = {
+            "name": "databricks-sql",
+            "url": f"{WS}/api/2.0/mcp/sql",
+            "auth": "env:OAUTH_TOKEN",
+            "clients": ["claude"],
+        }
+
+        monkeypatch.setattr(
+            mcp,
+            "load_state",
+            lambda: {
+                "workspace": WS,
+                "available_tools": ["claude"],
+                "mcp_servers": [stale_entry, kept_entry],
+            },
+        )
+        monkeypatch.setattr(mcp.shutil, "which", lambda binary: f"/usr/bin/{binary}")
+        monkeypatch.setattr(mcp, "ensure_databricks_auth", lambda workspace, profile=None: None)
+        monkeypatch.setattr(mcp, "available_mcp_clients", lambda: ["claude"])
+        monkeypatch.setattr(
+            mcp, "discover_external_mcp_connection_names", lambda workspace, profile=None: []
+        )
+        monkeypatch.setattr(mcp, "discover_genie_mcp_servers", lambda workspace, profile=None: [])
+        monkeypatch.setattr(mcp, "discover_app_mcp_servers", lambda workspace, profile=None: [])
+        _patch_mcp_choices(monkeypatch, "databricks-sql")
+        monkeypatch.setattr(
+            mcp,
+            "remove_client_mcp_server",
+            lambda client, name: cleanup_calls.append((client, name)) or [],
+        )
+        monkeypatch.setattr(mcp, "save_state", lambda state: saved_states.append(state.copy()))
+
+        assert mcp.configure_mcp_command() == 0
+
+        output = capsys.readouterr().out
+        assert "Dropping 1 stale MCP entry" in output
+        assert "databricks-genie-foreign" in output
+        # codex is listed on the stale entry but not installed -> skipped.
+        assert cleanup_calls == [("claude", "databricks-genie-foreign")]
+        assert saved_states, "expected sanitized state to be persisted"
+        assert saved_states[0]["mcp_servers"] == [kept_entry]
+
+    def test_removes_orphan_mcp_entries_from_other_workspace_buckets(self, monkeypatch, capsys):
+        saved_states: list[dict] = []
+        cleanup_calls: list[tuple[str, str]] = []
+        other_ws = "https://other-workspace.cloud.databricks.com"
+        current_entry = {
+            "name": "databricks-sql",
+            "url": f"{WS}/api/2.0/mcp/sql",
+            "auth": "env:OAUTH_TOKEN",
+            "clients": ["claude"],
+        }
+        orphan_entry = {
+            "name": "orphan-mcp",
+            "url": f"{other_ws}/api/2.0/mcp/external/orphan-mcp",
+            "auth": "env:OAUTH_TOKEN",
+            "clients": ["claude", "codex"],
+        }
+
+        monkeypatch.setattr(
+            mcp,
+            "load_state",
+            lambda: {
+                "workspace": WS,
+                "available_tools": ["claude"],
+                "mcp_servers": [current_entry],
+            },
+        )
+        monkeypatch.setattr(
+            mcp,
+            "load_full_state",
+            lambda: {
+                "current_workspace": WS,
+                "workspaces": {
+                    WS: {"mcp_servers": [current_entry]},
+                    other_ws: {"mcp_servers": [orphan_entry]},
+                },
+            },
+        )
+        monkeypatch.setattr(mcp.shutil, "which", lambda binary: f"/usr/bin/{binary}")
+        monkeypatch.setattr(mcp, "ensure_databricks_auth", lambda workspace, profile=None: None)
+        monkeypatch.setattr(mcp, "available_mcp_clients", lambda: ["claude"])
+        monkeypatch.setattr(
+            mcp, "discover_external_mcp_connection_names", lambda workspace, profile=None: []
+        )
+        monkeypatch.setattr(mcp, "discover_genie_mcp_servers", lambda workspace, profile=None: [])
+        monkeypatch.setattr(mcp, "discover_app_mcp_servers", lambda workspace, profile=None: [])
+        _patch_mcp_choices(monkeypatch, "databricks-sql")
+        monkeypatch.setattr(
+            mcp,
+            "remove_client_mcp_server",
+            lambda client, name: cleanup_calls.append((client, name)) or [mcp.MCP_USER_SCOPE],
+        )
+        monkeypatch.setattr(mcp, "save_state", lambda state: saved_states.append(state.copy()))
+
+        assert mcp.configure_mcp_command() == 0
+
+        output = capsys.readouterr().out
+        assert "left over from previously-configured workspaces" in output
+        assert "orphan-mcp" in output
+        # codex was in orphan-mcp's clients but isn't installed -> skipped.
+        assert cleanup_calls == [("claude", "orphan-mcp")]
+
+    def test_skips_orphan_warning_when_nothing_was_actually_removed(self, monkeypatch, capsys):
+        """Re-running configure mcp on the same workspace shouldn't repeat the warning
+        if the leftover entries were already removed by a previous run."""
+        cleanup_calls: list[tuple[str, str]] = []
+        other_ws = "https://other-workspace.cloud.databricks.com"
+        orphan_entry = {
+            "name": "orphan-mcp",
+            "url": f"{other_ws}/api/2.0/mcp/external/orphan-mcp",
+            "auth": "env:OAUTH_TOKEN",
+            "clients": ["claude"],
+        }
+
+        monkeypatch.setattr(
+            mcp,
+            "load_state",
+            lambda: {"workspace": WS, "available_tools": ["claude"]},
+        )
+        monkeypatch.setattr(
+            mcp,
+            "load_full_state",
+            lambda: {
+                "current_workspace": WS,
+                "workspaces": {
+                    WS: {},
+                    other_ws: {"mcp_servers": [orphan_entry]},
+                },
+            },
+        )
+        monkeypatch.setattr(mcp.shutil, "which", lambda binary: f"/usr/bin/{binary}")
+        monkeypatch.setattr(mcp, "ensure_databricks_auth", lambda workspace, profile=None: None)
+        monkeypatch.setattr(mcp, "available_mcp_clients", lambda: ["claude"])
+        monkeypatch.setattr(
+            mcp, "discover_external_mcp_connection_names", lambda workspace, profile=None: []
+        )
+        monkeypatch.setattr(mcp, "discover_genie_mcp_servers", lambda workspace, profile=None: [])
+        monkeypatch.setattr(mcp, "discover_app_mcp_servers", lambda workspace, profile=None: [])
+        _patch_mcp_choices(monkeypatch)
+        # Stub returns empty list -> "entry wasn't in this agent's config".
+        monkeypatch.setattr(
+            mcp,
+            "remove_client_mcp_server",
+            lambda client, name: cleanup_calls.append((client, name)) or [],
+        )
+        monkeypatch.setattr(mcp, "save_state", lambda state: None)
+
+        assert mcp.configure_mcp_command() == 0
+
+        output = capsys.readouterr().out
+        assert "left over from previously-configured workspaces" not in output
+        # The removal attempt was still made (cheap and safe); we just don't announce it.
+        assert cleanup_calls == [("claude", "orphan-mcp")]
+
     def test_warns_when_app_selection_is_no_longer_discoverable(self, monkeypatch, capsys):
         saved_states: list[dict] = []
         configured: list[tuple[str, str, str, dict]] = []
