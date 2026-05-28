@@ -235,17 +235,9 @@ def prompt_for_workspace(
     while True:
         raw_value = console.input(f"  [bold]Workspace URL[/bold] {muted('›')} ").strip()
         try:
-            url = normalize_workspace_url(raw_value)
+            return normalize_workspace_url(raw_value), None
         except ValueError as exc:
             print_err(str(exc))
-            continue
-        # If the typed URL matches exactly one known profile, attach it so
-        # downstream `--profile` calls resolve unambiguously. Multi-match
-        # cases stay on the existing host-based fallback to avoid silently
-        # picking the wrong profile.
-        matches = [name for host, name in (profiles or []) if host == url]
-        matched_profile = matches[0] if len(matches) == 1 else None
-        return url, matched_profile
 
 
 def prompt_for_tools(available: list[tuple[str, str]]) -> list[str]:
