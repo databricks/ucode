@@ -297,6 +297,10 @@ class TestGeminiUserAgent:
         monkeypatch.setattr(config_io_mod, "APP_DIR", tmp_path)
         monkeypatch.setattr(gemini, "GEMINI_ENV_PATH", tmp_path / "ucode.env")
         monkeypatch.setattr(gemini, "GEMINI_BACKUP_PATH", tmp_path / "gemini-ucode-env.backup")
+        monkeypatch.setattr(gemini, "GEMINI_HOME_DIR", tmp_path / ".gemini-home")
+        monkeypatch.setattr(
+            gemini, "GEMINI_SETTINGS_PATH", tmp_path / ".gemini-home" / ".gemini" / "settings.json"
+        )
         # Run from tmp_path so Gemini sees an untrusted folder (the trust env
         # var built into build_runtime_env handles it).
         monkeypatch.chdir(tmp_path)

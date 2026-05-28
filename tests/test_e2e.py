@@ -442,6 +442,10 @@ class TestGeminiLaunch:
         monkeypatch.setattr(config_io_mod, "APP_DIR", tmp_path)
         monkeypatch.setattr(gemini, "GEMINI_ENV_PATH", tmp_path / "ucode.env")
         monkeypatch.setattr(gemini, "GEMINI_BACKUP_PATH", tmp_path / "gemini-ucode-env.backup")
+        monkeypatch.setattr(gemini, "GEMINI_HOME_DIR", tmp_path / ".gemini-home")
+        monkeypatch.setattr(
+            gemini, "GEMINI_SETTINGS_PATH", tmp_path / ".gemini-home" / ".gemini" / "settings.json"
+        )
         # Run from tmp_path so Gemini sees an untrusted folder — that mirrors
         # what users hit on a fresh checkout and exercises the trust + .env
         # discovery code paths that previously broke validation.
@@ -853,6 +857,10 @@ class TestGeminiAuthRecovery:
         monkeypatch.setattr(config_io_mod, "APP_DIR", tmp_path)
         monkeypatch.setattr(gemini, "GEMINI_ENV_PATH", tmp_path / "ucode.env")
         monkeypatch.setattr(gemini, "GEMINI_BACKUP_PATH", tmp_path / "gemini-ucode-env.backup")
+        monkeypatch.setattr(gemini, "GEMINI_HOME_DIR", tmp_path / ".gemini-home")
+        monkeypatch.setattr(
+            gemini, "GEMINI_SETTINGS_PATH", tmp_path / ".gemini-home" / ".gemini" / "settings.json"
+        )
 
         model = gemini_models[0]
         fake_db_dir = _make_reauth_fake_databricks(tmp_path / "fake_db", e2e_token)
