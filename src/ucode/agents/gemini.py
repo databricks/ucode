@@ -13,8 +13,11 @@ from ucode.config_io import (
     APP_DIR,
     ToolSpec,
     backup_existing_file,
+    deep_merge_dict,
     parse_dotenv,
+    read_json_safe,
     write_dotenv,
+    write_json_file,
 )
 from ucode.databricks import (
     TOKEN_REFRESH_INTERVAL_SECONDS,
@@ -27,6 +30,8 @@ from ucode.telemetry import agent_version, ucode_version
 GEMINI_CONFIG_DIR = Path.home() / ".gemini"
 GEMINI_ENV_PATH = GEMINI_CONFIG_DIR / "ucode.env"
 GEMINI_BACKUP_PATH = APP_DIR / "gemini-ucode-env.backup"
+GEMINI_HOME_DIR = APP_DIR / ".gemini-home"
+GEMINI_SETTINGS_PATH = GEMINI_HOME_DIR / ".gemini" / "settings.json"
 
 SPEC: ToolSpec = {
     "binary": "gemini",
@@ -50,6 +55,15 @@ def is_update_available() -> tuple[str, str] | None:
     return available_npm_package_update(SPEC["package"])
 
 
+def _ensure_local_settings_selected_type() -> None:
+    settings = read_json_safe(GEMINI_SETTINGS_PATH)
+    deep_merge_dict(
+        settings,
+        {"security": {"auth": {"selectedType": "gemini-api-key"}}},
+    )
+    write_json_file(GEMINI_SETTINGS_PATH, settings)
+
+
 def render_env_overlay(workspace: str, model: str, token: str) -> dict[str, str]:
     # Gemini CLI parses GEMINI_CLI_CUSTOM_HEADERS as comma-separated
     # `Key:Value` pairs and spreads them after the SDK's default User-Agent,
@@ -67,11 +81,13 @@ def render_env_overlay(workspace: str, model: str, token: str) -> dict[str, str]
 
 
 def build_runtime_env(workspace: str, model: str, token: str) -> dict[str, str]:
+    _ensure_local_settings_selected_type()
     env = os.environ.copy()
     env.update(render_env_overlay(workspace, model, token))
     # Newer Gemini CLI releases refuse to run in untrusted directories;
     # opt every launch into trust so `ucode gemini` works in any folder.
     env["GEMINI_CLI_TRUST_WORKSPACE"] = "true"
+    env["GEMINI_CLI_HOME"] = str(GEMINI_HOME_DIR)
     return env
 
 
@@ -84,7 +100,9 @@ def write_tool_config(
 ) -> tuple[dict, str]:
     backup_existing_file(GEMINI_ENV_PATH, GEMINI_BACKUP_PATH)
     if token is None:
-        token = get_databricks_token(state["workspace"], force_refresh=force_refresh)
+        token = get_databricks_token(
+            state["workspace"], state.get("profile"), force_refresh=force_refresh
+        )
     overlay = render_env_overlay(state["workspace"], model, token)
     existing = parse_dotenv(GEMINI_ENV_PATH)
     existing.update(overlay)
@@ -159,5 +177,5 @@ def validate_env(state: dict) -> dict[str, str]:
     model = default_model(state)
     if not model:
         raise RuntimeError("No Gemini model is configured.")
-    token = get_databricks_token(workspace)
+    token = get_databricks_token(workspace, state.get("profile"))
     return build_runtime_env(workspace, model, token)

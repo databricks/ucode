@@ -10,9 +10,12 @@ installed or no models are available.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
+from urllib import error as urllib_error
+from urllib import request as urllib_request
 
 import pytest
 
@@ -55,6 +58,43 @@ def _run_agent(
         env=env,
         stdin=subprocess.DEVNULL,
     )
+
+
+def _run_gemini_gateway_smoke(workspace: str, model: str, token: str) -> str:
+    """Call the Gemini gateway directly with a text-only prompt.
+
+    This keeps auth recovery coverage focused on the recovered Databricks token
+    instead of Gemini CLI's separate tool-calling request shape.
+    """
+    url = f"{build_tool_base_url('gemini', workspace)}/v1beta/models/{model}:generateContent"
+    payload = {
+        "contents": [
+            {"role": "user", "parts": [{"text": "say hi in 5 words or less"}]},
+        ],
+    }
+    req = urllib_request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib_request.urlopen(req, timeout=30) as response:
+            body = response.read().decode("utf-8")
+    except urllib_error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace") if exc.fp else ""
+        raise AssertionError(f"Gemini gateway smoke failed: HTTP {exc.code}: {body[:500]}") from exc
+
+    data = json.loads(body)
+    return data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+
+
+def _launchable_model_items(models: dict) -> list[tuple[str, str]]:
+    return [(family, model_id) for family, model_id in models.items() if model_id]
 
 
 # ---------------------------------------------------------------------------
@@ -182,7 +222,7 @@ class TestConfigureSubset:
 
         codex_dir = tmp_path / "codex_home" / ".codex"
         codex_dir.mkdir(parents=True, exist_ok=True)
-        monkeypatch.setattr(codex, "CODEX_CONFIG_PATH", codex_dir / "config.toml")
+        monkeypatch.setattr(codex, "CODEX_CONFIG_PATH", codex_dir / "ucode.config.toml")
         monkeypatch.setattr(codex, "CODEX_BACKUP_PATH", tmp_path / "codex.backup.toml")
 
         monkeypatch.setattr(claude, "CLAUDE_SETTINGS_PATH", tmp_path / "claude-settings.json")
@@ -200,7 +240,7 @@ class TestConfigureSubset:
         monkeypatch.setattr(pi, "PI_CONFIG_PATH", tmp_path / "pi-models.json")
         monkeypatch.setattr(pi, "PI_BACKUP_PATH", tmp_path / "pi-models.backup.json")
 
-        return codex_dir / "config.toml"
+        return codex_dir / "ucode.config.toml"
 
     def test_only_picks_codex_writes_only_codex_config(self, tmp_path, monkeypatch, e2e_workspace):
         """User selects only codex → only codex's config file is written and
@@ -213,9 +253,11 @@ class TestConfigureSubset:
         monkeypatch.setattr(state_mod, "STATE_PATH", tmp_path / "state.json")
         # Don't actually run `databricks auth login`; the developer running
         # this suite is already authenticated.
-        monkeypatch.setattr("ucode.databricks.run_databricks_login", lambda ws: None)
+        monkeypatch.setattr("ucode.cli.run_databricks_login", lambda ws, profile=None: None)
         # Skip the workspace prompt and the multi-select picker.
-        monkeypatch.setattr(cli_mod, "_prompt_for_configuration", lambda tool=None: e2e_workspace)
+        monkeypatch.setattr(
+            cli_mod, "_prompt_for_configuration", lambda tool=None: (e2e_workspace, None)
+        )
         monkeypatch.setattr(cli_mod, "prompt_for_tools", lambda available: ["codex"])
         # Skip binary install + post-config validation; we're testing the
         # selection plumbing, not the agent binaries themselves.
@@ -248,8 +290,10 @@ class TestConfigureSubset:
 
         self._redirect_config_paths(monkeypatch, tmp_path)
         monkeypatch.setattr(state_mod, "STATE_PATH", tmp_path / "state.json")
-        monkeypatch.setattr("ucode.databricks.run_databricks_login", lambda ws: None)
-        monkeypatch.setattr(cli_mod, "_prompt_for_configuration", lambda tool=None: e2e_workspace)
+        monkeypatch.setattr("ucode.cli.run_databricks_login", lambda ws, profile=None: None)
+        monkeypatch.setattr(
+            cli_mod, "_prompt_for_configuration", lambda tool=None: (e2e_workspace, None)
+        )
         monkeypatch.setattr(
             cli_mod, "install_tool_binary", lambda tool, strict=False, update_existing=False: True
         )
@@ -281,8 +325,10 @@ class TestConfigureSubset:
 
         codex_path = self._redirect_config_paths(monkeypatch, tmp_path)
         monkeypatch.setattr(state_mod, "STATE_PATH", tmp_path / "state.json")
-        monkeypatch.setattr("ucode.databricks.run_databricks_login", lambda ws: None)
-        monkeypatch.setattr(cli_mod, "_prompt_for_configuration", lambda tool=None: e2e_workspace)
+        monkeypatch.setattr("ucode.cli.run_databricks_login", lambda ws, profile=None: None)
+        monkeypatch.setattr(
+            cli_mod, "_prompt_for_configuration", lambda tool=None: (e2e_workspace, None)
+        )
         monkeypatch.setattr(cli_mod, "prompt_for_tools", lambda available: [])
         install_calls: list[str] = []
         monkeypatch.setattr(
@@ -336,7 +382,7 @@ class TestCodexLaunch:
         monkeypatch.setattr(config_io_mod, "APP_DIR", tmp_path)
         config_dir = tmp_path / "codex_home" / ".codex"
         config_dir.mkdir(parents=True)
-        config_path = config_dir / "config.toml"
+        config_path = config_dir / "ucode.config.toml"
         backup_path = tmp_path / "codex-config.backup.toml"
         monkeypatch.setattr(codex, "CODEX_CONFIG_PATH", config_path)
         monkeypatch.setattr(codex, "CODEX_BACKUP_PATH", backup_path)
@@ -382,6 +428,9 @@ class TestClaudeLaunch:
         claude_models: dict = e2e_state.get("claude_models") or {}
         if not claude_models:
             pytest.skip("No Claude models available on this workspace")
+        launchable_models = _launchable_model_items(claude_models)
+        if not launchable_models:
+            pytest.skip("No launchable Claude models available on this workspace")
 
         # Use an isolated config dir so the claude subprocess never reads or
         # writes ~/.claude/settings.json during this test.
@@ -394,7 +443,7 @@ class TestClaudeLaunch:
         base_url = build_tool_base_url("claude", e2e_workspace)
 
         failures = []
-        for family, model_id in claude_models.items():
+        for family, model_id in launchable_models:
             with pytest.MonkeyPatch().context() as mp:
                 mp.setattr("ucode.state.save_state", lambda s: None)
                 claude.write_tool_config({**e2e_state, "workspace": e2e_workspace}, model_id)
@@ -436,6 +485,10 @@ class TestGeminiLaunch:
         monkeypatch.setattr(config_io_mod, "APP_DIR", tmp_path)
         monkeypatch.setattr(gemini, "GEMINI_ENV_PATH", tmp_path / "ucode.env")
         monkeypatch.setattr(gemini, "GEMINI_BACKUP_PATH", tmp_path / "gemini-ucode-env.backup")
+        monkeypatch.setattr(gemini, "GEMINI_HOME_DIR", tmp_path / ".gemini-home")
+        monkeypatch.setattr(
+            gemini, "GEMINI_SETTINGS_PATH", tmp_path / ".gemini-home" / ".gemini" / "settings.json"
+        )
         # Run from tmp_path so Gemini sees an untrusted folder — that mirrors
         # what users hit on a fresh checkout and exercises the trust + .env
         # discovery code paths that previously broke validation.
@@ -447,7 +500,7 @@ class TestGeminiLaunch:
                 mp.setattr("ucode.state.save_state", lambda s: None)
                 mp.setattr(
                     "ucode.agents.gemini.get_databricks_token",
-                    lambda ws, **kwargs: e2e_token,
+                    lambda ws, profile=None, **kwargs: e2e_token,
                 )
                 state = {**e2e_state, "workspace": e2e_workspace}
                 gemini.write_tool_config(state, model, token=e2e_token)
@@ -530,7 +583,7 @@ class TestOpencodeLaunch:
                 mp.setattr("ucode.state.save_state", lambda s: None)
                 mp.setattr(
                     "ucode.agents.opencode.get_databricks_token",
-                    lambda ws, **kwargs: e2e_token,
+                    lambda ws, profile=None, **kwargs: e2e_token,
                 )
                 opencode.write_tool_config(
                     {**e2e_state, "workspace": e2e_workspace},
@@ -573,9 +626,8 @@ class TestCopilotLaunch:
         """Return [(family, model_id), ...] for every model copilot can talk to."""
         out: list[tuple[str, str]] = []
         claude_models: dict = e2e_state.get("claude_models") or {}
-        for family, model_id in claude_models.items():
-            if model_id:
-                out.append((f"claude-{family}", model_id))
+        for family, model_id in _launchable_model_items(claude_models):
+            out.append((f"claude-{family}", model_id))
         for model in e2e_state.get("codex_models") or []:
             if any(frag in model for frag in self.COPILOT_INCOMPATIBLE_MODEL_FRAGMENTS):
                 continue
@@ -605,7 +657,7 @@ class TestCopilotLaunch:
                 mp.setattr("ucode.state.save_state", lambda s: None)
                 mp.setattr(
                     "ucode.agents.copilot.get_databricks_token",
-                    lambda ws: e2e_token,
+                    lambda ws, profile=None, **kwargs: e2e_token,
                 )
                 copilot.write_tool_config(
                     {**e2e_state, "workspace": e2e_workspace}, model, token=e2e_token
@@ -634,9 +686,8 @@ class TestPiLaunch:
     def _all_models(self, e2e_state: dict) -> list[tuple[str, str]]:
         out: list[tuple[str, str]] = []
         claude_models: dict = e2e_state.get("claude_models") or {}
-        for family, model_id in claude_models.items():
-            if model_id:
-                out.append((f"claude-{family}", model_id))
+        for family, model_id in _launchable_model_items(claude_models):
+            out.append((f"claude-{family}", model_id))
         for model in e2e_state.get("codex_models") or []:
             out.append(("codex", model))
         for model in e2e_state.get("gemini_models") or []:
@@ -672,7 +723,7 @@ class TestPiLaunch:
                 mp.setattr("ucode.state.save_state", lambda s: None)
                 mp.setattr(
                     "ucode.agents.pi.get_databricks_token",
-                    lambda ws, **kwargs: e2e_token,
+                    lambda ws, profile=None, **kwargs: e2e_token,
                 )
                 pi.write_tool_config(
                     {**e2e_state, "workspace": e2e_workspace},
@@ -847,6 +898,10 @@ class TestGeminiAuthRecovery:
         monkeypatch.setattr(config_io_mod, "APP_DIR", tmp_path)
         monkeypatch.setattr(gemini, "GEMINI_ENV_PATH", tmp_path / "ucode.env")
         monkeypatch.setattr(gemini, "GEMINI_BACKUP_PATH", tmp_path / "gemini-ucode-env.backup")
+        monkeypatch.setattr(gemini, "GEMINI_HOME_DIR", tmp_path / ".gemini-home")
+        monkeypatch.setattr(
+            gemini, "GEMINI_SETTINGS_PATH", tmp_path / ".gemini-home" / ".gemini" / "settings.json"
+        )
 
         model = gemini_models[0]
         fake_db_dir = _make_reauth_fake_databricks(tmp_path / "fake_db", e2e_token)
@@ -864,11 +919,4 @@ class TestGeminiAuthRecovery:
             "get_databricks_token may not be retrying after auth login."
         )
 
-        env = gemini.build_runtime_env(e2e_workspace, model, recovered_token)
-        cmd = gemini.validate_cmd("gemini")
-        result = _run_agent(cmd, env=env, timeout=90)
-        combined = (result.stdout + result.stderr).strip()
-        assert result.returncode == 0 and combined, (
-            f"Gemini failed after auth recovery: rc={result.returncode} "
-            f"stdout={result.stdout[:300]!r} stderr={result.stderr[:300]!r}"
-        )
+        assert _run_gemini_gateway_smoke(e2e_workspace, model, recovered_token).strip()

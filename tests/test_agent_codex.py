@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 
 from ucode.agents import codex
+from ucode.config_io import read_toml_safe
 
 WS = "https://example.databricks.com"
 
@@ -21,18 +22,18 @@ class TestCodexSpec:
 
 
 class TestRenderOverlay:
-    def test_creates_ucode_profile_without_setting_global_default(self):
+    def test_uses_profile_file_shape_without_legacy_profiles(self):
         overlay = codex.render_overlay(WS)
         assert "profile" not in overlay
-        assert "ucode" in overlay["profiles"]
+        assert "profiles" not in overlay
 
     def test_sets_model_provider(self):
         overlay = codex.render_overlay(WS)
-        assert overlay["profiles"]["ucode"]["model_provider"] == "ucode-databricks"
+        assert overlay["model_provider"] == "ucode-databricks"
 
     def test_sets_model_when_provided(self):
         overlay = codex.render_overlay(WS, "databricks-gpt-5")
-        assert overlay["profiles"]["ucode"]["model"] == "databricks-gpt-5"
+        assert overlay["model"] == "databricks-gpt-5"
 
     def test_provider_base_url(self):
         overlay = codex.render_overlay(WS)
@@ -72,6 +73,117 @@ class TestRenderOverlayUserAgent:
     def test_managed_keys_include_http_headers(self):
         # Revert must clean up the new key.
         assert ["model_providers", "ucode-databricks", "http_headers"] in codex.MANAGED_KEYS
+
+
+class TestCodexWriteConfig:
+    def test_writes_ucode_profile_config_file(self, tmp_path, monkeypatch):
+        config_path = tmp_path / ".codex" / "ucode.config.toml"
+        backup_path = tmp_path / "codex-ucode-config.backup.toml"
+        monkeypatch.setattr(codex, "CODEX_CONFIG_PATH", config_path)
+        monkeypatch.setattr(codex, "CODEX_BACKUP_PATH", backup_path)
+        monkeypatch.setattr(codex, "agent_version", lambda binary: "0.134.0")
+        monkeypatch.setattr(codex, "save_state", lambda state: None)
+
+        codex.write_tool_config({"workspace": WS, "codex_models": ["gpt-5"]})
+
+        doc = read_toml_safe(config_path)
+        assert doc["model_provider"] == "ucode-databricks"
+        assert doc["model"] == "gpt-5"
+        assert "profiles" not in doc
+
+    def test_removes_legacy_ucode_profile_from_shared_config(self, tmp_path, monkeypatch):
+        config_dir = tmp_path / ".codex"
+        config_dir.mkdir()
+        profile_path = config_dir / "ucode.config.toml"
+        legacy_path = config_dir / "config.toml"
+        legacy_path.write_text(
+            'profile = "ucode"\n\n'
+            "[profiles.ucode]\n"
+            'model_provider = "old"\n\n'
+            "[profiles.other]\n"
+            'model_provider = "keep"\n',
+            encoding="utf-8",
+        )
+        backup_path = tmp_path / "codex-ucode-config.backup.toml"
+        legacy_backup_path = tmp_path / "codex-legacy-config.backup.toml"
+        monkeypatch.setattr(codex, "CODEX_CONFIG_PATH", profile_path)
+        monkeypatch.setattr(codex, "CODEX_BACKUP_PATH", backup_path)
+        monkeypatch.setattr(codex, "agent_version", lambda binary: "0.134.0")
+        monkeypatch.setattr(codex, "save_state", lambda state: None)
+
+        codex.write_tool_config({"workspace": WS, "codex_models": ["gpt-5"]})
+
+        doc = read_toml_safe(legacy_path)
+        assert "profile" not in doc
+        assert "ucode" not in doc["profiles"]
+        assert doc["profiles"]["other"]["model_provider"] == "keep"
+        assert legacy_backup_path.exists()
+
+    def test_writes_legacy_shared_config_when_codex_too_old(self, tmp_path, monkeypatch):
+        config_dir = tmp_path / ".codex"
+        legacy_path = config_dir / "config.toml"
+        profile_path = config_dir / "ucode.config.toml"
+        backup_path = tmp_path / "codex-ucode-config.backup.toml"
+        legacy_backup_path = tmp_path / "codex-config.backup.toml"
+        monkeypatch.setattr(codex, "CODEX_CONFIG_PATH", profile_path)
+        monkeypatch.setattr(codex, "CODEX_BACKUP_PATH", backup_path)
+        monkeypatch.setattr(codex, "LEGACY_CODEX_CONFIG_PATH", legacy_path)
+        monkeypatch.setattr(codex, "LEGACY_CODEX_BACKUP_PATH", legacy_backup_path)
+        monkeypatch.setattr(codex, "agent_version", lambda binary: "0.133.0")
+        monkeypatch.setattr(codex, "save_state", lambda state: None)
+
+        codex.write_tool_config({"workspace": WS, "codex_models": ["gpt-5"]})
+
+        # Per-profile file must not be written for old Codex.
+        assert not profile_path.exists()
+        doc = read_toml_safe(legacy_path)
+        assert doc["profile"] == "ucode"
+        assert doc["profiles"]["ucode"]["model_provider"] == "ucode-databricks"
+        assert doc["profiles"]["ucode"]["model"] == "gpt-5"
+        provider = doc["model_providers"]["ucode-databricks"]
+        assert provider["base_url"] == f"{WS}/ai-gateway/codex/v1"
+        assert provider["wire_api"] == "responses"
+
+    def test_legacy_write_preserves_other_profiles_in_shared_config(self, tmp_path, monkeypatch):
+        config_dir = tmp_path / ".codex"
+        config_dir.mkdir()
+        legacy_path = config_dir / "config.toml"
+        legacy_path.write_text(
+            '[profiles.other]\nmodel_provider = "keep"\n',
+            encoding="utf-8",
+        )
+        profile_path = config_dir / "ucode.config.toml"
+        backup_path = tmp_path / "codex-ucode-config.backup.toml"
+        legacy_backup_path = tmp_path / "codex-config.backup.toml"
+        monkeypatch.setattr(codex, "CODEX_CONFIG_PATH", profile_path)
+        monkeypatch.setattr(codex, "CODEX_BACKUP_PATH", backup_path)
+        monkeypatch.setattr(codex, "LEGACY_CODEX_CONFIG_PATH", legacy_path)
+        monkeypatch.setattr(codex, "LEGACY_CODEX_BACKUP_PATH", legacy_backup_path)
+        monkeypatch.setattr(codex, "agent_version", lambda binary: "0.133.0")
+        monkeypatch.setattr(codex, "save_state", lambda state: None)
+
+        codex.write_tool_config({"workspace": WS, "codex_models": ["gpt-5"]})
+
+        doc = read_toml_safe(legacy_path)
+        assert doc["profiles"]["other"]["model_provider"] == "keep"
+        assert doc["profiles"]["ucode"]["model_provider"] == "ucode-databricks"
+
+
+class TestCodexLegacyLayoutDetection:
+    def test_new_codex_uses_modern_layout(self, monkeypatch):
+        monkeypatch.setattr(codex, "agent_version", lambda binary: "0.134.0")
+
+        assert codex._use_legacy_layout() is False
+
+    def test_old_codex_uses_legacy_layout(self, monkeypatch):
+        monkeypatch.setattr(codex, "agent_version", lambda binary: "0.133.0")
+
+        assert codex._use_legacy_layout() is True
+
+    def test_unknown_version_uses_modern_layout(self, monkeypatch):
+        monkeypatch.setattr(codex, "agent_version", lambda binary: "unknown")
+
+        assert codex._use_legacy_layout() is False
 
 
 class TestCodexDefaultModel:
@@ -115,7 +227,9 @@ class TestCodexLaunch:
             raise RuntimeError("stop")
 
         monkeypatch.delenv("OAUTH_TOKEN", raising=False)
-        monkeypatch.setattr(codex, "get_databricks_token", lambda workspace: "fresh-token")
+        monkeypatch.setattr(
+            codex, "get_databricks_token", lambda workspace, profile=None: "fresh-token"
+        )
         monkeypatch.setattr(os, "execvp", fake_execvp)
 
         try:

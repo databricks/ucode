@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from unittest.mock import patch
 
 import pytest
 
@@ -10,6 +11,7 @@ from ucode.ui import (
     format_duration,
     format_token_count,
     normalize_workspace_url,
+    prompt_for_workspace,
     render_box_table,
     status_badge,
 )
@@ -144,3 +146,49 @@ class TestRenderBoxTable:
     def test_dash_for_empty_cell(self):
         result = render_box_table(["A"], [[""]])
         assert "-" in result
+
+
+class TestPromptForWorkspace:
+    """Cover the three things `questionary.select(...).ask()` can return:
+    a (host, profile) tuple, None (cancel or "Enter a different URL"),
+    or — in some questionary versions — the choice's title string."""
+
+    PROFILES = [("https://a.databricks.com", "prof-a"), ("https://b.databricks.com", "prof-b")]
+
+    def test_returns_selected_profile_tuple(self):
+        with patch("ucode.ui.questionary.select") as mock_select:
+            mock_select.return_value.ask.return_value = (
+                "https://a.databricks.com",
+                "prof-a",
+            )
+            url, profile = prompt_for_workspace("desc", profiles=self.PROFILES)
+        assert url == "https://a.databricks.com"
+        assert profile == "prof-a"
+
+    def test_none_falls_through_to_manual_prompt(self):
+        with (
+            patch("ucode.ui.questionary.select") as mock_select,
+            patch("ucode.ui.console.input", return_value="https://manual.databricks.com"),
+        ):
+            mock_select.return_value.ask.return_value = None
+            url, profile = prompt_for_workspace("desc", profiles=self.PROFILES)
+        assert url == "https://manual.databricks.com"
+        assert profile is None
+
+    def test_string_value_falls_through_to_manual_prompt(self):
+        # Regression: if questionary returns the choice title (e.g. "Enter a
+        # different URL") instead of its value, we must not try to unpack it.
+        with (
+            patch("ucode.ui.questionary.select") as mock_select,
+            patch("ucode.ui.console.input", return_value="https://manual.databricks.com"),
+        ):
+            mock_select.return_value.ask.return_value = "Enter a different URL"
+            url, profile = prompt_for_workspace("desc", profiles=self.PROFILES)
+        assert url == "https://manual.databricks.com"
+        assert profile is None
+
+    def test_no_profiles_goes_straight_to_manual_prompt(self):
+        with patch("ucode.ui.console.input", return_value="example.databricks.com"):
+            url, profile = prompt_for_workspace("desc", profiles=None)
+        assert url == "https://example.databricks.com"
+        assert profile is None
