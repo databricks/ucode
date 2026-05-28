@@ -149,8 +149,7 @@ class TestCodexWriteConfig:
         config_dir.mkdir()
         legacy_path = config_dir / "config.toml"
         legacy_path.write_text(
-            "[profiles.other]\n"
-            'model_provider = "keep"\n',
+            '[profiles.other]\nmodel_provider = "keep"\n',
             encoding="utf-8",
         )
         profile_path = config_dir / "ucode.config.toml"
