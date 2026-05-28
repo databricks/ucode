@@ -29,9 +29,9 @@ class TestRenderOverlay:
         overlay, _ = claude.render_overlay(WS, "databricks-claude-opus-4-7")
         assert overlay["env"]["ANTHROPIC_MODEL"] == "databricks-claude-opus-4-7[1m]"
 
-    def test_adds_1m_suffix_for_sonnet_4_6(self):
-        overlay, _ = claude.render_overlay(WS, "databricks-claude-sonnet-4-6")
-        assert overlay["env"]["ANTHROPIC_MODEL"] == "databricks-claude-sonnet-4-6[1m]"
+    def test_adds_1m_suffix_for_sonnet_4_6_and_later(self):
+        overlay, _ = claude.render_overlay(WS, "databricks-claude-sonnet-4-7")
+        assert overlay["env"]["ANTHROPIC_MODEL"] == "databricks-claude-sonnet-4-7[1m]"
 
     def test_does_not_add_1m_suffix_for_other_models(self):
         overlay, _ = claude.render_overlay(WS, "databricks-claude-haiku-4-6")

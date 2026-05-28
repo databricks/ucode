@@ -142,7 +142,7 @@ def _maybe_add_1m_suffix(model: str) -> str:
     major = int(major_raw)
     minor = int(minor_raw)
     should_suffix = (family == "opus" and (major, minor) >= (4, 6)) or (
-        family == "sonnet" and (major, minor) == (4, 6)
+        family == "sonnet" and (major, minor) >= (4, 6)
     )
     return f"{model}[1m]" if should_suffix else model
 
