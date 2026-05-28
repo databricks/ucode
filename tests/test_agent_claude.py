@@ -252,6 +252,56 @@ class TestRegisterWebSearchMcp:
         claude._register_web_search_mcp(WS, "m")
         assert added == ["web_search"]
 
+    def test_add_failure_is_non_blocking_and_warns(self, monkeypatch, capsys):
+        # Regression: a failing `claude mcp add-json` used to abort the whole
+        # `ucode claude` setup. It must now warn and return False instead.
+        import ucode.mcp as mcp_mod
+
+        monkeypatch.setattr(mcp_mod, "remove_claude_mcp_server", lambda name, scope: False)
+
+        def boom(name, entry, scope=mcp_mod.MCP_USER_SCOPE):
+            raise RuntimeError("Failed to add MCP server 'web_search' via claude CLI.")
+
+        monkeypatch.setattr(mcp_mod, "add_claude_mcp_server", boom)
+        result = claude._register_web_search_mcp(WS, "m")
+        assert result is False
+        captured = capsys.readouterr()
+        assert "web_search" in captured.out.lower() or "web search" in captured.out.lower()
+
+    def test_add_success_returns_true(self, monkeypatch):
+        import ucode.mcp as mcp_mod
+
+        monkeypatch.setattr(mcp_mod, "remove_claude_mcp_server", lambda name, scope: False)
+        monkeypatch.setattr(
+            mcp_mod,
+            "add_claude_mcp_server",
+            lambda name, entry, scope=mcp_mod.MCP_USER_SCOPE: None,
+        )
+        assert claude._register_web_search_mcp(WS, "m") is True
+
+    def test_write_tool_config_completes_when_mcp_registration_fails(self, monkeypatch):
+        # Regression for issue #100: a `claude mcp add-json` failure must not
+        # block the rest of `ucode claude` setup (state save, managed-key
+        # marking, etc.) from completing.
+        import ucode.mcp as mcp_mod
+
+        monkeypatch.setattr(claude, "backup_existing_file", lambda *a, **kw: True)
+        monkeypatch.setattr(claude, "read_json_safe", lambda path: {})
+        monkeypatch.setattr(claude, "write_json_file", lambda path, payload: None)
+        saved: list[dict] = []
+        monkeypatch.setattr(claude, "save_state", lambda state: saved.append(state))
+        monkeypatch.setattr(mcp_mod, "remove_claude_mcp_server", lambda name, scope: False)
+
+        def boom(name, entry, scope=mcp_mod.MCP_USER_SCOPE):
+            raise RuntimeError("Failed to add MCP server 'web_search' via claude CLI.")
+
+        monkeypatch.setattr(mcp_mod, "add_claude_mcp_server", boom)
+
+        state = {"workspace": WS, "codex_models": ["databricks-gpt-5"]}
+        result = claude.write_tool_config(state, "databricks-claude-sonnet-4")
+        assert saved, "save_state should still be called when MCP registration fails"
+        assert result["workspace"] == WS
+
 
 class TestClaudeLaunch:
     def test_sets_oauth_token_before_exec(self, monkeypatch):

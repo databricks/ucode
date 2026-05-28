@@ -19,6 +19,8 @@ from urllib import error as urllib_error
 from urllib import request as urllib_request
 from urllib.parse import urlparse
 
+from databricks.sql.exc import ServerOperationError
+
 from ucode.config_io import APP_DIR
 from ucode.ui import (
     err_console,
@@ -276,9 +278,11 @@ def run(
     )
 
 
-def build_databricks_cli_env(workspace: str) -> dict[str, str]:
+def build_databricks_cli_env(workspace: str, profile: str | None = None) -> dict[str, str]:
     env = os.environ.copy()
     env["DATABRICKS_HOST"] = workspace
+    if profile is None:
+        env.pop("DATABRICKS_CONFIG_PROFILE", None)
     return env
 
 
@@ -378,8 +382,12 @@ def has_valid_databricks_auth(workspace: str, profile: str | None = None) -> boo
     if os.environ.get("DATABRICKS_BEARER", "").strip():
         return True
     _log_auth_diagnostics()
+    # Mirror run_databricks_login: when ~/.databrickscfg has multiple
+    # profiles for the same host, `databricks auth token --host …` refuses
+    # to disambiguate without --profile, so resolve it from the host here.
+    profile = profile or find_profile_name_for_host(workspace)
     try:
-        env = build_databricks_cli_env(workspace)
+        env = build_databricks_cli_env(workspace, profile)
         result = run(
             [
                 "databricks",
@@ -490,7 +498,7 @@ def run_databricks_login(workspace: str, profile: str | None = None) -> None:
             workspace,
             *_profile_args(profile_name),
         ]
-        run(cmd, env=build_databricks_cli_env(workspace), timeout=300)
+        run(cmd, env=build_databricks_cli_env(workspace, profile_name), timeout=300)
     except subprocess.CalledProcessError as exc:
         raise RuntimeError("`databricks auth login` failed.") from exc
     except subprocess.TimeoutExpired as exc:
@@ -526,7 +534,10 @@ def get_databricks_token(
         return bearer
 
     _log_auth_diagnostics()
-    env = build_databricks_cli_env(workspace)
+    # See has_valid_databricks_auth: resolve the profile from the host when
+    # the caller didn't supply one, so duplicate-host cfgs don't break us.
+    profile = profile or find_profile_name_for_host(workspace)
+    env = build_databricks_cli_env(workspace, profile)
     cmd = [
         "databricks",
         "auth",
@@ -624,7 +635,7 @@ def _extract_connection_page(payload: object) -> tuple[list[dict], str | None]:
     return [item for item in raw_connections if isinstance(item, dict)], next_page_token
 
 
-def list_databricks_connections(workspace: str) -> list[dict]:
+def list_databricks_connections(workspace: str, profile: str | None = None) -> list[dict]:
     env = build_databricks_cli_env(workspace)
     connections: list[dict] = []
     page_token: str | None = None
@@ -636,6 +647,7 @@ def list_databricks_connections(workspace: str) -> list[dict]:
                 "databricks",
                 "connections",
                 "list",
+                *_profile_args(profile),
                 "--max-results",
                 "0",
                 "--output",
@@ -686,7 +698,7 @@ def _extract_genie_spaces_page(payload: object) -> tuple[list[dict], str | None]
     return [item for item in raw_spaces if isinstance(item, dict)], next_page_token
 
 
-def list_genie_spaces(workspace: str) -> list[dict]:
+def list_genie_spaces(workspace: str, profile: str | None = None) -> list[dict]:
     env = build_databricks_cli_env(workspace)
     spaces: list[dict] = []
     page_token: str | None = None
@@ -698,6 +710,7 @@ def list_genie_spaces(workspace: str) -> list[dict]:
                 "databricks",
                 "genie",
                 "list-spaces",
+                *_profile_args(profile),
                 "--page-size",
                 "100",
                 "--output",
@@ -745,7 +758,7 @@ def _extract_apps_payload(payload: object) -> list[dict]:
     raise RuntimeError("Databricks apps listing returned invalid JSON.")
 
 
-def list_databricks_apps(workspace: str) -> list[dict]:
+def list_databricks_apps(workspace: str, profile: str | None = None) -> list[dict]:
     env = build_databricks_cli_env(workspace)
     try:
         result = run(
@@ -753,6 +766,7 @@ def list_databricks_apps(workspace: str) -> list[dict]:
                 "databricks",
                 "apps",
                 "list",
+                *_profile_args(profile),
                 "--limit",
                 "1000",
                 "--output",
@@ -1041,10 +1055,28 @@ def run_usage_query(
                 cursor.execute(query)
                 columns = [desc[0] for desc in (cursor.description or [])]
                 rows = cast(list[tuple], cursor.fetchall())
+    except ServerOperationError as exc:
+        if _is_usage_table_access_error(exc):
+            raise RuntimeError(
+                "Unable to read `system.ai_gateway.usage`. Ask your workspace admin "
+                "to enable READ access to `system.ai_gateway.usage` for your account."
+            ) from exc
+        raise RuntimeError(f"Usage query failed: {exc}") from exc
     except Exception as exc:
         raise RuntimeError(f"Usage query failed: {exc}") from exc
 
     return columns, rows
+
+
+def _is_usage_table_access_error(exc: BaseException) -> bool:
+    """Return True when a `ServerOperationError` blocks reads of
+    `system.ai_gateway.usage` — gated on one of the bracketed error codes
+    `INSUFFICIENT_PERMISSIONS` plus a `system.ai_gateway` substring (identifier quoting
+    stripped first)."""
+    normalized = str(exc).lower().translate(str.maketrans("", "", """`[]"'"""))
+    if "system.ai_gateway" not in normalized:
+        return False
+    return "insufficient_permissions" in normalized
 
 
 # ---------------------------------------------------------------------------

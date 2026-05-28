@@ -4,19 +4,27 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta
 
+import ucode.usage as usage_mod
 from ucode.usage import (
     USAGE_BREAKDOWN_DAYS,
     USAGE_SUMMARY_DAYS,
     build_current_user_query,
+    build_tool_breakdown_rows,
     build_usage_report_query,
     coerce_date,
     coerce_datetime,
+    configured_usage_tools,
     empty_tool_day,
     extract_model_names,
+    extract_model_token_breakdown,
+    filter_records_for_tools,
+    has_tool_usage_last_week,
     parse_usage_rows,
     render_usage_summary,
     simplify_model_name,
+    summarize_model_tokens,
     summarize_models,
+    usage,
 )
 
 
@@ -34,6 +42,12 @@ class TestBuildUsageReportQuery:
         for tool in ("codex", "claude", "gemini", "opencode"):
             assert tool in q
 
+    def test_includes_per_model_token_rollup(self):
+        q = build_usage_report_query()
+        assert "model_tokens" in q
+        assert "SUM(total_tokens_used) AS model_tokens_used" in q
+        assert "NAMED_STRUCT('model', destination_model, 'tokens', model_tokens_used)" in q
+
 
 class TestBuildCurrentUserQuery:
     def test_uses_current_user(self):
@@ -50,6 +64,82 @@ class TestParseUsageRows:
 
     def test_empty_rows(self):
         assert parse_usage_rows(["a"], []) == []
+
+
+class TestConfiguredUsageTools:
+    def test_uses_available_tools_in_display_order(self):
+        tool_displays = {"claude": "Claude Code", "codex": "Codex", "gemini": "Gemini"}
+        state = {"available_tools": ["codex", "claude"]}
+        assert configured_usage_tools(state, tool_displays) == ["claude", "codex"]
+
+    def test_falls_back_to_managed_configs(self):
+        tool_displays = {"claude": "Claude Code", "codex": "Codex"}
+        state = {"managed_configs": {"codex": {"keys": []}}}
+        assert configured_usage_tools(state, tool_displays) == ["codex"]
+
+    def test_ignores_unknown_tools(self):
+        tool_displays = {"claude": "Claude Code"}
+        state = {"available_tools": ["claude", "unknown"]}
+        assert configured_usage_tools(state, tool_displays) == ["claude"]
+
+
+class TestFilterRecordsForTools:
+    def test_keeps_only_configured_tools(self):
+        records = [
+            {"tool": "claude", "total_tokens_used": 100},
+            {"tool": "gemini", "total_tokens_used": 200},
+            {"tool": "codex", "total_tokens_used": 300},
+        ]
+        assert filter_records_for_tools(records, ["claude", "codex"]) == [
+            {"tool": "claude", "total_tokens_used": 100},
+            {"tool": "codex", "total_tokens_used": 300},
+        ]
+
+
+class TestHasToolUsageLastWeek:
+    def test_true_for_recent_tokens(self):
+        records = [
+            {
+                "tool": "claude",
+                "usage_day": date.today(),
+                "total_tokens_used": 100,
+                "sessions": 1,
+            }
+        ]
+        assert has_tool_usage_last_week(records, "claude") is True
+
+    def test_true_for_recent_session_even_without_tokens(self):
+        records = [
+            {
+                "tool": "claude",
+                "usage_day": date.today(),
+                "total_tokens_used": 0,
+                "sessions": 1,
+            }
+        ]
+        assert has_tool_usage_last_week(records, "claude") is True
+
+    def test_false_for_only_old_usage(self):
+        records = [
+            {
+                "tool": "claude",
+                "usage_day": date.today() - timedelta(days=USAGE_BREAKDOWN_DAYS),
+                "total_tokens_used": 100,
+                "sessions": 1,
+            }
+        ]
+        assert has_tool_usage_last_week(records, "claude") is False
+
+    def test_false_for_other_tool_usage(self):
+        records = [
+            {
+                "tool": "codex",
+                "usage_day": date.today(),
+                "total_tokens_used": 100,
+                "sessions": 1,
+            }
+        ]
+        assert has_tool_usage_last_week(records, "claude") is False
 
 
 class TestCoerceDate:
@@ -159,6 +249,47 @@ class TestSummarizeModels:
         assert summarize_models("claude", None) == "-"
 
 
+class TestModelTokenBreakdown:
+    def test_extracts_json_model_tokens(self):
+        raw = (
+            '[{"model":"databricks-claude-opus-4", "tokens":236000}, '
+            '{"model":"databricks-claude-haiku-4.5", "tokens":920}]'
+        )
+        result = extract_model_token_breakdown("claude", raw)
+        assert result == [("opus-4", 236000), ("haiku-4.5", 920)]
+
+    def test_merges_simplified_duplicate_model_names(self):
+        raw = [
+            {"model": "databricks-claude-opus-4", "tokens": 100},
+            {"model": "claude-opus-4", "tokens": 50},
+        ]
+        result = extract_model_token_breakdown("claude", raw)
+        assert result == [("opus-4", 150)]
+
+    def test_single_model_legacy_fallback_uses_total_tokens(self):
+        result = extract_model_token_breakdown(
+            "codex",
+            None,
+            "databricks-gpt-5",
+            13300,
+        )
+        assert result == [("5", 13300)]
+
+    def test_multi_model_legacy_fallback_does_not_assign_total_to_each_model(self):
+        result = extract_model_token_breakdown(
+            "claude",
+            None,
+            "databricks-claude-haiku-4.5, databricks-claude-opus-4",
+            237000,
+        )
+        assert result == [("haiku-4.5", 0), ("opus-4", 0)]
+
+    def test_summarizes_tokens_next_to_each_model(self):
+        raw = '[{"model":"databricks-claude-opus-4", "tokens":236000}]'
+        result = summarize_model_tokens("claude", raw, "", 0)
+        assert result == "opus-4 (236.0K)"
+
+
 class TestEmptyToolDay:
     def test_structure(self):
         d = date(2024, 6, 1)
@@ -210,6 +341,147 @@ class TestRenderUsageSummary:
         result = render_usage_summary(records, "user", {"claude": "Claude Code"})
         assert "sonnet-4" in result
 
+    def test_top_models_uses_per_model_token_totals(self):
+        records = [
+            {
+                "tool": "claude",
+                "usage_day": date.today(),
+                "total_tokens_used": 237000,
+                "models": "databricks-claude-haiku-4.5, databricks-claude-opus-4",
+                "model_tokens": (
+                    '[{"model":"databricks-claude-haiku-4.5", "tokens":920}, '
+                    '{"model":"databricks-claude-opus-4", "tokens":236080}]'
+                ),
+            },
+            {
+                "tool": "codex",
+                "usage_day": date.today(),
+                "total_tokens_used": 13300,
+                "models": "databricks-gpt-5",
+                "model_tokens": '[{"model":"databricks-gpt-5", "tokens":13300}]',
+            },
+        ]
+        result = render_usage_summary(
+            records,
+            "user",
+            {"claude": "Claude Code", "codex": "Codex"},
+        )
+        assert "opus-4 (236.1K)" in result
+        assert "5 (13.3K)" in result
+        assert "haiku-4.5 (920)" in result
+        assert "haiku-4.5 (237.0K)" not in result
+
+    def test_daily_table_shows_per_model_token_totals(self):
+        records = [
+            {
+                "tool": "claude",
+                "usage_day": date.today(),
+                "total_tokens_used": 237000,
+                "sessions": 2,
+                "models": "databricks-claude-haiku-4.5, databricks-claude-opus-4",
+                "model_tokens": (
+                    '[{"model":"databricks-claude-haiku-4.5", "tokens":920}, '
+                    '{"model":"databricks-claude-opus-4", "tokens":236080}]'
+                ),
+            }
+        ]
+        rows = build_tool_breakdown_rows(records, "claude")
+        assert rows[0][5] == "opus-4 (236.1K), haiku-4.5 (920)"
+
     def test_empty_records(self):
         result = render_usage_summary([], "user", {"claude": "Claude Code"})
         assert "user" in result
+
+
+class TestUsageCommand:
+    def test_filters_to_configured_agents_and_skips_inactive_tables(self, monkeypatch):
+        today = date.today()
+        old_day = today - timedelta(days=USAGE_BREAKDOWN_DAYS)
+        columns = [
+            "requester_name",
+            "tool",
+            "usage_day",
+            "total_tokens_used",
+            "sessions",
+            "first_event_time",
+            "last_event_time",
+            "models",
+            "model_tokens",
+        ]
+        rows = [
+            (
+                "user@example.com",
+                "codex",
+                today,
+                100,
+                1,
+                None,
+                None,
+                "databricks-gpt-5",
+                '[{"model":"databricks-gpt-5", "tokens":100}]',
+            ),
+            (
+                "user@example.com",
+                "claude",
+                old_day,
+                200,
+                1,
+                None,
+                None,
+                "databricks-claude-opus-4",
+                '[{"model":"databricks-claude-opus-4", "tokens":200}]',
+            ),
+            (
+                "user@example.com",
+                "gemini",
+                today,
+                900,
+                1,
+                None,
+                None,
+                "databricks-gemini-2.0-flash",
+                '[{"model":"databricks-gemini-2.0-flash", "tokens":900}]',
+            ),
+        ]
+
+        printed: list[str] = []
+        headings: list[str] = []
+        notes: list[str] = []
+        rendered_tables: list[list[list[str]]] = []
+
+        class DummyConsole:
+            def print(self, value):
+                printed.append(str(value))
+
+        def fake_render_box_table(headers, table_rows, max_widths=None):
+            rendered_tables.append(table_rows)
+            return "TABLE"
+
+        monkeypatch.setattr(
+            usage_mod,
+            "load_state",
+            lambda: {"workspace": "https://workspace", "available_tools": ["claude", "codex"]},
+        )
+        monkeypatch.setattr(usage_mod, "ensure_databricks_auth", lambda *args, **kwargs: None)
+        monkeypatch.setattr(usage_mod, "get_databricks_token", lambda *args, **kwargs: "token")
+        monkeypatch.setattr(
+            usage_mod,
+            "discover_sql_warehouse_http_path",
+            lambda *args, **kwargs: "/sql/1.0/warehouses/abc",
+        )
+        monkeypatch.setattr(usage_mod, "run_usage_query", lambda *args, **kwargs: (columns, rows))
+        monkeypatch.setattr(usage_mod, "console", DummyConsole())
+        monkeypatch.setattr(usage_mod, "print_heading", headings.append)
+        monkeypatch.setattr(usage_mod, "print_note", notes.append)
+        monkeypatch.setattr(usage_mod, "render_box_table", fake_render_box_table)
+
+        assert usage() == 0
+
+        assert "Codex · Last 7 Days" in headings
+        assert "Claude Code · Last 7 Days" in headings
+        assert all("Gemini" not in heading for heading in headings)
+        assert notes == [f"No usage for Claude Code in the last {USAGE_BREAKDOWN_DAYS} days."]
+        assert len(rendered_tables) == 1
+        assert rendered_tables[0][0][2] == "100"
+        assert "gemini" not in "\n".join(printed).lower()
+        assert "900" not in "\n".join(printed)

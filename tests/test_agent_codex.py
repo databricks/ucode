@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 
 from ucode.agents import codex
+from ucode.config_io import read_toml_safe
 
 WS = "https://example.databricks.com"
 
@@ -21,18 +22,18 @@ class TestCodexSpec:
 
 
 class TestRenderOverlay:
-    def test_creates_ucode_profile_without_setting_global_default(self):
+    def test_uses_profile_file_shape_without_legacy_profiles(self):
         overlay = codex.render_overlay(WS)
         assert "profile" not in overlay
-        assert "ucode" in overlay["profiles"]
+        assert "profiles" not in overlay
 
     def test_sets_model_provider(self):
         overlay = codex.render_overlay(WS)
-        assert overlay["profiles"]["ucode"]["model_provider"] == "ucode-databricks"
+        assert overlay["model_provider"] == "ucode-databricks"
 
     def test_sets_model_when_provided(self):
         overlay = codex.render_overlay(WS, "databricks-gpt-5")
-        assert overlay["profiles"]["ucode"]["model"] == "databricks-gpt-5"
+        assert overlay["model"] == "databricks-gpt-5"
 
     def test_provider_base_url(self):
         overlay = codex.render_overlay(WS)
@@ -72,6 +73,69 @@ class TestRenderOverlayUserAgent:
     def test_managed_keys_include_http_headers(self):
         # Revert must clean up the new key.
         assert ["model_providers", "ucode-databricks", "http_headers"] in codex.MANAGED_KEYS
+
+
+class TestCodexWriteConfig:
+    def test_writes_ucode_profile_config_file(self, tmp_path, monkeypatch):
+        config_path = tmp_path / ".codex" / "ucode.config.toml"
+        backup_path = tmp_path / "codex-ucode-config.backup.toml"
+        monkeypatch.setattr(codex, "CODEX_CONFIG_PATH", config_path)
+        monkeypatch.setattr(codex, "CODEX_BACKUP_PATH", backup_path)
+        monkeypatch.setattr(codex, "save_state", lambda state: None)
+
+        codex.write_tool_config({"workspace": WS, "codex_models": ["gpt-5"]})
+
+        doc = read_toml_safe(config_path)
+        assert doc["model_provider"] == "ucode-databricks"
+        assert doc["model"] == "gpt-5"
+        assert "profiles" not in doc
+
+    def test_removes_legacy_ucode_profile_from_shared_config(self, tmp_path, monkeypatch):
+        config_dir = tmp_path / ".codex"
+        config_dir.mkdir()
+        profile_path = config_dir / "ucode.config.toml"
+        legacy_path = config_dir / "config.toml"
+        legacy_path.write_text(
+            'profile = "ucode"\n\n'
+            "[profiles.ucode]\n"
+            'model_provider = "old"\n\n'
+            "[profiles.other]\n"
+            'model_provider = "keep"\n',
+            encoding="utf-8",
+        )
+        backup_path = tmp_path / "codex-ucode-config.backup.toml"
+        legacy_backup_path = tmp_path / "codex-legacy-config.backup.toml"
+        monkeypatch.setattr(codex, "CODEX_CONFIG_PATH", profile_path)
+        monkeypatch.setattr(codex, "CODEX_BACKUP_PATH", backup_path)
+        monkeypatch.setattr(codex, "save_state", lambda state: None)
+
+        codex.write_tool_config({"workspace": WS, "codex_models": ["gpt-5"]})
+
+        doc = read_toml_safe(legacy_path)
+        assert "profile" not in doc
+        assert "ucode" not in doc["profiles"]
+        assert doc["profiles"]["other"]["model_provider"] == "keep"
+        assert legacy_backup_path.exists()
+
+
+class TestCodexMinimumVersion:
+    def test_no_error_when_codex_is_new_enough(self, monkeypatch):
+        monkeypatch.setattr(codex, "agent_version", lambda binary: "0.134.0")
+
+        assert codex.minimum_version_error() is None
+        assert codex.required_update_message() is None
+
+    def test_errors_when_codex_is_too_old(self, monkeypatch):
+        monkeypatch.setattr(codex, "agent_version", lambda binary: "0.133.0")
+
+        assert "Codex CLI must be updated to 0.134.0 or newer" in codex.minimum_version_error()
+        assert "updating Codex is required" in codex.required_update_message()
+
+    def test_unknown_version_does_not_block(self, monkeypatch):
+        monkeypatch.setattr(codex, "agent_version", lambda binary: "unknown")
+
+        assert codex.minimum_version_error() is None
+        assert codex.required_update_message() is None
 
 
 class TestCodexDefaultModel:

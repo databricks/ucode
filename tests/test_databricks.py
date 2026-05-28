@@ -52,6 +52,22 @@ class TestBuildDatabricksCliEnv:
         env = build_databricks_cli_env(WS)
         assert env["DATABRICKS_HOST"] == WS
 
+    def test_strips_ambient_profile_without_explicit_profile(self, monkeypatch):
+        monkeypatch.setenv("DATABRICKS_CONFIG_PROFILE", "other-workspace")
+
+        env = build_databricks_cli_env(WS)
+
+        assert env["DATABRICKS_HOST"] == WS
+        assert "DATABRICKS_CONFIG_PROFILE" not in env
+
+    def test_preserves_ambient_profile_with_explicit_profile(self, monkeypatch):
+        monkeypatch.setenv("DATABRICKS_CONFIG_PROFILE", "other-workspace")
+
+        env = build_databricks_cli_env(WS, profile="stablebox")
+
+        assert env["DATABRICKS_HOST"] == WS
+        assert env["DATABRICKS_CONFIG_PROFILE"] == "other-workspace"
+
 
 class TestBuildToolBaseUrl:
     def test_codex(self):
@@ -276,6 +292,36 @@ class TestGetDatabricksToken:
         token = get_databricks_token(WS)
         assert token == "good-token"
 
+    def test_strips_ambient_profile_when_profile_not_provided(self, tmp_path, monkeypatch):
+        profile_log = tmp_path / "profile"
+        env = self._fake_databricks(
+            tmp_path,
+            f'printf "%s" "${{DATABRICKS_CONFIG_PROFILE:-}}" > {profile_log}\n'
+            'echo \'{"access_token": "good-token", "token_type": "Bearer"}\'',
+        )
+        env["DATABRICKS_CONFIG_PROFILE"] = "other-workspace"
+        monkeypatch.setattr("os.environ", env)
+
+        token = get_databricks_token(WS)
+
+        assert token == "good-token"
+        assert profile_log.read_text() == ""
+
+    def test_has_valid_auth_strips_ambient_profile_without_explicit_profile(
+        self, tmp_path, monkeypatch
+    ):
+        profile_log = tmp_path / "profile"
+        env = self._fake_databricks(
+            tmp_path,
+            f'printf "%s" "${{DATABRICKS_CONFIG_PROFILE:-}}" > {profile_log}\n'
+            'echo \'{"access_token": "good-token", "token_type": "Bearer"}\'',
+        )
+        env["DATABRICKS_CONFIG_PROFILE"] = "other-workspace"
+        monkeypatch.setattr("os.environ", env)
+
+        assert db_mod.has_valid_databricks_auth(WS)
+        assert profile_log.read_text() == ""
+
     def test_reauths_and_retries_when_token_empty(self, tmp_path, monkeypatch):
         call_count = tmp_path / "calls"
         call_count.write_text("0")
@@ -433,6 +479,20 @@ class TestListDatabricksConnections:
         assert calls[0]["kwargs"]["env"]["DATABRICKS_HOST"] == WS
         assert calls[1]["args"][-2:] == ["--page-token", "next-page"]
 
+    def test_passes_profile_when_provided(self, monkeypatch):
+        calls: list[list[str]] = []
+
+        def fake_run(args, **kwargs):
+            calls.append(args)
+            return subprocess.CompletedProcess(args, 0, stdout=json.dumps({"connections": []}))
+
+        monkeypatch.setattr(db_mod, "run", fake_run)
+
+        list_databricks_connections(WS, "my-profile")
+
+        assert "--profile" in calls[0]
+        assert calls[0][calls[0].index("--profile") + 1] == "my-profile"
+
     def test_raises_on_invalid_json(self, monkeypatch):
         def fake_run(args, **kwargs):
             return subprocess.CompletedProcess(args, 0, stdout="not-json")
@@ -476,6 +536,20 @@ class TestListGenieSpaces:
         assert calls[0]["kwargs"]["env"]["DATABRICKS_HOST"] == WS
         assert calls[1]["args"][-2:] == ["--page-token", "next-page"]
 
+    def test_passes_profile_when_provided(self, monkeypatch):
+        calls: list[list[str]] = []
+
+        def fake_run(args, **kwargs):
+            calls.append(args)
+            return subprocess.CompletedProcess(args, 0, stdout=json.dumps({"spaces": []}))
+
+        monkeypatch.setattr(db_mod, "run", fake_run)
+
+        list_genie_spaces(WS, "my-profile")
+
+        assert "--profile" in calls[0]
+        assert calls[0][calls[0].index("--profile") + 1] == "my-profile"
+
     def test_raises_on_invalid_json(self, monkeypatch):
         def fake_run(args, **kwargs):
             return subprocess.CompletedProcess(args, 0, stdout="not-json")
@@ -518,6 +592,20 @@ class TestListDatabricksApps:
             "json",
         ]
         assert calls[0]["kwargs"]["env"]["DATABRICKS_HOST"] == WS
+
+    def test_passes_profile_when_provided(self, monkeypatch):
+        calls: list[list[str]] = []
+
+        def fake_run(args, **kwargs):
+            calls.append(args)
+            return subprocess.CompletedProcess(args, 0, stdout=json.dumps([]))
+
+        monkeypatch.setattr(db_mod, "run", fake_run)
+
+        list_databricks_apps(WS, "my-profile")
+
+        assert "--profile" in calls[0]
+        assert calls[0][calls[0].index("--profile") + 1] == "my-profile"
 
     def test_accepts_object_wrapped_apps(self, monkeypatch):
         def fake_run(args, **kwargs):
@@ -755,3 +843,110 @@ class TestEnsureDatabricksCliVersion:
         monkeypatch.setattr("os.environ", env)
         with pytest.raises(RuntimeError, match="Could not parse"):
             ensure_databricks_cli_version()
+
+
+class TestIsUsageTableAccessError:
+    """Pin which `ServerOperationError` strings trigger the friendly
+    `system.ai_gateway.usage` permissions hint vs. fall through to the
+    generic `Usage query failed: ...` arm."""
+
+    @staticmethod
+    def _err(msg: str):
+        from databricks.sql.exc import ServerOperationError
+
+        return ServerOperationError(msg)
+
+    def test_table_level_select_denial_matches(self):
+        msg = (
+            "[INSUFFICIENT_PERMISSIONS] Insufficient privileges: "
+            "User does not have SELECT on Table 'system.ai_gateway.usage'. "
+            "SQLSTATE: 42501"
+        )
+        assert db_mod._is_usage_table_access_error(self._err(msg)) is True
+
+    def test_schema_level_use_schema_denial_matches(self):
+        msg = (
+            "[INSUFFICIENT_PERMISSIONS] Insufficient privileges: "
+            "User does not have USE SCHEMA on Schema 'system.ai_gateway'. "
+            "SQLSTATE: 42501"
+        )
+        assert db_mod._is_usage_table_access_error(self._err(msg)) is True
+
+    def test_unrelated_catalog_denial_falls_through(self):
+        msg = (
+            "[INSUFFICIENT_PERMISSIONS] Insufficient privileges: "
+            "User does not have USE CATALOG on Catalog 'aarushi'. "
+            "SQLSTATE: 42501"
+        )
+        assert db_mod._is_usage_table_access_error(self._err(msg)) is False
+
+    def test_other_error_code_on_same_table_falls_through(self):
+        """Different code on the right table must not trip the gate — the
+        helper requires INSUFFICIENT_PERMISSIONS specifically so we don't
+        mask e.g. missing-table failures with a permissions-shaped hint."""
+        msg = (
+            "[TABLE_OR_VIEW_NOT_FOUND] The table or view "
+            "`system`.`ai_gateway`.`usage` cannot be found. SQLSTATE: 42P01"
+        )
+        assert db_mod._is_usage_table_access_error(self._err(msg)) is False
+
+    @pytest.mark.parametrize(
+        "quoted",
+        [
+            "`system`.`ai_gateway`.`usage`",
+            "[system].[ai_gateway].[usage]",
+        ],
+    )
+    def test_identifier_quoting_variants_all_match(self, quoted):
+        msg = (
+            f"[INSUFFICIENT_PERMISSIONS] User does not have SELECT on Table "
+            f"{quoted}. SQLSTATE: 42501"
+        )
+        assert db_mod._is_usage_table_access_error(self._err(msg)) is True
+
+
+class TestRunUsageQuery:
+    """Cover the two control-flow arms `_is_usage_table_access_error` gates:
+    friendly RuntimeError for matching errors, raw-text fallback for the rest.
+    `from exc` chaining is also pinned so `--debug` still surfaces the
+    underlying connector error."""
+
+    @staticmethod
+    def _patch_connect_to_raise(monkeypatch, exc):
+        import databricks.sql as sql_mod
+
+        def fake_connect(*args, **kwargs):
+            raise exc
+
+        monkeypatch.setattr(sql_mod, "connect", fake_connect)
+
+    def test_raises_actionable_message_for_table_access_error(self, monkeypatch):
+        from databricks.sql.exc import ServerOperationError
+
+        original = ServerOperationError(
+            "[INSUFFICIENT_PERMISSIONS] Insufficient privileges: "
+            "User does not have SELECT on Table 'system.ai_gateway.usage'. "
+            "SQLSTATE: 42501"
+        )
+        self._patch_connect_to_raise(monkeypatch, original)
+
+        with pytest.raises(RuntimeError, match="Ask your workspace admin") as exc_info:
+            db_mod.run_usage_query(WS, "/sql/1.0/warehouses/abc", "tok", "SELECT 1")
+        assert "system.ai_gateway.usage" in str(exc_info.value)
+        # The original ServerOperationError must survive on __cause__ so
+        # `--debug` / stack traces still show the underlying connector error.
+        assert exc_info.value.__cause__ is original
+
+    def test_falls_through_for_unrelated_permission_error(self, monkeypatch):
+        from databricks.sql.exc import ServerOperationError
+
+        original = ServerOperationError(
+            "[INSUFFICIENT_PERMISSIONS] Insufficient privileges: "
+            "User does not have USE CATALOG on Catalog 'aarushi'. SQLSTATE: 42501"
+        )
+        self._patch_connect_to_raise(monkeypatch, original)
+
+        with pytest.raises(RuntimeError, match="aarushi") as exc_info:
+            db_mod.run_usage_query(WS, "/sql/1.0/warehouses/abc", "tok", "SELECT 1")
+        assert "Ask your workspace admin" not in str(exc_info.value)
+        assert str(exc_info.value).startswith("Usage query failed:")
