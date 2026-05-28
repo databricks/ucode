@@ -10,9 +10,12 @@ installed or no models are available.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
+from urllib import error as urllib_error
+from urllib import request as urllib_request
 
 import pytest
 
@@ -55,6 +58,39 @@ def _run_agent(
         env=env,
         stdin=subprocess.DEVNULL,
     )
+
+
+def _run_gemini_gateway_smoke(workspace: str, model: str, token: str) -> str:
+    """Call the Gemini gateway directly with a text-only prompt.
+
+    This keeps auth recovery coverage focused on the recovered Databricks token
+    instead of Gemini CLI's separate tool-calling request shape.
+    """
+    url = f"{build_tool_base_url('gemini', workspace)}/v1beta/models/{model}:generateContent"
+    payload = {
+        "contents": [
+            {"role": "user", "parts": [{"text": "say hi in 5 words or less"}]},
+        ],
+    }
+    req = urllib_request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib_request.urlopen(req, timeout=30) as response:
+            body = response.read().decode("utf-8")
+    except urllib_error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace") if exc.fp else ""
+        raise AssertionError(f"Gemini gateway smoke failed: HTTP {exc.code}: {body[:500]}") from exc
+
+    data = json.loads(body)
+    return data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
 
 
 # ---------------------------------------------------------------------------
@@ -442,6 +478,10 @@ class TestGeminiLaunch:
         monkeypatch.setattr(config_io_mod, "APP_DIR", tmp_path)
         monkeypatch.setattr(gemini, "GEMINI_ENV_PATH", tmp_path / "ucode.env")
         monkeypatch.setattr(gemini, "GEMINI_BACKUP_PATH", tmp_path / "gemini-ucode-env.backup")
+        monkeypatch.setattr(gemini, "GEMINI_HOME_DIR", tmp_path / ".gemini-home")
+        monkeypatch.setattr(
+            gemini, "GEMINI_SETTINGS_PATH", tmp_path / ".gemini-home" / ".gemini" / "settings.json"
+        )
         # Run from tmp_path so Gemini sees an untrusted folder — that mirrors
         # what users hit on a fresh checkout and exercises the trust + .env
         # discovery code paths that previously broke validation.
@@ -853,6 +893,10 @@ class TestGeminiAuthRecovery:
         monkeypatch.setattr(config_io_mod, "APP_DIR", tmp_path)
         monkeypatch.setattr(gemini, "GEMINI_ENV_PATH", tmp_path / "ucode.env")
         monkeypatch.setattr(gemini, "GEMINI_BACKUP_PATH", tmp_path / "gemini-ucode-env.backup")
+        monkeypatch.setattr(gemini, "GEMINI_HOME_DIR", tmp_path / ".gemini-home")
+        monkeypatch.setattr(
+            gemini, "GEMINI_SETTINGS_PATH", tmp_path / ".gemini-home" / ".gemini" / "settings.json"
+        )
 
         model = gemini_models[0]
         fake_db_dir = _make_reauth_fake_databricks(tmp_path / "fake_db", e2e_token)
@@ -870,11 +914,4 @@ class TestGeminiAuthRecovery:
             "get_databricks_token may not be retrying after auth login."
         )
 
-        env = gemini.build_runtime_env(e2e_workspace, model, recovered_token)
-        cmd = gemini.validate_cmd("gemini")
-        result = _run_agent(cmd, env=env, timeout=90)
-        combined = (result.stdout + result.stderr).strip()
-        assert result.returncode == 0 and combined, (
-            f"Gemini failed after auth recovery: rc={result.returncode} "
-            f"stdout={result.stdout[:300]!r} stderr={result.stderr[:300]!r}"
-        )
+        assert _run_gemini_gateway_smoke(e2e_workspace, model, recovered_token).strip()

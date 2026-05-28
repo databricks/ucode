@@ -4,9 +4,18 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from ucode.agents import gemini
 
 WS = "https://example.databricks.com"
+
+
+@pytest.fixture(autouse=True)
+def _redirect_gemini_home(tmp_path, monkeypatch):
+    gemini_home = tmp_path / ".gemini-home"
+    monkeypatch.setattr(gemini, "GEMINI_HOME_DIR", gemini_home)
+    monkeypatch.setattr(gemini, "GEMINI_SETTINGS_PATH", gemini_home / ".gemini" / "settings.json")
 
 
 class TestGeminiSpec:
@@ -69,6 +78,35 @@ class TestBuildRuntimeEnv:
     def test_sets_oauth_token_for_mcp(self):
         env = gemini.build_runtime_env(WS, "gemini-2", "tok")
         assert env["OAUTH_TOKEN"] == "tok"
+
+    def test_sets_private_gemini_home(self, tmp_path, monkeypatch):
+        gemini_home = tmp_path / "private-gemini-home"
+        monkeypatch.setattr(gemini, "GEMINI_HOME_DIR", gemini_home)
+        monkeypatch.setattr(
+            gemini, "GEMINI_SETTINGS_PATH", gemini_home / ".gemini" / "settings.json"
+        )
+
+        env = gemini.build_runtime_env(WS, "gemini-2", "tok")
+
+        assert env["GEMINI_CLI_HOME"] == str(gemini_home)
+
+    def test_writes_private_auth_settings(self):
+        gemini.build_runtime_env(WS, "gemini-2", "tok")
+
+        settings = json.loads(gemini.GEMINI_SETTINGS_PATH.read_text())
+        assert settings == {"security": {"auth": {"selectedType": "gemini-api-key"}}}
+
+    def test_preserves_existing_private_settings(self):
+        gemini.GEMINI_SETTINGS_PATH.parent.mkdir(parents=True)
+        gemini.GEMINI_SETTINGS_PATH.write_text(
+            json.dumps({"theme": "dark", "security": {"auth": {"selectedType": "oauth"}}})
+        )
+
+        gemini.build_runtime_env(WS, "gemini-2", "tok")
+
+        settings = json.loads(gemini.GEMINI_SETTINGS_PATH.read_text())
+        assert settings["theme"] == "dark"
+        assert settings["security"]["auth"]["selectedType"] == "gemini-api-key"
 
 
 class TestGeminiDefaultModel:
