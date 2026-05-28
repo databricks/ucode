@@ -93,6 +93,21 @@ def _run_gemini_gateway_smoke(workspace: str, model: str, token: str) -> str:
     return data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
 
 
+E2E_EXCLUDED_MODEL_IDS = {
+    # Listed by AI Gateway model discovery, but currently rejected at launch
+    # with "The provided model identifier is invalid."
+    "databricks-claude-opus-4-8",
+}
+
+
+def _launchable_model_items(models: dict) -> list[tuple[str, str]]:
+    return [
+        (family, model_id)
+        for family, model_id in models.items()
+        if model_id and model_id not in E2E_EXCLUDED_MODEL_IDS
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Databricks auth / token
 # ---------------------------------------------------------------------------
@@ -424,6 +439,9 @@ class TestClaudeLaunch:
         claude_models: dict = e2e_state.get("claude_models") or {}
         if not claude_models:
             pytest.skip("No Claude models available on this workspace")
+        launchable_models = _launchable_model_items(claude_models)
+        if not launchable_models:
+            pytest.skip("No launchable Claude models available on this workspace")
 
         # Use an isolated config dir so the claude subprocess never reads or
         # writes ~/.claude/settings.json during this test.
@@ -436,7 +454,7 @@ class TestClaudeLaunch:
         base_url = build_tool_base_url("claude", e2e_workspace)
 
         failures = []
-        for family, model_id in claude_models.items():
+        for family, model_id in launchable_models:
             with pytest.MonkeyPatch().context() as mp:
                 mp.setattr("ucode.state.save_state", lambda s: None)
                 claude.write_tool_config({**e2e_state, "workspace": e2e_workspace}, model_id)
@@ -619,9 +637,8 @@ class TestCopilotLaunch:
         """Return [(family, model_id), ...] for every model copilot can talk to."""
         out: list[tuple[str, str]] = []
         claude_models: dict = e2e_state.get("claude_models") or {}
-        for family, model_id in claude_models.items():
-            if model_id:
-                out.append((f"claude-{family}", model_id))
+        for family, model_id in _launchable_model_items(claude_models):
+            out.append((f"claude-{family}", model_id))
         for model in e2e_state.get("codex_models") or []:
             if any(frag in model for frag in self.COPILOT_INCOMPATIBLE_MODEL_FRAGMENTS):
                 continue
@@ -680,9 +697,8 @@ class TestPiLaunch:
     def _all_models(self, e2e_state: dict) -> list[tuple[str, str]]:
         out: list[tuple[str, str]] = []
         claude_models: dict = e2e_state.get("claude_models") or {}
-        for family, model_id in claude_models.items():
-            if model_id:
-                out.append((f"claude-{family}", model_id))
+        for family, model_id in _launchable_model_items(claude_models):
+            out.append((f"claude-{family}", model_id))
         for model in e2e_state.get("codex_models") or []:
             out.append(("codex", model))
         for model in e2e_state.get("gemini_models") or []:
