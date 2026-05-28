@@ -189,7 +189,10 @@ def prompt_for_workspace(
 
     if profiles:
         choices = [
-            questionary.Choice(title=host, value=(host, profile_name))
+            questionary.Choice(
+                title=f"{host}  ({profile_name})",
+                value=(host, profile_name),
+            )
             for host, profile_name in profiles
         ]
         choices.append(questionary.Choice(title="Enter a different URL", value=None))
