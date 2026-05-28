@@ -54,6 +54,7 @@ PI_CONFIG_DIR = PI_UCODE_HOME / ".pi" / "agent"
 PI_CONFIG_PATH = PI_CONFIG_DIR / "models.json"
 PI_SETTINGS_PATH = PI_CONFIG_DIR / "settings.json"
 PI_BACKUP_PATH = APP_DIR / "pi-models.backup.json"
+PI_SETTINGS_BACKUP_PATH = APP_DIR / "pi-settings.backup.json"
 
 SPEC: ToolSpec = {
     "binary": "pi",
@@ -198,6 +199,7 @@ def _write_settings(model_selector: str) -> None:
     provider, _, model_id = model_selector.partition("/")
     if not model_id:
         return
+    backup_existing_file(PI_SETTINGS_PATH, PI_SETTINGS_BACKUP_PATH)
     existing = read_json_safe(PI_SETTINGS_PATH)
     merged = deep_merge_dict(existing, {"defaultProvider": provider, "defaultModel": model_id})
     write_json_file(PI_SETTINGS_PATH, merged)

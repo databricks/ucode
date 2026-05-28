@@ -25,6 +25,7 @@ from ucode.agents import (
 from ucode.agents import (
     launch as launch_agent,
 )
+from ucode.agents.pi import PI_SETTINGS_BACKUP_PATH, PI_SETTINGS_PATH
 from ucode.config_io import restore_file, set_dry_run
 from ucode.databricks import (
     build_shared_base_urls,
@@ -398,12 +399,16 @@ def revert() -> int:
         )
         for tool, spec in TOOL_SPECS.items()
     }
+    pi_settings_restored = restore_file(
+        PI_SETTINGS_PATH, PI_SETTINGS_BACKUP_PATH, bool(managed_configs.get("pi"))
+    )
     clear_state()
 
     print_heading("Revert")
     print_kv("Workspace", state.get("workspace") or "none")
     for tool, spec in TOOL_SPECS.items():
         print_kv(f"{spec['display']} config", "restored" if results[tool] else "unchanged")
+    print_kv("Pi settings", "restored" if pi_settings_restored else "unchanged")
     for client, spec in MCP_CLIENTS.items():
         print_kv(
             f"{spec['display']} MCP config",
