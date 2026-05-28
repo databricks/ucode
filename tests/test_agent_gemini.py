@@ -82,7 +82,9 @@ class TestBuildRuntimeEnv:
     def test_sets_private_gemini_home(self, tmp_path, monkeypatch):
         gemini_home = tmp_path / "private-gemini-home"
         monkeypatch.setattr(gemini, "GEMINI_HOME_DIR", gemini_home)
-        monkeypatch.setattr(gemini, "GEMINI_SETTINGS_PATH", gemini_home / ".gemini" / "settings.json")
+        monkeypatch.setattr(
+            gemini, "GEMINI_SETTINGS_PATH", gemini_home / ".gemini" / "settings.json"
+        )
 
         env = gemini.build_runtime_env(WS, "gemini-2", "tok")
 
