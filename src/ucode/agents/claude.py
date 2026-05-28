@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 from pathlib import Path
 
@@ -58,6 +59,7 @@ def _resolve_web_search_model(state: dict) -> str | None:
 
 
 WEB_SEARCH_MCP_NAME = "web_search"
+_CLAUDE_MODEL_RE = re.compile(r"^databricks-claude-(opus|sonnet)-(\d+)-(\d+)(.*)$")
 
 
 def _web_search_mcp_entry(workspace: str, search_model: str, profile: str | None = None) -> dict:
@@ -103,7 +105,7 @@ def render_overlay(
         ]
     )
     env: dict[str, str] = {
-        "ANTHROPIC_MODEL": model,
+        "ANTHROPIC_MODEL": _maybe_add_1m_suffix(model),
         "ANTHROPIC_BASE_URL": base_url,
         "ANTHROPIC_CUSTOM_HEADERS": custom_headers,
         "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1",
@@ -111,9 +113,9 @@ def render_overlay(
     }
     if claude_models:
         if claude_models.get("opus"):
-            env["ANTHROPIC_DEFAULT_OPUS_MODEL"] = claude_models["opus"]
+            env["ANTHROPIC_DEFAULT_OPUS_MODEL"] = _maybe_add_1m_suffix(claude_models["opus"])
         if claude_models.get("sonnet"):
-            env["ANTHROPIC_DEFAULT_SONNET_MODEL"] = claude_models["sonnet"]
+            env["ANTHROPIC_DEFAULT_SONNET_MODEL"] = _maybe_add_1m_suffix(claude_models["sonnet"])
         if claude_models.get("haiku"):
             env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = claude_models["haiku"]
     overlay: dict = {"apiKeyHelper": build_auth_shell_command(workspace, profile), "env": env}
@@ -127,6 +129,22 @@ def render_overlay(
         keys.append(["disabledTools"])
 
     return overlay, keys
+
+
+def _maybe_add_1m_suffix(model: str) -> str:
+    if model.endswith("[1m]"):
+        return model
+    match = _CLAUDE_MODEL_RE.match(model)
+    if not match:
+        return model
+
+    family, major_raw, minor_raw, _ = match.groups()
+    major = int(major_raw)
+    minor = int(minor_raw)
+    should_suffix = (family == "opus" and (major, minor) >= (4, 6)) or (
+        family == "sonnet" and (major, minor) == (4, 6)
+    )
+    return f"{model}[1m]" if should_suffix else model
 
 
 def _register_web_search_mcp(workspace: str, search_model: str, profile: str | None = None) -> bool:
