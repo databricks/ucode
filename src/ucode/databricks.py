@@ -820,8 +820,7 @@ def discover_claude_models(workspace: str, token: str) -> tuple[dict[str, str], 
     raw_ids = [
         m["id"]
         for m in data.get("data", [])
-        if isinstance(m.get("id"), str)
-        and not m["id"].endswith("-anthropic")
+        if isinstance(m.get("id"), str) and not m["id"].endswith("-anthropic")
     ]
 
     result: dict[str, str] = {}
