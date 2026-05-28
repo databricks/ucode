@@ -280,3 +280,72 @@ class TestPromptForWorkspace:
             url, profile = prompt_for_workspace("desc", profiles=None)
         assert url == "https://example.databricks.com"
         assert profile is None
+
+    # ------------------------------------------------------------------
+    # Long-name display clamping (PR #114 review feedback)
+    # ------------------------------------------------------------------
+
+    def test_long_profile_name_is_truncated_in_display_only(self, monkeypatch):
+        # 60-char name — exceeds the 40-char clamp. The displayed row title
+        # must be truncated with an ellipsis but the value tuple must carry
+        # the full untruncated name through to configure_shared_state.
+        long_name = "x" * 60
+        profiles = [("https://a.cloud.databricks.com", long_name)]
+        captured = self._capture_select(monkeypatch, answer=profiles[0])
+        url, profile = prompt_for_workspace("setup", profiles)
+
+        assert (url, profile) == profiles[0]
+        choices = captured["choices"]
+        # Header + 1 row + "Enter a different URL".
+        assert len(choices) == 3
+        # Display title is truncated to 40 chars (39 of name + "…").
+        row_title = choices[1].title
+        assert long_name not in row_title
+        assert "…" in row_title
+        # Value tuple still carries the full name.
+        assert choices[1].value == profiles[0]
+
+    # ------------------------------------------------------------------
+    # Typed-URL → known-profile match (PR #114 review feedback)
+    # ------------------------------------------------------------------
+
+    def test_typed_url_matching_single_profile_returns_that_profile(self):
+        profiles = [
+            ("https://a.cloud.databricks.com", "prof-a"),
+            ("https://b.cloud.databricks.com", "prof-b"),
+        ]
+        with (
+            patch("ucode.ui.questionary.select") as mock_select,
+            patch("ucode.ui.console.input", return_value="https://a.cloud.databricks.com"),
+        ):
+            mock_select.return_value.ask.return_value = None  # falls through to manual
+            url, profile = prompt_for_workspace("desc", profiles=profiles)
+        assert url == "https://a.cloud.databricks.com"
+        assert profile == "prof-a"
+
+    def test_typed_url_matching_multiple_profiles_returns_none(self):
+        # When the typed URL matches multiple profiles, we can't safely
+        # auto-pick one — fall through to host-based resolution downstream.
+        profiles = [
+            ("https://shared.cloud.databricks.com", "first"),
+            ("https://shared.cloud.databricks.com", "second"),
+        ]
+        with (
+            patch("ucode.ui.questionary.select") as mock_select,
+            patch("ucode.ui.console.input", return_value="https://shared.cloud.databricks.com"),
+        ):
+            mock_select.return_value.ask.return_value = None
+            url, profile = prompt_for_workspace("desc", profiles=profiles)
+        assert url == "https://shared.cloud.databricks.com"
+        assert profile is None
+
+    def test_typed_url_with_no_matching_profile_returns_none(self):
+        profiles = [("https://a.cloud.databricks.com", "prof-a")]
+        with (
+            patch("ucode.ui.questionary.select") as mock_select,
+            patch("ucode.ui.console.input", return_value="https://other.databricks.com"),
+        ):
+            mock_select.return_value.ask.return_value = None
+            url, profile = prompt_for_workspace("desc", profiles=profiles)
+        assert url == "https://other.databricks.com"
+        assert profile is None

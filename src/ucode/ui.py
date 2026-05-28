@@ -193,14 +193,28 @@ def prompt_for_workspace(
     if profiles:
         name_header = "Profile Name"
         url_header = "Workspace URL"
-        name_width = max(len(name_header), *(len(name) for _, name in profiles))
+        # Clamp so a single very long profile name can't push the URL column
+        # off-screen on an 80-col terminal — questionary doesn't wrap row
+        # titles cleanly, and a wrapped row breaks the picker visually.
+        max_name_width = 40
+        name_width = min(
+            max_name_width,
+            max(len(name_header), *(len(name) for _, name in profiles)),
+        )
         # Match the 2-char cursor gutter so the header line aligns with rows.
         header_title = f"  {name_header.ljust(name_width)}  {url_header}"
         choices: list[questionary.Choice | questionary.Separator] = [
             questionary.Separator(header_title)
         ]
         for host, profile_name in profiles:
-            row_title = f"{profile_name.ljust(name_width)}  {host}"
+            display_name = (
+                profile_name
+                if len(profile_name) <= name_width
+                else profile_name[: name_width - 1] + "…"
+            )
+            row_title = f"{display_name.ljust(name_width)}  {host}"
+            # Value carries the full untruncated profile name so downstream
+            # `--profile` calls always use the real name, not the display form.
             choices.append(questionary.Choice(title=row_title, value=(host, profile_name)))
         choices.append(questionary.Choice(title="Enter a different URL", value=None))
         style = questionary.Style(
@@ -221,9 +235,17 @@ def prompt_for_workspace(
     while True:
         raw_value = console.input(f"  [bold]Workspace URL[/bold] {muted('›')} ").strip()
         try:
-            return normalize_workspace_url(raw_value), None
+            url = normalize_workspace_url(raw_value)
         except ValueError as exc:
             print_err(str(exc))
+            continue
+        # If the typed URL matches exactly one known profile, attach it so
+        # downstream `--profile` calls resolve unambiguously. Multi-match
+        # cases stay on the existing host-based fallback to avoid silently
+        # picking the wrong profile.
+        matches = [name for host, name in (profiles or []) if host == url]
+        matched_profile = matches[0] if len(matches) == 1 else None
+        return url, matched_profile
 
 
 def prompt_for_tools(available: list[tuple[str, str]]) -> list[str]:
