@@ -181,26 +181,34 @@ def prompt_for_workspace(
     """Ask the user for a workspace URL, offering profiles as quick-select.
 
     `profiles` is a list of (host_url, profile_name) tuples. Caller fetches
-    them — `ui.py` stays Databricks-agnostic. Returns ``(url, profile_name)``;
-    profile_name is ``None`` when the user typed a URL manually.
+    them — `ui.py` stays Databricks-agnostic. Duplicate hosts (multiple
+    profiles pointing at the same workspace) are shown separately; the picker
+    returns the exact (host, profile_name) the user selected. Returns
+    ``(url, profile_name)``; profile_name is ``None`` when the user typed a
+    URL manually.
     """
     console.print()
     console.print(Panel(description, title="ucode setup", style="bold blue", expand=False))
 
     if profiles:
-        choices = [
-            questionary.Choice(
-                title=f"{host}  ({profile_name})",
-                value=(host, profile_name),
-            )
-            for host, profile_name in profiles
+        name_header = "Profile Name"
+        url_header = "Workspace URL"
+        name_width = max(len(name_header), *(len(name) for _, name in profiles))
+        # Match the 2-char cursor gutter so the header line aligns with rows.
+        header_title = f"  {name_header.ljust(name_width)}  {url_header}"
+        choices: list[questionary.Choice | questionary.Separator] = [
+            questionary.Separator(header_title)
         ]
+        for host, profile_name in profiles:
+            row_title = f"{profile_name.ljust(name_width)}  {host}"
+            choices.append(questionary.Choice(title=row_title, value=(host, profile_name)))
         choices.append(questionary.Choice(title="Enter a different URL", value=None))
         style = questionary.Style(
             [
                 ("highlighted", "fg:cyan bold"),
                 ("pointer", "fg:cyan bold"),
                 ("answer", "fg:cyan"),
+                ("separator", "fg:white bold"),
             ]
         )
         choice = questionary.select(

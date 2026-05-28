@@ -21,6 +21,7 @@ from ucode.databricks import (
     build_shared_base_urls,
     build_tool_base_url,
     ensure_databricks_cli_version,
+    get_databricks_profiles,
     get_databricks_token,
     list_databricks_apps,
     list_databricks_connections,
@@ -340,6 +341,63 @@ class TestGetDatabricksToken:
         assert "stale or invalid" in message
         assert "databricks auth logout --profile example-profile" in message
         assert f"databricks auth login --host {WS} --profile example-profile" in message
+
+
+class TestGetDatabricksProfiles:
+    def _patched_run(self, monkeypatch, payload: dict, returncode: int = 0) -> None:
+        def fake_run(args, **kwargs):
+            return subprocess.CompletedProcess(args, returncode, stdout=json.dumps(payload))
+
+        monkeypatch.setattr(db_mod, "run", fake_run)
+
+    def test_keeps_duplicate_hosts_as_separate_entries(self, monkeypatch):
+        self._patched_run(
+            monkeypatch,
+            {
+                "profiles": [
+                    {"host": WS, "name": "first", "auth_type": "databricks-cli"},
+                    {"host": WS, "name": "second", "auth_type": "databricks-cli"},
+                    {
+                        "host": "https://other.databricks.com",
+                        "name": "third",
+                        "auth_type": "databricks-cli",
+                    },
+                ]
+            },
+        )
+        profiles = get_databricks_profiles()
+        assert profiles == [
+            (WS, "first"),
+            (WS, "second"),
+            ("https://other.databricks.com", "third"),
+        ]
+
+    def test_skips_pat_profiles(self, monkeypatch):
+        self._patched_run(
+            monkeypatch,
+            {
+                "profiles": [
+                    {"host": WS, "name": "oauth", "auth_type": "databricks-cli"},
+                    {"host": WS, "name": "tokenized", "auth_type": "pat"},
+                ]
+            },
+        )
+        assert get_databricks_profiles() == [(WS, "oauth")]
+
+    def test_strips_trailing_slash_on_host(self, monkeypatch):
+        self._patched_run(
+            monkeypatch,
+            {
+                "profiles": [
+                    {"host": f"{WS}/", "name": "p", "auth_type": "databricks-cli"},
+                ]
+            },
+        )
+        assert get_databricks_profiles() == [(WS, "p")]
+
+    def test_returns_empty_on_non_zero_exit(self, monkeypatch):
+        self._patched_run(monkeypatch, {"profiles": []}, returncode=1)
+        assert get_databricks_profiles() == []
 
 
 class TestListDatabricksConnections:

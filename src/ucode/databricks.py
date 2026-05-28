@@ -413,6 +413,11 @@ def has_valid_databricks_auth(workspace: str, profile: str | None = None) -> boo
 def get_databricks_profiles() -> list[tuple[str, str]]:
     """Return [(host_url, profile_name), ...] from Databricks CLI profiles.
 
+    Each non-PAT profile is returned individually — duplicate hosts (multiple
+    profiles pointing at the same workspace) appear as separate entries so the
+    workspace picker can offer each profile by name. Order matches the CLI's
+    own ordering.
+
     Returns ``[]`` on any failure (CLI missing, timeout, non-zero exit, JSON
     decode error). When ``UCODE_DEBUG=1`` each dropout path logs *why* the
     result was empty so a silently-disappearing workspace picker is
@@ -438,8 +443,7 @@ def get_databricks_profiles() -> list[tuple[str, str]]:
         _debug("get_databricks_profiles", f"json decode error: {exc.msg}")
         return []
 
-    # dict dedupes by host (first non-PAT profile wins).
-    out: dict[str, str] = {}
+    out: list[tuple[str, str]] = []
     pat = 0
     for p in profiles:
         host = (p.get("host") or "").rstrip("/")
@@ -449,13 +453,13 @@ def get_databricks_profiles() -> list[tuple[str, str]]:
         if p.get("auth_type") == "pat":
             pat += 1
             continue
-        out.setdefault(host, name)
+        out.append((host, name))
 
     _debug(
         "get_databricks_profiles",
         f"returned={len(out)} total={len(profiles)} pat={pat}",
     )
-    return list(out.items())
+    return out
 
 
 def find_profile_name_for_host(workspace: str) -> str | None:
