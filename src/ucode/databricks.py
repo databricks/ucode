@@ -804,6 +804,14 @@ def build_auth_shell_command(workspace: str, profile: str | None = None) -> str:
     )
 
 
+# Model ids the AI Gateway advertises but currently rejects at launch with
+# "The provided model identifier is invalid." Filter them out at discovery so
+# agent harnesses don't try to boot with them.
+_CLAUDE_MODEL_DISCOVERY_DENYLIST = {
+    "databricks-claude-opus-4-8",
+}
+
+
 def discover_claude_models(workspace: str, token: str) -> tuple[dict[str, str], str | None]:
     """Discover Claude families on this workspace's AI Gateway.
 
@@ -820,7 +828,9 @@ def discover_claude_models(workspace: str, token: str) -> tuple[dict[str, str], 
     raw_ids = [
         m["id"]
         for m in data.get("data", [])
-        if isinstance(m.get("id"), str) and not m["id"].endswith("-anthropic")
+        if isinstance(m.get("id"), str)
+        and not m["id"].endswith("-anthropic")
+        and m["id"] not in _CLAUDE_MODEL_DISCOVERY_DENYLIST
     ]
 
     result: dict[str, str] = {}

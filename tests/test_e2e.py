@@ -93,19 +93,8 @@ def _run_gemini_gateway_smoke(workspace: str, model: str, token: str) -> str:
     return data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
 
 
-E2E_EXCLUDED_MODEL_IDS = {
-    # Listed by AI Gateway model discovery, but currently rejected at launch
-    # with "The provided model identifier is invalid."
-    "databricks-claude-opus-4-8",
-}
-
-
 def _launchable_model_items(models: dict) -> list[tuple[str, str]]:
-    return [
-        (family, model_id)
-        for family, model_id in models.items()
-        if model_id and model_id not in E2E_EXCLUDED_MODEL_IDS
-    ]
+    return [(family, model_id) for family, model_id in models.items() if model_id]
 
 
 # ---------------------------------------------------------------------------
