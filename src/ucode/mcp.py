@@ -352,6 +352,31 @@ def discover_external_mcp_connection_names(workspace: str, profile: str | None =
     return external_mcp_connection_names(list_databricks_connections(workspace, profile))
 
 
+def _normalize_workspace_title(text: str) -> str:
+    """Collapse a Databricks workspace title to lowercase alphanumerics joined
+    by single hyphens, trimmed at the edges. Output is safe to use as an MCP
+    server-name token across every supported agent CLI."""
+    chars: list[str] = []
+    for ch in text.lower():
+        if ch.isalnum():
+            chars.append(ch)
+        elif chars and chars[-1] != "-":
+            chars.append("-")
+    return "".join(chars).strip("-")
+
+
+def _genie_server_name(title: str, space_id: str, taken: set[str]) -> str:
+    """Prefer a friendly name derived from the Genie space title; fall back to
+    the raw space_id when there is no title or the derived name collides with
+    one we already emitted."""
+    slug = _normalize_workspace_title(title) if title else ""
+    if slug:
+        candidate = f"databricks-genie-{slug}"
+        if candidate not in taken:
+            return candidate
+    return f"databricks-genie-{space_id}"
+
+
 def genie_mcp_servers(spaces: list[dict], workspace: str) -> list[dict]:
     servers: list[dict] = []
     seen_names: set[str] = set()
@@ -359,16 +384,18 @@ def genie_mcp_servers(spaces: list[dict], workspace: str) -> list[dict]:
         space_id = space.get("space_id")
         if not isinstance(space_id, str) or not space_id.strip():
             continue
-        title = space.get("title")
-        server_name = f"databricks-genie-{space_id.strip()}"
+        space_id = space_id.strip()
+        raw_title = space.get("title")
+        title = raw_title.strip() if isinstance(raw_title, str) and raw_title.strip() else ""
+        server_name = _genie_server_name(title, space_id, seen_names)
         if server_name in seen_names:
             continue
         seen_names.add(server_name)
         servers.append(
             {
                 "name": server_name,
-                "title": title.strip() if isinstance(title, str) and title.strip() else space_id,
-                "url": f"{workspace}/api/2.0/mcp/genie/{space_id.strip()}",
+                "title": title or space_id,
+                "url": f"{workspace}/api/2.0/mcp/genie/{space_id}",
             }
         )
     return sorted(servers, key=lambda server: str(server["title"]).lower())
@@ -731,6 +758,7 @@ def _resolve_mcp_selection(
     selection: str,
     workspace: str,
     available_app_servers: list[dict] | None = None,
+    available_genie_servers: list[dict] | None = None,
 ) -> tuple[str, str]:
     if selection.startswith(APP_MCP_SELECTION_PREFIX):
         app_name = selection.removeprefix(APP_MCP_SELECTION_PREFIX)
@@ -745,10 +773,17 @@ def _resolve_mcp_selection(
         return f"databricks-app-{app_name}", url
 
     if selection.startswith(GENIE_SPACE_SELECTION_PREFIX):
-        space_id = selection.removeprefix(GENIE_SPACE_SELECTION_PREFIX)
-        if not space_id:
+        suffix = selection.removeprefix(GENIE_SPACE_SELECTION_PREFIX)
+        if not suffix:
             raise RuntimeError("missing Genie space id")
-        return f"databricks-genie-{space_id}", f"{workspace}/api/2.0/mcp/genie/{space_id}"
+        server_name = f"databricks-genie-{suffix}"
+        server = _servers_by_name(available_genie_servers or []).get(server_name)
+        if server:
+            url = server.get("url")
+            if isinstance(url, str) and url:
+                return server_name, url
+        # Fallback for legacy picker values that carried the raw space_id.
+        return server_name, f"{workspace}/api/2.0/mcp/genie/{suffix}"
 
     if selection.startswith(EXTERNAL_MCP_SELECTION_PREFIX):
         server_name = selection.removeprefix(EXTERNAL_MCP_SELECTION_PREFIX)
@@ -937,6 +972,7 @@ def configure_mcp_command() -> int:
                 selection,
                 workspace,
                 available_app_mcp_servers,
+                available_genie_mcp_servers,
             )
         except RuntimeError as exc:
             print_warning(f"Skipped MCP selection `{selection}`: {exc}.")

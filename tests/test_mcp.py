@@ -291,14 +291,40 @@ class TestMcpPicker:
             WS,
         ) == [
             {
-                "name": "databricks-genie-space-1",
+                "name": "databricks-genie-first-space",
                 "title": "First Space",
                 "url": f"{WS}/api/2.0/mcp/genie/space-1",
             },
             {
-                "name": "databricks-genie-space-2",
+                "name": "databricks-genie-second-space",
                 "title": "Second Space",
                 "url": f"{WS}/api/2.0/mcp/genie/space-2",
+            },
+        ]
+
+    def test_genie_server_name_falls_back_to_space_id_on_slug_collision(self):
+        assert mcp.genie_mcp_servers(
+            [
+                {"space_id": "space-1", "title": "New Space"},
+                {"space_id": "space-2", "title": "new space"},
+                {"space_id": "space-3", "title": ""},
+            ],
+            WS,
+        ) == [
+            {
+                "name": "databricks-genie-new-space",
+                "title": "New Space",
+                "url": f"{WS}/api/2.0/mcp/genie/space-1",
+            },
+            {
+                "name": "databricks-genie-space-2",
+                "title": "new space",
+                "url": f"{WS}/api/2.0/mcp/genie/space-2",
+            },
+            {
+                "name": "databricks-genie-space-3",
+                "title": "space-3",
+                "url": f"{WS}/api/2.0/mcp/genie/space-3",
             },
         ]
 
