@@ -81,6 +81,7 @@ class TestCodexWriteConfig:
         backup_path = tmp_path / "codex-ucode-config.backup.toml"
         monkeypatch.setattr(codex, "CODEX_CONFIG_PATH", config_path)
         monkeypatch.setattr(codex, "CODEX_BACKUP_PATH", backup_path)
+        monkeypatch.setattr(codex, "agent_version", lambda binary: "0.134.0")
         monkeypatch.setattr(codex, "save_state", lambda state: None)
 
         codex.write_tool_config({"workspace": WS, "codex_models": ["gpt-5"]})
@@ -107,6 +108,7 @@ class TestCodexWriteConfig:
         legacy_backup_path = tmp_path / "codex-legacy-config.backup.toml"
         monkeypatch.setattr(codex, "CODEX_CONFIG_PATH", profile_path)
         monkeypatch.setattr(codex, "CODEX_BACKUP_PATH", backup_path)
+        monkeypatch.setattr(codex, "agent_version", lambda binary: "0.134.0")
         monkeypatch.setattr(codex, "save_state", lambda state: None)
 
         codex.write_tool_config({"workspace": WS, "codex_models": ["gpt-5"]})
@@ -117,25 +119,71 @@ class TestCodexWriteConfig:
         assert doc["profiles"]["other"]["model_provider"] == "keep"
         assert legacy_backup_path.exists()
 
+    def test_writes_legacy_shared_config_when_codex_too_old(self, tmp_path, monkeypatch):
+        config_dir = tmp_path / ".codex"
+        legacy_path = config_dir / "config.toml"
+        profile_path = config_dir / "ucode.config.toml"
+        backup_path = tmp_path / "codex-ucode-config.backup.toml"
+        legacy_backup_path = tmp_path / "codex-config.backup.toml"
+        monkeypatch.setattr(codex, "CODEX_CONFIG_PATH", profile_path)
+        monkeypatch.setattr(codex, "CODEX_BACKUP_PATH", backup_path)
+        monkeypatch.setattr(codex, "LEGACY_CODEX_CONFIG_PATH", legacy_path)
+        monkeypatch.setattr(codex, "LEGACY_CODEX_BACKUP_PATH", legacy_backup_path)
+        monkeypatch.setattr(codex, "agent_version", lambda binary: "0.133.0")
+        monkeypatch.setattr(codex, "save_state", lambda state: None)
 
-class TestCodexMinimumVersion:
-    def test_no_error_when_codex_is_new_enough(self, monkeypatch):
+        codex.write_tool_config({"workspace": WS, "codex_models": ["gpt-5"]})
+
+        # Per-profile file must not be written for old Codex.
+        assert not profile_path.exists()
+        doc = read_toml_safe(legacy_path)
+        assert doc["profile"] == "ucode"
+        assert doc["profiles"]["ucode"]["model_provider"] == "ucode-databricks"
+        assert doc["profiles"]["ucode"]["model"] == "gpt-5"
+        provider = doc["model_providers"]["ucode-databricks"]
+        assert provider["base_url"] == f"{WS}/ai-gateway/codex/v1"
+        assert provider["wire_api"] == "responses"
+
+    def test_legacy_write_preserves_other_profiles_in_shared_config(self, tmp_path, monkeypatch):
+        config_dir = tmp_path / ".codex"
+        config_dir.mkdir()
+        legacy_path = config_dir / "config.toml"
+        legacy_path.write_text(
+            '[profiles.other]\nmodel_provider = "keep"\n',
+            encoding="utf-8",
+        )
+        profile_path = config_dir / "ucode.config.toml"
+        backup_path = tmp_path / "codex-ucode-config.backup.toml"
+        legacy_backup_path = tmp_path / "codex-config.backup.toml"
+        monkeypatch.setattr(codex, "CODEX_CONFIG_PATH", profile_path)
+        monkeypatch.setattr(codex, "CODEX_BACKUP_PATH", backup_path)
+        monkeypatch.setattr(codex, "LEGACY_CODEX_CONFIG_PATH", legacy_path)
+        monkeypatch.setattr(codex, "LEGACY_CODEX_BACKUP_PATH", legacy_backup_path)
+        monkeypatch.setattr(codex, "agent_version", lambda binary: "0.133.0")
+        monkeypatch.setattr(codex, "save_state", lambda state: None)
+
+        codex.write_tool_config({"workspace": WS, "codex_models": ["gpt-5"]})
+
+        doc = read_toml_safe(legacy_path)
+        assert doc["profiles"]["other"]["model_provider"] == "keep"
+        assert doc["profiles"]["ucode"]["model_provider"] == "ucode-databricks"
+
+
+class TestCodexLegacyLayoutDetection:
+    def test_new_codex_uses_modern_layout(self, monkeypatch):
         monkeypatch.setattr(codex, "agent_version", lambda binary: "0.134.0")
 
-        assert codex.minimum_version_error() is None
-        assert codex.required_update_message() is None
+        assert codex._use_legacy_layout() is False
 
-    def test_errors_when_codex_is_too_old(self, monkeypatch):
+    def test_old_codex_uses_legacy_layout(self, monkeypatch):
         monkeypatch.setattr(codex, "agent_version", lambda binary: "0.133.0")
 
-        assert "Codex CLI must be updated to 0.134.0 or newer" in codex.minimum_version_error()
-        assert "updating Codex is required" in codex.required_update_message()
+        assert codex._use_legacy_layout() is True
 
-    def test_unknown_version_does_not_block(self, monkeypatch):
+    def test_unknown_version_uses_modern_layout(self, monkeypatch):
         monkeypatch.setattr(codex, "agent_version", lambda binary: "unknown")
 
-        assert codex.minimum_version_error() is None
-        assert codex.required_update_message() is None
+        assert codex._use_legacy_layout() is False
 
 
 class TestCodexDefaultModel:

@@ -386,6 +386,7 @@ def validate_tool(tool: str) -> tuple[bool, str]:
 def validate_all_tools(state: dict) -> None:
     from rich.panel import Panel  # local to avoid bumping module-level deps
 
+    from ucode.agents.pi import PI_SETTINGS_BACKUP_PATH, PI_SETTINGS_PATH
     from ucode.config_io import restore_file
 
     console.print()
@@ -411,6 +412,9 @@ def validate_all_tools(state: dict) -> None:
             print_err(f"{spec['display']}: {err}")
             managed = bool(state.get("managed_configs", {}).get(tool))
             restore_file(spec["config_path"], spec["backup_path"], managed)
+            # Rollback settings.json for Pi
+            if tool == "pi":
+                restore_file(PI_SETTINGS_PATH, PI_SETTINGS_BACKUP_PATH, managed)
             available_tools.remove(tool)
     state["available_tools"] = available_tools
     save_state(state)

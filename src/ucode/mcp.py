@@ -8,6 +8,7 @@ import string
 import subprocess
 from collections.abc import Callable
 from typing import Any
+from urllib.parse import urlparse
 
 import questionary
 from prompt_toolkit.application import Application
@@ -29,8 +30,9 @@ from ucode.databricks import (
     list_databricks_apps,
     list_databricks_connections,
     list_genie_spaces,
+    workspace_hostname,
 )
-from ucode.state import load_state, save_state
+from ucode.state import load_full_state, load_state, save_state
 from ucode.ui import (
     print_note,
     print_section,
@@ -432,6 +434,61 @@ def _servers_by_name(mcp_servers: list[dict]) -> dict[str, dict]:
     return servers
 
 
+def _mcp_entry_url_host(entry: dict) -> str | None:
+    """Return the host of an MCP entry's URL, or ``None`` if missing/malformed."""
+    url = entry.get("url")
+    if not isinstance(url, str) or not url:
+        return None
+    try:
+        return urlparse(url).hostname
+    except ValueError:
+        return None
+
+
+def _partition_mcp_entries_by_workspace(
+    entries: list[dict], workspace: str
+) -> tuple[list[dict], list[dict]]:
+    """Split MCP entries into ones that belong to ``workspace`` and ones that don't."""
+    workspace_host = workspace_hostname(workspace)
+    current: list[dict] = []
+    foreign: list[dict] = []
+    for entry in entries:
+        if _mcp_entry_url_host(entry) == workspace_host:
+            current.append(entry)
+        else:
+            foreign.append(entry)
+    return current, foreign
+
+
+def _mcp_entries_only_in_other_workspaces(current_workspace: str) -> dict[str, set[str]]:
+    """Return ``{name: {client, ...}}`` for MCPs ucode tracks only in workspaces other than ``current_workspace``."""
+    full_state = load_full_state()
+    workspaces = full_state.get("workspaces")
+    if not isinstance(workspaces, dict):
+        return {}
+
+    current_names: set[str] = set()
+    current_bucket = workspaces.get(current_workspace)
+    if isinstance(current_bucket, dict):
+        for entry in current_bucket.get("mcp_servers") or []:
+            name = _server_name(entry)
+            if name:
+                current_names.add(name)
+
+    external_entries: dict[str, set[str]] = {}
+    for ws, bucket in workspaces.items():
+        if ws == current_workspace or not isinstance(bucket, dict):
+            continue
+        for entry in bucket.get("mcp_servers") or []:
+            name = _server_name(entry)
+            if not name or name in current_names:
+                continue
+            client_set = external_entries.setdefault(name, set())
+            for client in entry.get("clients") or []:
+                client_set.add(client)
+    return external_entries
+
+
 def _server_choice(name: str, checked: bool, title: str | None = None) -> questionary.Choice:
     return questionary.Choice(
         title=title or name,
@@ -743,11 +800,71 @@ def apply_mcp_server_changes(
     return changed
 
 
+def purge_cross_workspace_mcp_residue(state: dict, workspace: str) -> None:
+    installed = set(available_mcp_clients())
+
+    raw_mcp_servers = list(state.get("mcp_servers") or [])
+    current_mcp_servers, foreign_mcp_servers = _partition_mcp_entries_by_workspace(
+        raw_mcp_servers, workspace
+    )
+    if foreign_mcp_servers:
+        foreign_names = ", ".join(
+            (_server_name(server) or "(unnamed)") for server in foreign_mcp_servers
+        )
+        noun = "entry" if len(foreign_mcp_servers) == 1 else "entries"
+        print_warning(
+            f"Dropping {len(foreign_mcp_servers)} stale MCP {noun} "
+            f"not bound to this workspace: {foreign_names}."
+        )
+        for server in foreign_mcp_servers:
+            name = _server_name(server)
+            if not name:
+                continue
+            for client in server.get("clients") or []:
+                if client not in installed or client not in MCP_CLIENTS:
+                    continue
+                try:
+                    remove_client_mcp_server(client, name)
+                except RuntimeError as exc:
+                    print_warning(
+                        f"Failed to remove `{name}` from {MCP_CLIENTS[client]['display']}: {exc}"
+                    )
+        state["mcp_servers"] = current_mcp_servers
+        save_state(state)
+
+    other_ws_mcps = _mcp_entries_only_in_other_workspaces(workspace)
+    actually_removed: list[str] = []
+    for name in sorted(other_ws_mcps):
+        any_removed = False
+        for client in other_ws_mcps[name]:
+            if client not in installed or client not in MCP_CLIENTS:
+                continue
+            try:
+                removed_scopes = remove_client_mcp_server(client, name)
+            except RuntimeError as exc:
+                print_warning(
+                    f"Failed to remove `{name}` from {MCP_CLIENTS[client]['display']}: {exc}"
+                )
+                continue
+            if removed_scopes:
+                any_removed = True
+        if any_removed:
+            actually_removed.append(name)
+    if actually_removed:
+        noun = "entry" if len(actually_removed) == 1 else "entries"
+        print_warning(
+            f"Removed {len(actually_removed)} MCP {noun} left over from "
+            f"previously-configured workspaces: {', '.join(actually_removed)}."
+        )
+
+
 def configure_mcp_command() -> int:
     state = load_state()
     workspace = state.get("workspace")
     if not workspace:
         raise RuntimeError("Workspace is not configured. Run `ucode configure` first.")
+
+    purge_cross_workspace_mcp_residue(state, workspace)
 
     installed_clients = available_mcp_clients()
     if not installed_clients:

@@ -27,6 +27,8 @@ CODEX_CONFIG_DIR = Path.home() / ".codex"
 CODEX_PROFILE_NAME = "ucode"
 CODEX_CONFIG_PATH = CODEX_CONFIG_DIR / f"{CODEX_PROFILE_NAME}.config.toml"
 CODEX_BACKUP_PATH = APP_DIR / "codex-ucode-config.backup.toml"
+LEGACY_CODEX_CONFIG_PATH = CODEX_CONFIG_DIR / "config.toml"
+LEGACY_CODEX_BACKUP_PATH = APP_DIR / "codex-config.backup.toml"
 CODEX_MODEL_PROVIDER_NAME = "ucode-databricks"
 MINIMUM_CODEX_VERSION = (0, 134, 0)
 MINIMUM_CODEX_VERSION_TEXT = "0.134.0"
@@ -43,6 +45,13 @@ SPEC: ToolSpec = {
 MANAGED_KEYS: list[list[str]] = [
     ["model_provider"],
     ["model"],
+    ["model_providers", CODEX_MODEL_PROVIDER_NAME],
+    ["model_providers", CODEX_MODEL_PROVIDER_NAME, "http_headers"],
+]
+
+LEGACY_MANAGED_KEYS: list[list[str]] = [
+    ["profile"],
+    ["profiles", CODEX_PROFILE_NAME],
     ["model_providers", CODEX_MODEL_PROVIDER_NAME],
     ["model_providers", CODEX_MODEL_PROVIDER_NAME, "http_headers"],
 ]
@@ -68,58 +77,70 @@ def _installed_version_status() -> tuple[str, bool] | None:
     return version, parsed < MINIMUM_CODEX_VERSION
 
 
-def minimum_version_error() -> str | None:
-    status = _installed_version_status()
-    if status is None:
-        return None
-    version, is_too_old = status
-    if not is_too_old:
-        return None
-    return (
-        f"Codex CLI {version} is too old for ucode's Codex profile config. "
-        f"Codex CLI must be updated to {MINIMUM_CODEX_VERSION_TEXT} or newer; "
-        f"run `npm install -g {SPEC['package']}` or `ucode configure`."
-    )
+def _use_legacy_layout() -> bool:
+    """Return True when the installed Codex CLI predates per-profile config files.
+
+    Codex 0.134.0 introduced support for `--profile <name>` resolving to
+    `~/.codex/<name>.config.toml`. Older releases only honor a single
+    `~/.codex/config.toml` with `[profiles.<name>]` sections. When the version
+    is unknown we keep the new layout (matches the prior "unknown does not
+    block" semantic).
+    """
+    parsed = _parse_version(agent_version(SPEC["binary"]))
+    if parsed is None:
+        return False
+    return parsed < MINIMUM_CODEX_VERSION
 
 
-def required_update_message() -> str | None:
-    status = _installed_version_status()
-    if status is None:
-        return None
-    version, is_too_old = status
-    if not is_too_old:
-        return None
-    return (
-        f"Codex CLI {version} is older than required {MINIMUM_CODEX_VERSION_TEXT}; "
-        "updating Codex is required for ucode's Codex profile config."
-    )
+def _provider_block(workspace: str, databricks_profile: str | None) -> dict:
+    auth_command = build_auth_shell_command(workspace, databricks_profile)
+    base_url = build_tool_base_url("codex", workspace)
+    return {
+        "name": "Databricks AI Gateway",
+        "base_url": base_url,
+        "wire_api": "responses",
+        "http_headers": {
+            "User-Agent": f"ucode/{ucode_version()} codex/{agent_version('codex')}",
+        },
+        "auth": {
+            "command": "sh",
+            "args": ["-c", auth_command],
+            "timeout_ms": 5000,
+            "refresh_interval_ms": 900000,
+        },
+    }
 
 
 def render_overlay(
     workspace: str, model: str | None = None, databricks_profile: str | None = None
 ) -> dict:
-    auth_command = build_auth_shell_command(workspace, databricks_profile)
-    base_url = build_tool_base_url("codex", workspace)
     overlay: dict = {"model_provider": CODEX_MODEL_PROVIDER_NAME}
     if model:
         overlay["model"] = model
     overlay["model_providers"] = {
-        CODEX_MODEL_PROVIDER_NAME: {
-            "name": "Databricks AI Gateway",
-            "base_url": base_url,
-            "wire_api": "responses",
-            "http_headers": {
-                "User-Agent": f"ucode/{ucode_version()} codex/{agent_version('codex')}",
-            },
-            "auth": {
-                "command": "sh",
-                "args": ["-c", auth_command],
-                "timeout_ms": 5000,
-                "refresh_interval_ms": 900000,
-            },
-        }
+        CODEX_MODEL_PROVIDER_NAME: _provider_block(workspace, databricks_profile),
     }
     return overlay
+
+
+def render_legacy_overlay(
+    workspace: str, model: str | None = None, databricks_profile: str | None = None
+) -> dict:
+    """Overlay for Codex CLI < 0.134.0, which only reads `~/.codex/config.toml`.
+
+    The shared file uses `profile = "ucode"` to select `[profiles.ucode]`, which
+    points at the shared `[model_providers.ucode-databricks]` block.
+    """
+    profile_block: dict = {"model_provider": CODEX_MODEL_PROVIDER_NAME}
+    if model:
+        profile_block["model"] = model
+    return {
+        "profile": CODEX_PROFILE_NAME,
+        "profiles": {CODEX_PROFILE_NAME: profile_block},
+        "model_providers": {
+            CODEX_MODEL_PROVIDER_NAME: _provider_block(workspace, databricks_profile),
+        },
+    }
 
 
 def _legacy_config_path() -> Path:
@@ -157,11 +178,27 @@ def _remove_legacy_ucode_profile() -> None:
 
 
 def write_tool_config(state: dict, model: str | None = None) -> dict:
+    workspace = state["workspace"]
+    chosen_model = model or default_model(state)
+    databricks_profile = state.get("profile")
+
+    if _use_legacy_layout():
+        # Codex < 0.134.0 only reads ~/.codex/config.toml. Write the shared
+        # config with [profiles.ucode] + shared [model_providers.ucode-databricks]
+        # and skip the per-profile-file cleanup that would normally strip
+        # ucode's entry from the shared file.
+        backup_existing_file(LEGACY_CODEX_CONFIG_PATH, LEGACY_CODEX_BACKUP_PATH)
+        overlay = render_legacy_overlay(workspace, chosen_model, databricks_profile)
+        doc = read_toml_safe(LEGACY_CODEX_CONFIG_PATH)
+        deep_merge_dict(doc, overlay)
+        write_toml_file(LEGACY_CODEX_CONFIG_PATH, doc)
+        state = mark_tool_managed(state, "codex", LEGACY_MANAGED_KEYS)
+        save_state(state)
+        return state
+
     _remove_legacy_ucode_profile()
     backup_existing_file(CODEX_CONFIG_PATH, CODEX_BACKUP_PATH)
-    overlay = render_overlay(
-        state["workspace"], model or default_model(state), state.get("profile")
-    )
+    overlay = render_overlay(workspace, chosen_model, databricks_profile)
     doc = read_toml_safe(CODEX_CONFIG_PATH)
     deep_merge_dict(doc, overlay)
     write_toml_file(CODEX_CONFIG_PATH, doc)

@@ -52,7 +52,9 @@ from ucode.telemetry import agent_version, ucode_version
 PI_UCODE_HOME = APP_DIR / "pi-home"
 PI_CONFIG_DIR = PI_UCODE_HOME / ".pi" / "agent"
 PI_CONFIG_PATH = PI_CONFIG_DIR / "models.json"
+PI_SETTINGS_PATH = PI_CONFIG_DIR / "settings.json"
 PI_BACKUP_PATH = APP_DIR / "pi-models.backup.json"
+PI_SETTINGS_BACKUP_PATH = APP_DIR / "pi-settings.backup.json"
 
 SPEC: ToolSpec = {
     "binary": "pi",
@@ -184,9 +186,23 @@ def write_tool_config(
             providers.pop(stale, None)
     merged = deep_merge_dict(existing, overlay)
     write_json_file(PI_CONFIG_PATH, merged)
+    _write_settings(overlay["model"])
     state = mark_tool_managed(state, "pi", managed_keys)
     save_state(state)
     return state, token
+
+
+def _write_settings(model_selector: str) -> None:
+    # Pin defaultProvider/defaultModel in settings.json so Pi doesn't fall
+    # through to an env-key-backed provider (e.g. HF_TOKEN exposing
+    # huggingface) in `findInitialModel` when no --model is passed.
+    provider, _, model_id = model_selector.partition("/")
+    if not model_id:
+        return
+    backup_existing_file(PI_SETTINGS_PATH, PI_SETTINGS_BACKUP_PATH)
+    existing = read_json_safe(PI_SETTINGS_PATH)
+    merged = deep_merge_dict(existing, {"defaultProvider": provider, "defaultModel": model_id})
+    write_json_file(PI_SETTINGS_PATH, merged)
 
 
 def default_model(state: dict) -> str | None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import nullcontext
 from unittest.mock import patch
 
 from ucode.agents import pi
@@ -267,9 +268,13 @@ class TestWriteToolConfig:
         monkeypatch.setattr(config_io_mod, "APP_DIR", tmp_path)
         config_file = tmp_path / "models.json"
         backup_file = tmp_path / "pi-backup.json"
+        settings_file = tmp_path / "settings.json"
+        settings_backup_file = tmp_path / "pi-settings-backup.json"
         monkeypatch.setattr(pi_mod, "PI_CONFIG_PATH", config_file)
+        monkeypatch.setattr(pi_mod, "PI_SETTINGS_PATH", settings_file)
         monkeypatch.setattr(pi_mod, "PI_BACKUP_PATH", backup_file)
-        return pi_mod, config_file
+        monkeypatch.setattr(pi_mod, "PI_SETTINGS_BACKUP_PATH", settings_backup_file)
+        return pi_mod, config_file, settings_file, settings_backup_file
 
     def _state(self, **overrides) -> dict:
         state = {
@@ -284,7 +289,7 @@ class TestWriteToolConfig:
         return state
 
     def test_stale_managed_providers_removed_before_merge(self, tmp_path, monkeypatch):
-        pi_mod, config_file = self._setup(tmp_path, monkeypatch)
+        pi_mod, config_file, _, _ = self._setup(tmp_path, monkeypatch)
 
         stale = {
             "providers": {
@@ -312,7 +317,7 @@ class TestWriteToolConfig:
         """Earlier ucode versions wrote `databricks-anthropic`, `databricks-codex`,
         and `databricks-oss` providers. They must be stripped on the next write
         so users don't end up with stale entries pointing at routes that 400."""
-        pi_mod, config_file = self._setup(tmp_path, monkeypatch)
+        pi_mod, config_file, _, _ = self._setup(tmp_path, monkeypatch)
 
         config_file.write_text(
             json.dumps(
@@ -339,7 +344,7 @@ class TestWriteToolConfig:
         assert "databricks-claude" in written_providers
 
     def test_config_written_with_correct_model_and_token(self, tmp_path, monkeypatch):
-        pi_mod, config_file = self._setup(tmp_path, monkeypatch)
+        pi_mod, config_file, _, _ = self._setup(tmp_path, monkeypatch)
 
         with (
             patch("ucode.agents.pi.get_databricks_token", return_value="tok"),
@@ -350,3 +355,61 @@ class TestWriteToolConfig:
         written = json.loads(config_file.read_text())
         assert written["model"] == "databricks-claude/claude-sonnet"
         assert written["providers"]["databricks-claude"]["apiKey"] == "tok"
+
+    def test_settings_pins_default_provider_and_model(self, tmp_path, monkeypatch):
+        # Without this, Pi's `findInitialModel` can fall through to a built-in
+        # provider when an unrelated env var (e.g. HF_TOKEN) makes one look
+        # auth-configured. Pinning the default keeps Pi on our provider.
+        pi_mod, _, settings_file, _ = self._setup(tmp_path, monkeypatch)
+
+        with (
+            patch("ucode.agents.pi.get_databricks_token", return_value="tok"),
+            patch("ucode.agents.pi.save_state"),
+        ):
+            pi_mod.write_tool_config(self._state(), "claude-sonnet", token="tok")
+
+        settings = json.loads(settings_file.read_text())
+        assert settings["defaultProvider"] == "databricks-claude"
+        assert settings["defaultModel"] == "claude-sonnet"
+
+    def test_pre_existing_settings_are_backed_up_before_first_write(self, tmp_path, monkeypatch):
+        pi_mod, _, settings_file, settings_backup_file = self._setup(tmp_path, monkeypatch)
+
+        original = '{"theme": "Default Dark", "defaultProvider": "openai"}'
+        settings_file.parent.mkdir(parents=True, exist_ok=True)
+        settings_file.write_text(original, encoding="utf-8")
+
+        with (
+            patch("ucode.agents.pi.get_databricks_token", return_value="tok"),
+            patch("ucode.agents.pi.save_state"),
+        ):
+            pi_mod.write_tool_config(self._state(), "claude-sonnet", token="tok")
+
+        assert settings_backup_file.read_text(encoding="utf-8") == original
+        # The on-disk settings still get the ucode pin applied via deep_merge.
+        merged = json.loads(settings_file.read_text())
+        assert merged["defaultProvider"] == "databricks-claude"
+        assert merged["theme"] == "Default Dark"
+
+
+class TestValidateAllToolsPiRollback:
+    def test_failed_pi_validation_rolls_back_settings(self, tmp_path, monkeypatch):
+        import ucode.agents as agents_mod
+        import ucode.agents.pi as pi_mod
+
+        settings_file = tmp_path / "settings.json"
+        settings_file.write_text("{}", encoding="utf-8")
+        monkeypatch.setattr(pi_mod, "PI_SETTINGS_PATH", settings_file)
+        monkeypatch.setattr(pi_mod, "PI_SETTINGS_BACKUP_PATH", tmp_path / "settings.backup.json")
+        # Keep the generic models.json rollback off the user's real config dir.
+        monkeypatch.setitem(agents_mod.TOOL_SPECS["pi"], "config_path", tmp_path / "models.json")
+        monkeypatch.setitem(
+            agents_mod.TOOL_SPECS["pi"], "backup_path", tmp_path / "models.backup.json"
+        )
+        monkeypatch.setattr(agents_mod, "validate_tool", lambda tool: (False, "boom"))
+        monkeypatch.setattr(agents_mod, "save_state", lambda s: None)
+        monkeypatch.setattr(agents_mod, "spinner", lambda *_a, **_kw: nullcontext())
+
+        agents_mod.validate_all_tools({"available_tools": ["pi"], "managed_configs": {"pi": True}})
+
+        assert not settings_file.exists()

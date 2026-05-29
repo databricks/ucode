@@ -115,6 +115,23 @@ class TestBuildSharedBaseUrls:
         assert urls["codex"] == f"{WS}/ai-gateway/codex/v1"
 
 
+class TestDiscoverClaudeModels:
+    def test_selects_opus_4_8_when_advertised(self, monkeypatch):
+        payload = {
+            "data": [
+                {"id": "databricks-claude-opus-4-7"},
+                {"id": "databricks-claude-opus-4-8"},
+                {"id": "databricks-claude-sonnet-4-6"},
+            ]
+        }
+        monkeypatch.setattr(db_mod, "_http_get_json", lambda url, token: (payload, None))
+
+        models, reason = db_mod.discover_claude_models(WS, "token")
+
+        assert reason is None
+        assert models["opus"] == "databricks-claude-opus-4-8"
+
+
 class TestBuildAuthShellCommand:
     def test_contains_workspace(self):
         cmd = build_auth_shell_command(WS)
