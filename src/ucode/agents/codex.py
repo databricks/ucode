@@ -177,9 +177,25 @@ def _remove_legacy_ucode_profile() -> None:
         write_toml_file(path, doc)
 
 
+def _openai_model_id(model: str | None) -> str | None:
+    """Map Databricks GPT endpoint ids to OpenAI model ids for Codex metadata."""
+    if not model:
+        return model
+    match = re.fullmatch(r"databricks-gpt-(\d+)(?:-(\d+))?(?:-(\d+))?((?:-.+)?)", model)
+    if not match:
+        return model
+    major, minor, patch, suffix = match.groups()
+    version = major
+    if minor is not None:
+        version += f".{minor}"
+    if patch is not None:
+        version += f".{patch}"
+    return f"gpt-{version}{suffix or ''}"
+
+
 def write_tool_config(state: dict, model: str | None = None) -> dict:
     workspace = state["workspace"]
-    chosen_model = model or default_model(state)
+    chosen_model = _openai_model_id(model or default_model(state))
     databricks_profile = state.get("profile")
 
     if _use_legacy_layout():
@@ -208,8 +224,36 @@ def write_tool_config(state: dict, model: str | None = None) -> dict:
 
 
 def default_model(state: dict) -> str | None:
+    """Pick the newest GPT model when multiple are available.
+
+    The discovery list is alphabetically sorted, which can put
+    "databricks-gpt-5" ahead of "databricks-gpt-5-5". Prefer the
+    highest semantic version instead. Falls back to the first
+    discovered entry when parsing fails.
+    """
     codex_models = state.get("codex_models") or []
-    return codex_models[0] if codex_models else None
+    if not codex_models:
+        return None
+
+    def _gpt_version_key(mid: str) -> tuple[int, int, int, int]:
+        try:
+            name = mid.split("/")[-1]
+            m = re.search(r"gpt-(\d+)(?:[.-](\d+))?(?:[.-](\d+))?", name)
+            if not m:
+                return (0, 0, 0, 0)
+            major = int(m.group(1) or 0)
+            minor = int(m.group(2) or 0)
+            patch = int(m.group(3) or 0)
+            suffix = name[m.end() :]
+            base_bonus = 1 if not suffix else 0
+            return (major, minor, patch, base_bonus)
+        except Exception:
+            return (0, 0, 0, 0)
+
+    try:
+        return max(codex_models, key=_gpt_version_key)
+    except ValueError:
+        return codex_models[0]
 
 
 def launch(state: dict, tool_args: list[str]) -> None:
