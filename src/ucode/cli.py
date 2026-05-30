@@ -28,6 +28,8 @@ from ucode.agents import (
 from ucode.agents.pi import PI_SETTINGS_BACKUP_PATH, PI_SETTINGS_PATH
 from ucode.config_io import restore_file, set_dry_run
 from ucode.databricks import (
+    CLAUDE_FAMILIES,
+    DEFAULT_CLAUDE_MODEL_PREFIX,
     build_shared_base_urls,
     discover_claude_models,
     discover_codex_models,
@@ -39,6 +41,7 @@ from ucode.databricks import (
     get_databricks_token,
     install_databricks_cli,
     normalize_workspace_url,
+    resolve_claude_model_prefix,
     run_databricks_login,
 )
 from ucode.mcp import (
@@ -47,7 +50,7 @@ from ucode.mcp import (
     purge_cross_workspace_mcp_residue,
     revert_mcp_configs,
 )
-from ucode.state import STATE_PATH, clear_state, load_state, save_state
+from ucode.state import STATE_PATH, clear_state, load_full_state, load_state, save_state
 from ucode.ui import (
     console,
     heading,
@@ -146,6 +149,7 @@ def configure_shared_state(
     profile: str | None = None,
     tools: list[str] | None = None,
     force_login: bool = False,
+    model_prefix: str | None = None,
 ) -> dict:
     """Log into Databricks, enforce AI Gateway v2, fetch model lists, persist state.
 
@@ -178,12 +182,22 @@ def configure_shared_state(
     want_gemini = fetch_all or "gemini" in tools or "opencode" in tools or "pi" in tools
     want_codex = fetch_all or "codex" in tools or "copilot" in tools or "pi" in tools
 
+    # Resolve the Claude endpoint name prefix (--model-prefix flag > this
+    # workspace's persisted value > built-in default) so discovery scopes to the
+    # right family of endpoints — e.g. Bedrock-backed `acme-bedrock-claude-*`
+    # instead of hosted `databricks-claude-*`.
+    existing_ws_state = load_full_state().get("workspaces", {}).get(workspace, {})
+    claude_model_prefix = resolve_claude_model_prefix(existing_ws_state, override=model_prefix)
+
     claude_reason: str | None = None
     gemini_reason: str | None = None
     codex_reason: str | None = None
+    claude_allowed: list[str] = []
     with spinner("Fetching available models..."):
         if want_claude:
-            claude_models, claude_reason = discover_claude_models(workspace, token)
+            claude_models, claude_allowed, claude_reason = discover_claude_models(
+                workspace, token, claude_model_prefix
+            )
         else:
             claude_models = {}
         if want_gemini:
@@ -196,7 +210,7 @@ def configure_shared_state(
             codex_models = []
     opencode_models: dict[str, list[str]] = {}
     if claude_models:
-        opencode_models["anthropic"] = list(claude_models.values())
+        opencode_models["anthropic"] = claude_allowed or list(claude_models.values())
     if gemini_models:
         opencode_models["gemini"] = gemini_models
 
@@ -210,6 +224,8 @@ def configure_shared_state(
     state["base_urls"] = build_shared_base_urls(workspace)
     if want_claude:
         state["claude_models"] = claude_models
+        state["claude_allowed_models"] = claude_allowed
+        state["claude_model_prefix"] = claude_model_prefix
     if want_gemini:
         state["gemini_models"] = gemini_models
     if want_codex:
@@ -236,13 +252,20 @@ def _configure_shared_workspace_states(
     tools: list[str] | None,
     *,
     force_login: bool,
+    model_prefix: str | None = None,
 ) -> list[dict]:
     if not workspaces:
         raise RuntimeError("At least one workspace must be provided.")
     states: list[dict] = []
     for workspace, profile in workspaces:
         states.append(
-            configure_shared_state(workspace, profile=profile, tools=tools, force_login=force_login)
+            configure_shared_state(
+                workspace,
+                profile=profile,
+                tools=tools,
+                force_login=force_login,
+                model_prefix=model_prefix,
+            )
         )
     return states
 
@@ -251,6 +274,7 @@ def configure_workspace_command(
     tool: str | None = None,
     selected_tools: list[str] | None = None,
     workspaces: list[tuple[str, str | None]] | None = None,
+    model_prefix: str | None = None,
 ) -> int:
     if tool is not None and selected_tools is not None:
         raise RuntimeError("Use either --agent or --agents, not both.")
@@ -258,7 +282,9 @@ def configure_workspace_command(
     workspace_entries = workspaces or [_prompt_for_configuration(tool)]
 
     if tool is not None:
-        states = _configure_shared_workspace_states(workspace_entries, [tool], force_login=True)
+        states = _configure_shared_workspace_states(
+            workspace_entries, [tool], force_login=True, model_prefix=model_prefix
+        )
         state = states[0]
         state = configure_single_tool(tool, state)
         spec = TOOL_SPECS[tool]
@@ -285,7 +311,9 @@ def configure_workspace_command(
             raise RuntimeError(f"{spec['display']} validation failed — config reverted.")
         return 0
 
-    states = _configure_shared_workspace_states(workspace_entries, selected_tools, force_login=True)
+    states = _configure_shared_workspace_states(
+        workspace_entries, selected_tools, force_login=True, model_prefix=model_prefix
+    )
     state = states[0]
     save_state(state)
 
@@ -361,6 +389,23 @@ def status() -> int:
     profile = state.get("profile")
     if profile:
         print_kv("CLI profile", profile)
+
+    claude_models = state.get("claude_models") or {}
+    if claude_models:
+        print_heading("Claude Models")
+        prefix = state.get("claude_model_prefix")
+        if isinstance(prefix, str) and prefix and prefix != DEFAULT_CLAUDE_MODEL_PREFIX:
+            print_kv("Endpoint prefix", prefix)
+        allowed = [m for m in (state.get("claude_allowed_models") or []) if isinstance(m, str)]
+        for family in CLAUDE_FAMILIES:
+            default = claude_models.get(family)
+            if not default:
+                continue
+            extras = [m for m in allowed if m != default and f"-{family}-" in m]
+            label = f"{default}  (+{len(extras)} more)" if extras else default
+            print_kv(family.capitalize(), label)
+        if allowed:
+            print_kv("Selectable models", str(len(allowed)))
 
     print_heading("Coding Agents")
     for tool, spec in TOOL_SPECS.items():
@@ -591,6 +636,17 @@ def configure(
             help="Configure a comma-separated list of workspaces without prompting.",
         ),
     ] = None,
+    model_prefix: Annotated[
+        str | None,
+        typer.Option(
+            "--model-prefix",
+            help=(
+                "Prefix for custom Claude endpoint names before the family token "
+                "(e.g. acme-bedrock-claude-). Scopes discovery to those endpoints and "
+                "excludes hosted databricks-claude-* models. Persisted for later runs."
+            ),
+        ),
+    ] = None,
 ) -> None:
     """Configure workspace URL and AI Gateway."""
     if ctx.invoked_subcommand is not None:
@@ -605,24 +661,30 @@ def configure(
             tool = normalize_tool(agent)
             install_tool_binary(tool, strict=True, update_existing=True)
             if workspace_entries is None:
-                configure_workspace_command(tool)
+                configure_workspace_command(tool, model_prefix=model_prefix)
             else:
-                configure_workspace_command(tool, workspaces=workspace_entries)
+                configure_workspace_command(
+                    tool, workspaces=workspace_entries, model_prefix=model_prefix
+                )
         elif agents is not None:
             selected_tools = _parse_agents_option(agents)
             if workspace_entries is None:
-                configure_workspace_command(selected_tools=selected_tools)
+                configure_workspace_command(
+                    selected_tools=selected_tools, model_prefix=model_prefix
+                )
             else:
                 configure_workspace_command(
-                    selected_tools=selected_tools, workspaces=workspace_entries
+                    selected_tools=selected_tools,
+                    workspaces=workspace_entries,
+                    model_prefix=model_prefix,
                 )
         else:
             # Tool binaries are installed after the user picks which agents
             # they want, in configure_workspace_command.
             if workspace_entries is None:
-                configure_workspace_command()
+                configure_workspace_command(model_prefix=model_prefix)
             else:
-                configure_workspace_command(workspaces=workspace_entries)
+                configure_workspace_command(workspaces=workspace_entries, model_prefix=model_prefix)
     except RuntimeError as exc:
         print_err(str(exc))
         raise typer.Exit(1) from None

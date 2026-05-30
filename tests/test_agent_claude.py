@@ -92,6 +92,43 @@ class TestRenderOverlay:
         assert len(env_keys) > 0
 
 
+class TestRenderOverlayAvailableModels:
+    def test_allowlist_combines_ids_and_family_aliases(self):
+        models = {
+            "opus": "acme-bedrock-claude-opus-4-8",
+            "sonnet": "acme-bedrock-claude-sonnet-4-6",
+        }
+        allowed = [
+            "acme-bedrock-claude-opus-4-8",
+            "acme-bedrock-claude-opus-4-7",
+            "acme-bedrock-claude-sonnet-4-6",
+        ]
+        overlay, keys = claude.render_overlay(
+            WS, "s4", claude_models=models, claude_allowed=allowed
+        )
+        available = overlay["availableModels"]
+        # family aliases for families that have a default
+        assert "opus" in available
+        assert "sonnet" in available
+        assert "haiku" not in available  # no haiku default
+        # every allowed id, including the extra opus version
+        assert "acme-bedrock-claude-opus-4-7" in available
+        assert "acme-bedrock-claude-opus-4-8" in available
+        assert ["availableModels"] in keys
+
+    def test_falls_back_to_defaults_when_no_allowlist(self):
+        models = {"opus": "acme-bedrock-claude-opus-4-8"}
+        overlay, _ = claude.render_overlay(WS, "s4", claude_models=models)
+        available = overlay["availableModels"]
+        assert "acme-bedrock-claude-opus-4-8" in available
+        assert "opus" in available
+
+    def test_no_available_models_key_when_empty(self):
+        overlay, keys = claude.render_overlay(WS, "s4")
+        assert "availableModels" not in overlay
+        assert ["availableModels"] not in keys
+
+
 class TestRenderOverlayUserAgent:
     def _ua(self, monkeypatch) -> str:
         monkeypatch.setattr(claude, "ucode_version", lambda: "0.1.0")

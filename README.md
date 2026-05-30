@@ -61,6 +61,25 @@ ucode configure --workspaces https://first.databricks.com,https://second.databri
 
 When multiple workspaces are provided, `ucode` logs into and saves state for each workspace. Launch commands such as `ucode codex` use the first workspace in the list.
 
+### Custom Claude model endpoints
+
+By default `ucode` discovers Claude models named `databricks-claude-<family>-<version>` on the
+AI Gateway anthropic route and picks the newest per family (`opus`, `sonnet`, `haiku`). If your
+workspace exposes Claude through custom serving endpoints — for example Bedrock-backed models
+named `acme-bedrock-claude-opus-4-8` — pass `--model-prefix` with the shared prefix before the
+family token:
+
+```bash
+ucode configure --agents claude --model-prefix acme-bedrock-claude-
+```
+
+This scopes discovery to those endpoints (the built-in `databricks-claude-*` hosted models no
+longer match the prefix, so they are excluded), picks the newest version per family as the
+default, and keeps every matching endpoint selectable. `ucode` writes the matching set to Claude
+Code's `availableModels` allowlist so the `/model` picker is restricted to them, and persists the
+prefix to state so later `ucode configure` runs reuse it without the flag. `ucode status` shows
+the resolved prefix, per-family defaults, and the number of selectable models.
+
 ### MCP servers (optional)
 
 ```bash
