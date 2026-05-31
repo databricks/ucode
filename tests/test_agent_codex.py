@@ -215,9 +215,16 @@ class TestCodexDefaultModel:
 
         assert codex.default_model({"codex_models": models}) == "gpt-5-5"
 
+    def test_namespaced_models_use_same_version_parser(self):
+        models = ["served-models/databricks-gpt-5", "served-models/databricks-gpt-5-5"]
+
+        assert codex.default_model({"codex_models": models}) == "served-models/databricks-gpt-5-5"
+
     def test_openai_model_id_maps_databricks_naming(self):
         assert codex._openai_model_id("databricks-gpt-5-5") == "gpt-5.5"
         assert codex._openai_model_id("databricks-gpt-5-5-mini") == "gpt-5.5-mini"
+        assert codex._openai_model_id("databricks-gpt-4o") == "gpt-4o"
+        assert codex._openai_model_id("served-models/databricks-gpt-5-5") == "gpt-5.5"
         assert codex._openai_model_id("gpt-5.5") == "gpt-5.5"
 
 

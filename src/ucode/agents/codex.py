@@ -56,6 +56,8 @@ LEGACY_MANAGED_KEYS: list[list[str]] = [
     ["model_providers", CODEX_MODEL_PROVIDER_NAME, "http_headers"],
 ]
 
+_GPT_RE = re.compile(r"(?:databricks-)?gpt-(\d+)(?:[.-](\d+))?(?:[.-](\d+))?(-.+|[a-z].*)?")
+
 
 def is_update_available() -> tuple[str, str] | None:
     return available_npm_package_update(SPEC["package"])
@@ -179,18 +181,31 @@ def _remove_legacy_ucode_profile() -> None:
 
 def _openai_model_id(model: str | None) -> str | None:
     """Map Databricks GPT endpoint ids to OpenAI model ids for Codex metadata."""
-    if not model:
+    parsed = _parse_gpt(model)
+    if parsed is None:
         return model
-    match = re.fullmatch(r"databricks-gpt-(\d+)(?:-(\d+))?(?:-(\d+))?((?:-.+)?)", model)
-    if not match:
-        return model
-    major, minor, patch, suffix = match.groups()
-    version = major
+    major, minor, patch, suffix = parsed
+    version = str(major)
     if minor is not None:
         version += f".{minor}"
     if patch is not None:
         version += f".{patch}"
-    return f"gpt-{version}{suffix or ''}"
+    return f"gpt-{version}{suffix}"
+
+
+def _parse_gpt(model: str | None) -> tuple[int, int | None, int | None, str] | None:
+    if not model:
+        return None
+    match = _GPT_RE.fullmatch(model.split("/")[-1])
+    if not match:
+        return None
+    major, minor, patch, suffix = match.groups()
+    return (
+        int(major),
+        int(minor) if minor is not None else None,
+        int(patch) if patch is not None else None,
+        suffix or "",
+    )
 
 
 def write_tool_config(state: dict, model: str | None = None) -> dict:
@@ -236,24 +251,14 @@ def default_model(state: dict) -> str | None:
         return None
 
     def _gpt_version_key(mid: str) -> tuple[int, int, int, int]:
-        try:
-            name = mid.split("/")[-1]
-            m = re.search(r"gpt-(\d+)(?:[.-](\d+))?(?:[.-](\d+))?", name)
-            if not m:
-                return (0, 0, 0, 0)
-            major = int(m.group(1) or 0)
-            minor = int(m.group(2) or 0)
-            patch = int(m.group(3) or 0)
-            suffix = name[m.end() :]
-            base_bonus = 1 if not suffix else 0
-            return (major, minor, patch, base_bonus)
-        except Exception:
+        parsed = _parse_gpt(mid)
+        if parsed is None:
             return (0, 0, 0, 0)
+        major, minor, patch, suffix = parsed
+        base_bonus = 1 if not suffix else 0
+        return (major, minor or 0, patch or 0, base_bonus)
 
-    try:
-        return max(codex_models, key=_gpt_version_key)
-    except ValueError:
-        return codex_models[0]
+    return max(codex_models, key=_gpt_version_key)
 
 
 def launch(state: dict, tool_args: list[str]) -> None:
