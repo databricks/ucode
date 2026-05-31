@@ -58,6 +58,13 @@ LEGACY_MANAGED_KEYS: list[list[str]] = [
 
 _GPT_RE = re.compile(r"(?:databricks-)?gpt-(\d+)(?:[.-](\d+))?(?:[.-](\d+))?(-.+|[a-z].*)?")
 
+# These models should use the Databricks ID, not the OpenAI ID, as the OpenAI
+# ID is incompatible with Codex.
+CODEX_OPENAI_ID_INCOMPATIBLE_MODELS = {
+    "databricks-gpt-5-2-codex",
+    "databricks-gpt-5-4-nano",
+}
+
 
 def is_update_available() -> tuple[str, str] | None:
     return available_npm_package_update(SPEC["package"])
@@ -193,6 +200,12 @@ def _openai_model_id(model: str | None) -> str | None:
     return f"gpt-{version}{suffix}"
 
 
+def _codex_model_id(model: str | None) -> str | None:
+    if model in CODEX_OPENAI_ID_INCOMPATIBLE_MODELS:
+        return model
+    return _openai_model_id(model)
+
+
 def _parse_gpt(model: str | None) -> tuple[int, int | None, int | None, str] | None:
     if not model:
         return None
@@ -210,7 +223,7 @@ def _parse_gpt(model: str | None) -> tuple[int, int | None, int | None, str] | N
 
 def write_tool_config(state: dict, model: str | None = None) -> dict:
     workspace = state["workspace"]
-    chosen_model = _openai_model_id(model or default_model(state))
+    chosen_model = _codex_model_id(model or default_model(state))
     databricks_profile = state.get("profile")
 
     if _use_legacy_layout():

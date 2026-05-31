@@ -106,6 +106,24 @@ class TestCodexWriteConfig:
         doc = read_toml_safe(config_path)
         assert doc["model"] == "gpt-5.5"
 
+    def test_preserves_databricks_model_id_when_openai_id_is_incompatible(
+        self, tmp_path, monkeypatch
+    ):
+        config_path = tmp_path / ".codex" / "ucode.config.toml"
+        backup_path = tmp_path / "codex-ucode-config.backup.toml"
+        monkeypatch.setattr(codex, "CODEX_CONFIG_PATH", config_path)
+        monkeypatch.setattr(codex, "CODEX_BACKUP_PATH", backup_path)
+        monkeypatch.setattr(codex, "agent_version", lambda binary: "0.134.0")
+        monkeypatch.setattr(codex, "save_state", lambda state: None)
+
+        codex.write_tool_config(
+            {"workspace": WS, "codex_models": ["databricks-gpt-5-2-codex"]},
+            "databricks-gpt-5-2-codex",
+        )
+
+        doc = read_toml_safe(config_path)
+        assert doc["model"] == "databricks-gpt-5-2-codex"
+
     def test_removes_legacy_ucode_profile_from_shared_config(self, tmp_path, monkeypatch):
         config_dir = tmp_path / ".codex"
         config_dir.mkdir()
@@ -226,6 +244,11 @@ class TestCodexDefaultModel:
         assert codex._openai_model_id("databricks-gpt-4o") == "gpt-4o"
         assert codex._openai_model_id("served-models/databricks-gpt-5-5") == "gpt-5.5"
         assert codex._openai_model_id("gpt-5.5") == "gpt-5.5"
+
+    def test_codex_model_id_preserves_openai_incompatible_models(self):
+        assert codex._codex_model_id("databricks-gpt-5-2-codex") == "databricks-gpt-5-2-codex"
+        assert codex._codex_model_id("databricks-gpt-5-4-nano") == "databricks-gpt-5-4-nano"
+        assert codex._codex_model_id("databricks-gpt-5-5") == "gpt-5.5"
 
 
 class TestCodexValidateCmd:
