@@ -25,6 +25,22 @@ class TestRenderOverlay:
         overlay, _ = claude.render_overlay(WS, "databricks-claude-sonnet-4")
         assert overlay["env"]["ANTHROPIC_MODEL"] == "databricks-claude-sonnet-4"
 
+    def test_adds_1m_suffix_for_opus_4_6_and_later(self):
+        overlay, _ = claude.render_overlay(WS, "databricks-claude-opus-4-7")
+        assert overlay["env"]["ANTHROPIC_MODEL"] == "databricks-claude-opus-4-7[1m]"
+
+    def test_adds_1m_suffix_for_sonnet_4_6_and_later(self):
+        overlay, _ = claude.render_overlay(WS, "databricks-claude-sonnet-4-7")
+        assert overlay["env"]["ANTHROPIC_MODEL"] == "databricks-claude-sonnet-4-7[1m]"
+
+    def test_does_not_add_1m_suffix_for_other_models(self):
+        overlay, _ = claude.render_overlay(WS, "databricks-claude-haiku-4-6")
+        assert overlay["env"]["ANTHROPIC_MODEL"] == "databricks-claude-haiku-4-6"
+
+    def test_does_not_duplicate_1m_suffix(self):
+        overlay, _ = claude.render_overlay(WS, "databricks-claude-opus-4-7[1m]")
+        assert overlay["env"]["ANTHROPIC_MODEL"] == "databricks-claude-opus-4-7[1m]"
+
     def test_sets_anthropic_base_url(self):
         overlay, _ = claude.render_overlay(WS, "s4")
         assert overlay["env"]["ANTHROPIC_BASE_URL"] == f"{WS}/ai-gateway/anthropic"
@@ -43,12 +59,16 @@ class TestRenderOverlay:
         assert WS in overlay["apiKeyHelper"]
 
     def test_model_overrides_when_all_provided(self):
-        models = {"sonnet": "s4", "opus": "o4", "haiku": "h4"}
+        models = {
+            "sonnet": "databricks-claude-sonnet-4-6",
+            "opus": "databricks-claude-opus-4-7",
+            "haiku": "databricks-claude-haiku-4-6",
+        }
         overlay, _ = claude.render_overlay(WS, "s4", claude_models=models)
         env = overlay["env"]
-        assert env["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "s4"
-        assert env["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "o4"
-        assert env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "h4"
+        assert env["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "databricks-claude-sonnet-4-6[1m]"
+        assert env["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "databricks-claude-opus-4-7[1m]"
+        assert env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "databricks-claude-haiku-4-6"
 
     def test_model_overrides_partial(self):
         models = {"sonnet": "s4"}

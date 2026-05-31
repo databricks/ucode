@@ -41,7 +41,12 @@ from ucode.databricks import (
     normalize_workspace_url,
     run_databricks_login,
 )
-from ucode.mcp import MCP_CLIENTS, configure_mcp_command, revert_mcp_configs
+from ucode.mcp import (
+    MCP_CLIENTS,
+    configure_mcp_command,
+    purge_cross_workspace_mcp_residue,
+    revert_mcp_configs,
+)
 from ucode.state import STATE_PATH, clear_state, load_state, save_state
 from ucode.ui import (
     console,
@@ -152,6 +157,7 @@ def configure_shared_state(
     don't error out. If ``None``, we resolve it from the host after login.
     """
     workspace = normalize_workspace_url(workspace)
+    previous_workspace = load_state().get("workspace")
     fetch_all = tools is None
     if force_login:
         run_databricks_login(workspace, profile)
@@ -211,6 +217,10 @@ def configure_shared_state(
     if fetch_all or "opencode" in tools:
         state["opencode_models"] = opencode_models
     save_state(state)
+    # Scrub MCP entries that ucode wrote for the previous workspace so the new
+    # workspace's agent configs aren't stale.
+    if previous_workspace and previous_workspace != workspace:
+        purge_cross_workspace_mcp_residue(state, workspace)
     # Diagnostic reasons are transient — attach after save_state so they don't
     # land on disk but are available to the caller for this run.
     state["_discovery_reasons"] = {

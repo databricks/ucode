@@ -646,3 +646,61 @@ class TestConfigureAgentsSelection:
         ]
         assert saved == ["https://first.com"]
         assert configured_tools == [("https://first.com", ["codex"])]
+
+
+class TestConfigureSharedStateMcpCleanup:
+    """A workspace switch should scrub the previous workspace's MCP entries from
+    installed client configs. Switching to the same workspace must not."""
+
+    @staticmethod
+    def _stub_external_deps(monkeypatch):
+        import ucode.cli as cli_mod
+
+        monkeypatch.setattr(cli_mod, "normalize_workspace_url", lambda w: w)
+        monkeypatch.setattr(cli_mod, "run_databricks_login", lambda w, p: None)
+        monkeypatch.setattr(cli_mod, "ensure_databricks_auth", lambda w, p=None: None)
+        monkeypatch.setattr(cli_mod, "find_profile_name_for_host", lambda w: None)
+        monkeypatch.setattr(cli_mod, "get_databricks_token", lambda w, p: "token")
+        monkeypatch.setattr(cli_mod, "ensure_ai_gateway_v2", lambda w, t: None)
+        monkeypatch.setattr(cli_mod, "discover_claude_models", lambda w, t: ({}, None))
+        monkeypatch.setattr(cli_mod, "discover_gemini_models", lambda w, t: ([], None))
+        monkeypatch.setattr(cli_mod, "discover_codex_models", lambda w, t: ([], None))
+        monkeypatch.setattr(cli_mod, "build_shared_base_urls", lambda w: {})
+
+    def test_purges_residue_when_workspace_changes(self, monkeypatch):
+        import ucode.cli as cli_mod
+
+        self._stub_external_deps(monkeypatch)
+        monkeypatch.setattr(
+            cli_mod, "load_state", lambda: {"workspace": "https://old.databricks.com"}
+        )
+        purge_calls: list[tuple[dict, str]] = []
+        monkeypatch.setattr(
+            cli_mod,
+            "purge_cross_workspace_mcp_residue",
+            lambda state, workspace: purge_calls.append((state, workspace)),
+        )
+
+        cli_mod.configure_shared_state("https://new.databricks.com")
+
+        assert len(purge_calls) == 1
+        _, called_workspace = purge_calls[0]
+        assert called_workspace == "https://new.databricks.com"
+
+    def test_skips_purge_when_workspace_unchanged(self, monkeypatch):
+        import ucode.cli as cli_mod
+
+        self._stub_external_deps(monkeypatch)
+        monkeypatch.setattr(
+            cli_mod, "load_state", lambda: {"workspace": "https://same.databricks.com"}
+        )
+        purge_calls: list = []
+        monkeypatch.setattr(
+            cli_mod,
+            "purge_cross_workspace_mcp_residue",
+            lambda state, workspace: purge_calls.append((state, workspace)),
+        )
+
+        cli_mod.configure_shared_state("https://same.databricks.com")
+
+        assert purge_calls == []
