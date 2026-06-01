@@ -23,10 +23,11 @@ from questionary.prompts.common import InquirerControl
 from questionary.question import Question
 from questionary.styles import merge_styles_default
 
-from ucode.agents import copilot, opencode
+from ucode.agents import copilot, goose, opencode
 from ucode.config_io import restore_file
 from ucode.databricks import (
     ensure_databricks_auth,
+    get_databricks_token,
     list_databricks_apps,
     list_databricks_connections,
     list_genie_spaces,
@@ -64,6 +65,11 @@ MCP_CLIENTS = {
         "binary": "opencode",
         "display": "OpenCode",
         "list_command": "opencode mcp list",
+    },
+    "goose": {
+        "binary": "goose",
+        "display": "Goose",
+        "list_command": "goose session --help",
     },
     "copilot": {
         "binary": "copilot",
@@ -236,7 +242,9 @@ def configured_mcp_clients(state: dict, installed_clients: list[str]) -> list[st
     ]
 
 
-def configure_client_mcp_server(client: str, name: str, url: str, entry: dict) -> list[str]:
+def configure_client_mcp_server(
+    client: str, name: str, url: str, entry: dict, state: dict | None = None
+) -> list[str]:
     if client == "claude":
         removed_scopes = [
             scope for scope in MCP_CLEANUP_SCOPES if remove_claude_mcp_server(name, scope)
@@ -257,6 +265,16 @@ def configure_client_mcp_server(client: str, name: str, url: str, entry: dict) -
     if client == "copilot":
         removed = copilot.write_mcp_server_config(name, url)
         return [MCP_USER_SCOPE] if removed else []
+    if client == "goose":
+        token = ""
+        workspace = (state or {}).get("workspace") or ""
+        if workspace:
+            try:
+                token = get_databricks_token(workspace)
+            except RuntimeError:
+                pass
+        removed = goose.write_mcp_server_config(name, url, token=token)
+        return [MCP_USER_SCOPE] if removed else []
     raise RuntimeError(f"Unsupported MCP client '{client}'.")
 
 
@@ -271,6 +289,8 @@ def remove_client_mcp_server(client: str, name: str) -> list[str]:
         return [MCP_USER_SCOPE] if opencode.remove_mcp_server_config(name) else []
     if client == "copilot":
         return [MCP_USER_SCOPE] if copilot.remove_mcp_server_config(name) else []
+    if client == "goose":
+        return [MCP_USER_SCOPE] if goose.remove_mcp_server_config(name) else []
     raise RuntimeError(f"Unsupported MCP client '{client}'.")
 
 
@@ -809,6 +829,7 @@ def apply_mcp_server_changes(
     original_servers: list[dict],
     working_servers: list[dict],
     clients: list[str],
+    state: dict | None = None,
 ) -> bool:
     original_by_name = _servers_by_name(original_servers)
     working_by_name = _servers_by_name(working_servers)
@@ -829,7 +850,7 @@ def apply_mcp_server_changes(
             continue
         entry = build_mcp_http_entry(url)
         for client in clients:
-            configure_client_mcp_server(client, name, url, entry)
+            configure_client_mcp_server(client, name, url, entry, state=state)
         changed = True
 
     return changed
@@ -904,14 +925,14 @@ def configure_mcp_command() -> int:
     installed_clients = available_mcp_clients()
     if not installed_clients:
         raise RuntimeError(
-            "No supported MCP clients are installed. Install Claude, Codex, Gemini, OpenCode, "
+            "No supported MCP clients are installed. Install Claude, Codex, Gemini, Goose, OpenCode, "
             "or GitHub Copilot CLI."
         )
     clients = configured_mcp_clients(state, installed_clients)
     if not clients:
         raise RuntimeError(
             "No configured MCP-capable coding agents are installed. Run `ucode configure` "
-            "for Codex, Claude, Gemini, OpenCode, or GitHub Copilot CLI first."
+            "for Codex, Claude, Gemini, Goose, OpenCode, or GitHub Copilot CLI first."
         )
     configured_tools = set(state.get("available_tools") or [])
     missing_clients = [
@@ -989,7 +1010,9 @@ def configure_mcp_command() -> int:
         )
         working_names.add(entry_name)
 
-    changed = apply_mcp_server_changes(original_mcp_servers, working_mcp_servers, clients)
+    changed = apply_mcp_server_changes(
+        original_mcp_servers, working_mcp_servers, clients, state=state
+    )
     if changed or original_mcp_servers != working_mcp_servers:
         state["mcp_servers"] = working_mcp_servers
         save_state(state)

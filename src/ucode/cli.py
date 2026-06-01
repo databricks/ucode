@@ -65,9 +65,9 @@ from ucode.ui import (
 from ucode.usage import usage as usage_report
 
 _DISCOVERY_CONSUMERS: dict[str, tuple[str, ...]] = {
-    "claude": ("claude", "opencode", "copilot", "pi"),
+    "claude": ("claude", "goose", "opencode", "copilot", "pi"),
     "codex": ("codex", "copilot", "pi"),
-    "gemini": ("gemini", "opencode", "pi"),
+    "gemini": ("gemini", "goose", "opencode", "pi"),
 }
 
 
@@ -173,9 +173,16 @@ def configure_shared_state(
     print_success("Unity AI Gateway detected")
 
     want_claude = (
-        fetch_all or "claude" in tools or "opencode" in tools or "copilot" in tools or "pi" in tools
+        fetch_all
+        or "claude" in tools
+        or "goose" in tools
+        or "opencode" in tools
+        or "copilot" in tools
+        or "pi" in tools
     )
-    want_gemini = fetch_all or "gemini" in tools or "opencode" in tools or "pi" in tools
+    want_gemini = (
+        fetch_all or "gemini" in tools or "goose" in tools or "opencode" in tools or "pi" in tools
+    )
     want_codex = fetch_all or "codex" in tools or "copilot" in tools or "pi" in tools
 
     claude_reason: str | None = None
@@ -511,7 +518,7 @@ def _launch_tool(tool_name: str, ctx: typer.Context) -> None:
         print_section(f"ucode with {TOOL_SPECS[tool]['display']}")
         if resolved_model:
             print_kv("Model", resolved_model)
-        if tool in ("gemini", "opencode", "copilot", "pi"):
+        if tool in ("gemini", "goose", "opencode", "copilot", "pi"):
             print_note(
                 f"{TOOL_SPECS[tool]['display']} token refresh is managed automatically "
                 f"every 30 minutes while the session is running."
@@ -552,6 +559,12 @@ def opencode_cmd(ctx: typer.Context) -> None:
     _launch_tool("opencode", ctx)
 
 
+@app.command("goose", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
+def goose_cmd(ctx: typer.Context) -> None:
+    """Launch Goose via Databricks."""
+    _launch_tool("goose", ctx)
+
+
 @app.command("copilot", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
 def copilot_cmd(ctx: typer.Context) -> None:
     """Launch GitHub Copilot CLI via Databricks."""
@@ -574,7 +587,7 @@ def configure(
         str | None,
         typer.Option(
             "--agent",
-            help="Configure only the named agent (e.g. claude, codex, gemini, opencode, copilot, pi).",
+            help="Configure only the named agent (e.g. claude, codex, gemini, goose, opencode, copilot, pi).",
         ),
     ] = None,
     agents: Annotated[
