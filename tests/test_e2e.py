@@ -607,9 +607,7 @@ class TestOpencodeLaunch:
             print(f"[opencode-per-model] -> {provider}/{model}", flush=True)
             t0 = time.monotonic()
             try:
-                result = _run_agent(
-                    cmd, env=opencode.build_runtime_env(e2e_token), timeout=180
-                )
+                result = _run_agent(cmd, env=opencode.build_runtime_env(e2e_token), timeout=180)
             except subprocess.TimeoutExpired as exc:
                 elapsed = time.monotonic() - t0
                 partial_stdout = (exc.stdout or b"").decode("utf-8", errors="replace")
@@ -629,9 +627,7 @@ class TestOpencodeLaunch:
             elapsed = time.monotonic() - t0
             combined = (result.stdout + result.stderr).strip()
             status = "OK" if result.returncode == 0 and combined else f"FAIL rc={result.returncode}"
-            print(
-                f"[opencode-per-model] {provider}/{model} {status} ({elapsed:.1f}s)", flush=True
-            )
+            print(f"[opencode-per-model] {provider}/{model} {status} ({elapsed:.1f}s)", flush=True)
             if result.returncode != 0 or not combined:
                 failures.append(
                     f"provider={provider} model={model} rc={result.returncode} "
