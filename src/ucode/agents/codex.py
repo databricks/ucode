@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import subprocess
 from pathlib import Path
 
 from ucode.agent_updates import available_npm_package_update
@@ -22,6 +23,8 @@ from ucode.databricks import (
 )
 from ucode.state import mark_tool_managed, save_state
 from ucode.telemetry import agent_version, ucode_version
+from ucode.tracing import agent_tracing, tracing_env
+from ucode.ui import print_success, print_warning
 
 CODEX_CONFIG_DIR = Path.home() / ".codex"
 CODEX_PROFILE_NAME = "ucode"
@@ -32,6 +35,8 @@ LEGACY_CODEX_BACKUP_PATH = APP_DIR / "codex-config.backup.toml"
 CODEX_MODEL_PROVIDER_NAME = "ucode-databricks"
 MINIMUM_CODEX_VERSION = (0, 134, 0)
 MINIMUM_CODEX_VERSION_TEXT = "0.134.0"
+CODEX_TRACING_NOTIFY = ["mlflow-codex", "notify-hook"]
+CODEX_TRACING_PACKAGE = "@mlflow/codex"
 
 
 SPEC: ToolSpec = {
@@ -235,6 +240,7 @@ def write_tool_config(state: dict, model: str | None = None) -> dict:
         overlay = render_legacy_overlay(workspace, chosen_model, databricks_profile)
         doc = read_toml_safe(LEGACY_CODEX_CONFIG_PATH)
         deep_merge_dict(doc, overlay)
+        _apply_tracing_notify(doc, state)
         write_toml_file(LEGACY_CODEX_CONFIG_PATH, doc)
         state = mark_tool_managed(state, "codex", LEGACY_MANAGED_KEYS)
         save_state(state)
@@ -245,10 +251,44 @@ def write_tool_config(state: dict, model: str | None = None) -> dict:
     overlay = render_overlay(workspace, chosen_model, databricks_profile)
     doc = read_toml_safe(CODEX_CONFIG_PATH)
     deep_merge_dict(doc, overlay)
+    _apply_tracing_notify(doc, state)
     write_toml_file(CODEX_CONFIG_PATH, doc)
     state = mark_tool_managed(state, "codex", MANAGED_KEYS)
     save_state(state)
     return state
+
+
+def _apply_tracing_notify(doc: dict, state: dict) -> None:
+    """Set/clear the Codex ``notify`` hook that streams session traces to MLflow.
+
+    Only ucode's own notify value is removed on disable, so a user-defined
+    ``notify`` is left intact."""
+    if agent_tracing(state, "codex") is not None:
+        doc["notify"] = list(CODEX_TRACING_NOTIFY)
+    elif list(doc.get("notify") or []) == CODEX_TRACING_NOTIFY:
+        doc.pop("notify", None)
+
+
+def ensure_tracing_dependency() -> bool:
+    """Install the `@mlflow/codex` npm package that provides the `mlflow-codex`
+    notify-hook binary. Best-effort: warns and returns False on failure."""
+    import shutil
+
+    if shutil.which("mlflow-codex"):
+        return True
+    if not shutil.which("npm"):
+        print_warning(
+            f"`npm` is not available to install {CODEX_TRACING_PACKAGE}; "
+            "Codex tracing will be inactive until it is installed."
+        )
+        return False
+    try:
+        subprocess.run(["npm", "install", "-g", CODEX_TRACING_PACKAGE], check=True, timeout=300)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        print_warning(f"Could not install {CODEX_TRACING_PACKAGE}; Codex tracing will be inactive.")
+        return False
+    print_success("Codex MLflow tracing hook installed")
+    return True
 
 
 def default_model(state: dict) -> str | None:
@@ -279,6 +319,9 @@ def launch(state: dict, tool_args: list[str]) -> None:
     workspace = state.get("workspace")
     if workspace:
         os.environ["OAUTH_TOKEN"] = get_databricks_token(workspace, state.get("profile"))
+    # The notify hook subprocess Codex spawns inherits this env, so MLflow
+    # routing flows through to it without writing a separate tracing config.
+    os.environ.update(tracing_env(state, "codex"))
     os.execvp(binary, [binary, "--profile", CODEX_PROFILE_NAME, *tool_args])
 
 

@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Literal, cast, overload
 from urllib import error as urllib_error
 from urllib import request as urllib_request
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 from databricks.sql.exc import ServerOperationError
 
@@ -233,6 +233,123 @@ def _http_get_json(
     except urllib_error.URLError as exc:
         _debug(f"GET {url}", f"URLError: {exc.reason}")
         return None, f"network error: {exc.reason}"
+
+
+def _http_post_json(
+    url: str, token: str, payload: dict, *, timeout: int = 10
+) -> tuple[dict | list | None, str | None]:
+    """POST a JSON body to an endpoint. Returns (payload, None) on success,
+    (None, reason) on failure. Mirrors `_http_get_json`."""
+    body_bytes = json.dumps(payload).encode("utf-8")
+    request = urllib_request.Request(
+        url,
+        data=body_bytes,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        },
+    )
+    try:
+        with urllib_request.urlopen(request, timeout=timeout) as response:
+            body = response.read().decode("utf-8")
+        _debug(f"POST {url}", f"HTTP {response.status}, {len(body)} bytes")
+        if _debug_enabled():
+            _debug("body", body[:4000])
+        try:
+            return json.loads(body), None
+        except json.JSONDecodeError as exc:
+            return None, f"response was not valid JSON ({exc.msg})"
+    except urllib_error.HTTPError as exc:
+        body = ""
+        try:
+            body = exc.read().decode("utf-8", errors="replace") if exc.fp else ""
+        except Exception:
+            body = ""
+        _debug(f"POST {url}", f"HTTP {exc.code} {exc.reason}")
+        if _debug_enabled() and body:
+            _debug("body", body[:4000])
+        reason = f"HTTP {exc.code} {exc.reason}"
+        body_excerpt = body.strip()[:200]
+        if body_excerpt:
+            reason = f"{reason}: {body_excerpt}"
+        return None, reason
+    except urllib_error.URLError as exc:
+        _debug(f"POST {url}", f"URLError: {exc.reason}")
+        return None, f"network error: {exc.reason}"
+
+
+def get_current_user_name(workspace: str, token: str) -> str | None:
+    """Return the current user's login (email) via SCIM `Me`, or None on failure.
+
+    Databricks puts the workspace login in `userName`; fall back to the first
+    `emails` entry for workspaces that diverge."""
+    hostname = workspace_hostname(workspace)
+    payload, _ = _http_get_json(f"https://{hostname}/api/2.0/preview/scim/v2/Me", token)
+    if not isinstance(payload, dict):
+        return None
+    user_name = payload.get("userName")
+    if isinstance(user_name, str) and user_name.strip():
+        return user_name.strip()
+    emails = payload.get("emails")
+    if isinstance(emails, list):
+        for entry in emails:
+            if isinstance(entry, dict) and isinstance(entry.get("value"), str):
+                return entry["value"].strip()
+    return None
+
+
+def _mlflow_experiment_id_from_payload(payload: dict | list | None) -> str | None:
+    """Pull an experiment_id from a get-by-name (`{"experiment": {...}}`) or
+    create (`{"experiment_id": ...}`) MLflow REST response."""
+    if not isinstance(payload, dict):
+        return None
+    experiment = payload.get("experiment")
+    if isinstance(experiment, dict) and experiment.get("experiment_id"):
+        return str(experiment["experiment_id"])
+    if payload.get("experiment_id"):
+        return str(payload["experiment_id"])
+    return None
+
+
+def get_or_create_mlflow_experiment(
+    workspace: str, token: str, name: str
+) -> tuple[str | None, str | None]:
+    """Resolve the numeric MLflow experiment id for ``name`` in this workspace,
+    creating the experiment if it doesn't exist. Returns (experiment_id, reason);
+    reason is None on success, otherwise describes the failure."""
+    hostname = workspace_hostname(workspace)
+    encoded = quote(name, safe="")
+    payload, get_reason = _http_get_json(
+        f"https://{hostname}/api/2.0/mlflow/experiments/get-by-name?experiment_name={encoded}",
+        token,
+    )
+    existing = _mlflow_experiment_id_from_payload(payload)
+    if existing:
+        return existing, None
+
+    created, create_reason = _http_post_json(
+        f"https://{hostname}/api/2.0/mlflow/experiments/create",
+        token,
+        {"name": name},
+    )
+    created_id = _mlflow_experiment_id_from_payload(created)
+    if created_id:
+        return created_id, None
+
+    # A concurrent create (or a get that failed transiently) can leave us here
+    # even though the experiment now exists — re-fetch once before giving up.
+    if create_reason and "RESOURCE_ALREADY_EXISTS" in create_reason:
+        payload, _ = _http_get_json(
+            f"https://{hostname}/api/2.0/mlflow/experiments/get-by-name?experiment_name={encoded}",
+            token,
+        )
+        retried = _mlflow_experiment_id_from_payload(payload)
+        if retried:
+            return retried, None
+
+    return None, create_reason or get_reason or "could not resolve MLflow experiment"
 
 
 @overload

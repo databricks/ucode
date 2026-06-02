@@ -48,6 +48,7 @@ from ucode.mcp import (
     revert_mcp_configs,
 )
 from ucode.state import STATE_PATH, clear_state, load_state, save_state
+from ucode.tracing import configure_tracing_command
 from ucode.ui import (
     console,
     heading,
@@ -388,12 +389,27 @@ def status() -> int:
         print_kv("Config file", str(config_path) if config_path.exists() else "missing")
         console.print()
 
+    print_heading("Tracing")
+    tracing = state.get("tracing") or {}
+    if tracing.get("enabled"):
+        print_kv("MLflow tracing", "enabled")
+        print_kv("Tracking URI", str(tracing.get("tracking_uri") or "unknown"))
+        for tool, entry in (tracing.get("agents") or {}).items():
+            if isinstance(entry, dict):
+                print_kv(
+                    f"{tool} experiment",
+                    f"{entry.get('experiment_name')} (id {entry.get('experiment_id')})",
+                )
+    else:
+        print_kv("MLflow tracing", "disabled")
+
     print_heading("State")
     print_kv("State file", str(STATE_PATH) if STATE_PATH.exists() else "missing")
     print_note("Use `ucode configure` to update workspace settings or configure new tools.")
     print_note(
         "Use `ucode configure mcp` to add Databricks MCP servers to configured coding tools."
     )
+    print_note("Use `ucode configure tracing` to log coding sessions to an MLflow experiment.")
     print_note("Use `ucode revert` to clear managed configs and restore prior files.")
     return 0
 
@@ -636,6 +652,24 @@ def configure_mcp() -> None:
     """Add Databricks MCP servers to installed coding tools."""
     try:
         configure_mcp_command()
+    except RuntimeError as exc:
+        print_err(str(exc))
+        raise typer.Exit(1) from None
+    except KeyboardInterrupt:
+        print_err("Interrupted.")
+        raise typer.Exit(130) from None
+
+
+@configure_app.command("tracing")
+def configure_tracing(
+    disable: Annotated[
+        bool, typer.Option("--disable", help="Turn off MLflow tracing for configured agents.")
+    ] = False,
+) -> None:
+    """Send coding-session traces to an MLflow experiment in your workspace."""
+    try:
+        install_databricks_cli()
+        configure_tracing_command(disable=disable)
     except RuntimeError as exc:
         print_err(str(exc))
         raise typer.Exit(1) from None
