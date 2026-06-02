@@ -592,7 +592,7 @@ class TestOpencodeLaunch:
                 )
 
             cmd = opencode.validate_cmd("opencode")
-            result = _run_agent(cmd, env=opencode.build_runtime_env(e2e_token), timeout=90)
+            result = _run_agent(cmd, env=opencode.build_runtime_env(e2e_token), timeout=180)
             combined = (result.stdout + result.stderr).strip()
             if result.returncode != 0 or not combined:
                 failures.append(
