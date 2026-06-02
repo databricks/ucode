@@ -56,5 +56,8 @@ jobs:
       - run: uv run pytest tests/test_e2e.py -v < /dev/null
       # MLflow tracing e2e lives in its own file and needs the `tracing`
       # extra so `import mlflow` resolves (otherwise the test importorskips
-      # and silently passes as skipped).
-      - run: uv run --extra tracing pytest tests/test_e2e_tracing.py -v < /dev/null
+      # and silently passes as skipped). `!cancelled()` lets this run even
+      # when the previous pytest step failed — the two suites are
+      # independent and one shouldn't mask the other.
+      - if: ${{ !cancelled() }}
+        run: uv run --extra tracing pytest tests/test_e2e_tracing.py -v < /dev/null
