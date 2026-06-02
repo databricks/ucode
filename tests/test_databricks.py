@@ -125,10 +125,73 @@ class TestDiscoverClaudeModels:
         }
         monkeypatch.setattr(db_mod, "_http_get_json", lambda url, token: (payload, None))
 
-        models, reason = db_mod.discover_claude_models(WS, "token")
+        models, allowed, reason = db_mod.discover_claude_models(WS, "token")
 
         assert reason is None
         assert models["opus"] == "databricks-claude-opus-4-8"
+        # newest per family is the default; older opus stays in the allowlist
+        assert "databricks-claude-opus-4-7" in allowed
+        assert "databricks-claude-opus-4-8" in allowed
+        assert "databricks-claude-sonnet-4-6" in allowed
+
+    def test_custom_prefix_scopes_to_bedrock_and_excludes_hosted(self, monkeypatch):
+        payload = {
+            "data": [
+                {"id": "acme-bedrock-claude-opus-4-8"},
+                {"id": "acme-bedrock-claude-sonnet-4-6"},
+                {"id": "acme-bedrock-claude-haiku-4-5"},
+                {"id": "databricks-claude-opus-4-7"},  # hosted — must be excluded
+            ]
+        }
+        monkeypatch.setattr(db_mod, "_http_get_json", lambda url, token: (payload, None))
+
+        models, allowed, reason = db_mod.discover_claude_models(WS, "token", "acme-bedrock-claude-")
+
+        assert reason is None
+        assert models == {
+            "opus": "acme-bedrock-claude-opus-4-8",
+            "sonnet": "acme-bedrock-claude-sonnet-4-6",
+            "haiku": "acme-bedrock-claude-haiku-4-5",
+        }
+        assert "databricks-claude-opus-4-7" not in allowed
+        assert all(m.startswith("acme-bedrock-claude-") for m in allowed)
+
+    def test_no_match_reports_prefix_in_reason(self, monkeypatch):
+        payload = {"data": [{"id": "databricks-claude-opus-4-8"}]}
+        monkeypatch.setattr(db_mod, "_http_get_json", lambda url, token: (payload, None))
+
+        models, allowed, reason = db_mod.discover_claude_models(WS, "token", "acme-bedrock-claude-")
+
+        assert models == {}
+        assert allowed == []
+        assert "acme-bedrock-claude-" in reason
+
+
+class TestResolveClaudeModelPrefix:
+    def test_default_when_unset(self):
+        assert db_mod.resolve_claude_model_prefix() == "databricks-claude-"
+
+    def test_override_wins_over_persisted(self):
+        assert (
+            db_mod.resolve_claude_model_prefix(
+                {"claude_model_prefix": "other-"}, override="acme-bedrock-claude-"
+            )
+            == "acme-bedrock-claude-"
+        )
+
+    def test_persisted_state_used_when_no_override(self):
+        assert (
+            db_mod.resolve_claude_model_prefix({"claude_model_prefix": "acme-bedrock-claude-"})
+            == "acme-bedrock-claude-"
+        )
+
+    def test_blank_override_falls_through_to_persisted(self):
+        assert (
+            db_mod.resolve_claude_model_prefix(
+                {"claude_model_prefix": "acme-bedrock-claude-"}, override="   "
+            )
+            == "acme-bedrock-claude-"
+        )
 
 
 class TestBuildAuthShellCommand:

@@ -17,6 +17,7 @@ from ucode.config_io import (
     write_json_file,
 )
 from ucode.databricks import (
+    CLAUDE_FAMILIES,
     build_auth_shell_command,
     build_tool_base_url,
     get_databricks_token,
@@ -81,12 +82,38 @@ def _web_search_mcp_entry(workspace: str, search_model: str, profile: str | None
     }
 
 
+def _build_available_models(claude_models: dict[str, str], claude_allowed: list[str]) -> list[str]:
+    """Allowlist written to Claude Code's ``availableModels`` setting.
+
+    Combines the discovered endpoint ids (every allowed version) with the
+    family aliases (``opus``/``sonnet``/``haiku``) that have a default, so the
+    friendly family picker entries stay visible and resolve through the
+    ``ANTHROPIC_DEFAULT_*_MODEL`` env vars.
+
+    Including aliases intentionally loosens strictness — Claude Code's matcher
+    treats an ``opus`` alias as "any opus version", so a same-family model would
+    pass the allowlist. We accept that to keep the default picker entries usable;
+    the Databricks gateway remains the hard backstop. With an empty allowlist we
+    fall back to the flat defaults' values (old state shape / back-compat).
+    """
+    ids = [m for m in claude_allowed if isinstance(m, str) and m]
+    if not ids:
+        ids = [v for v in claude_models.values() if isinstance(v, str) and v]
+    aliases = [family for family in CLAUDE_FAMILIES if claude_models.get(family)]
+    out: list[str] = []
+    for item in [*aliases, *sorted(set(ids))]:
+        if item not in out:
+            out.append(item)
+    return out
+
+
 def render_overlay(
     workspace: str,
     model: str,
     claude_models: dict[str, str] | None = None,
     disable_web_search: bool = False,
     profile: str | None = None,
+    claude_allowed: list[str] | None = None,
 ) -> tuple[dict, list[list[str]]]:
     """Return (overlay, managed_key_paths) for Claude settings.json.
 
@@ -120,6 +147,14 @@ def render_overlay(
             env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = claude_models["haiku"]
     overlay: dict = {"apiKeyHelper": build_auth_shell_command(workspace, profile), "env": env}
     keys: list[list[str]] = [["apiKeyHelper"]] + [["env", k] for k in env]
+
+    # Restrict the `/model` picker to the discovered models via Claude Code's
+    # `availableModels` allowlist, so hosted models that don't match the
+    # configured prefix aren't selectable.
+    available_models = _build_available_models(claude_models or {}, claude_allowed or [])
+    if available_models:
+        overlay["availableModels"] = available_models
+        keys.append(["availableModels"])
 
     # Disable Claude Code's built-in WebSearch (it routes through Anthropic's
     # hosted infra and fails through the Databricks gateway). The replacement
@@ -197,6 +232,7 @@ def write_tool_config(state: dict, model: str) -> dict:
         state.get("claude_models") or {},
         disable_web_search=web_search_model is not None,
         profile=state.get("profile"),
+        claude_allowed=state.get("claude_allowed_models") or [],
     )
     existing = read_json_safe(CLAUDE_SETTINGS_PATH)
     merged = deep_merge_dict(existing, overlay)

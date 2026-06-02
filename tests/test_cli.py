@@ -225,6 +225,40 @@ class TestStatus:
         assert "https://example.databricks.com/ai-gateway/anthropic" not in result.output
         assert "https://example.databricks.com/ai-gateway/gemini" not in result.output
 
+    def test_shows_claude_models_with_bedrock_prefix_and_extra_versions(self):
+        state = {
+            **MINIMAL_STATE,
+            "claude_model_prefix": "acme-bedrock-claude-",
+            "claude_models": {
+                "opus": "acme-bedrock-claude-opus-4-8",
+                "sonnet": "acme-bedrock-claude-sonnet-4-6",
+            },
+            "claude_allowed_models": [
+                "acme-bedrock-claude-opus-4-8",
+                "acme-bedrock-claude-opus-4-7",
+                "acme-bedrock-claude-sonnet-4-6",
+            ],
+        }
+        with patch("ucode.cli.load_state", return_value=state):
+            result = runner.invoke(app, ["status"])
+
+        assert result.exit_code == 0, result.output
+        output = _strip_ansi(result.output)
+        assert "Claude Models" in output
+        assert "acme-bedrock-claude-" in output  # endpoint prefix surfaced (non-default)
+        assert "acme-bedrock-claude-opus-4-8" in output
+        assert "(+1 more)" in output  # the extra opus version
+        assert "Selectable models" in output
+
+    def test_default_prefix_not_shown_in_status(self):
+        with patch("ucode.cli.load_state", return_value=MINIMAL_STATE):
+            result = runner.invoke(app, ["status"])
+
+        assert result.exit_code == 0, result.output
+        output = _strip_ansi(result.output)
+        # the built-in default prefix is noise — only non-default prefixes show
+        assert "Endpoint prefix" not in output
+
 
 class TestRevert:
     def test_reverts_mcp_configs_before_clearing_state(self):
@@ -380,7 +414,7 @@ class TestConfigureAgentFlag:
         ):
             result = runner.invoke(app, ["configure"])
         assert result.exit_code == 0, result.output
-        mock_cfg.assert_called_once_with()
+        mock_cfg.assert_called_once_with(model_prefix=None)
 
     def test_agents_flag_calls_configure_with_tools(self):
         with (
@@ -391,7 +425,7 @@ class TestConfigureAgentFlag:
             result = runner.invoke(app, ["configure", "--agents", "claude,codex"])
         assert result.exit_code == 0, result.output
         mock_install.assert_not_called()
-        mock_cfg.assert_called_once_with(selected_tools=["claude", "codex"])
+        mock_cfg.assert_called_once_with(selected_tools=["claude", "codex"], model_prefix=None)
 
     def test_agents_flag_normalizes_aliases_and_dedupes(self):
         with (
@@ -401,7 +435,7 @@ class TestConfigureAgentFlag:
         ):
             result = runner.invoke(app, ["configure", "--agents", " claude-code, codex,claude "])
         assert result.exit_code == 0, result.output
-        mock_cfg.assert_called_once_with(selected_tools=["claude", "codex"])
+        mock_cfg.assert_called_once_with(selected_tools=["claude", "codex"], model_prefix=None)
 
     def test_workspaces_flag_calls_configure_with_workspaces(self):
         with (
@@ -422,7 +456,8 @@ class TestConfigureAgentFlag:
             workspaces=[
                 ("https://first.databricks.com", None),
                 ("https://second.databricks.com", None),
-            ]
+            ],
+            model_prefix=None,
         )
 
     def test_agents_and_workspaces_flags_call_configure_with_both(self):
@@ -437,7 +472,9 @@ class TestConfigureAgentFlag:
             )
         assert result.exit_code == 0, result.output
         mock_cfg.assert_called_once_with(
-            selected_tools=["claude", "codex"], workspaces=[("https://first.com", None)]
+            selected_tools=["claude", "codex"],
+            workspaces=[("https://first.com", None)],
+            model_prefix=None,
         )
 
     def test_agent_and_workspaces_flags_call_configure_with_both(self):
@@ -452,7 +489,9 @@ class TestConfigureAgentFlag:
             )
         assert result.exit_code == 0, result.output
         mock_install.assert_called_once_with("claude", strict=True, update_existing=True)
-        mock_cfg.assert_called_once_with("claude", workspaces=[("https://first.com", None)])
+        mock_cfg.assert_called_once_with(
+            "claude", workspaces=[("https://first.com", None)], model_prefix=None
+        )
 
     def test_agent_flag_calls_configure_with_tool(self):
         with (
@@ -463,7 +502,7 @@ class TestConfigureAgentFlag:
             result = runner.invoke(app, ["configure", "--agent", "claude"])
         assert result.exit_code == 0, result.output
         mock_install.assert_called_once_with("claude", strict=True, update_existing=True)
-        mock_cfg.assert_called_once_with("claude")
+        mock_cfg.assert_called_once_with("claude", model_prefix=None)
 
     def test_agent_flag_normalizes_alias(self):
         with (
@@ -473,7 +512,7 @@ class TestConfigureAgentFlag:
         ):
             result = runner.invoke(app, ["configure", "--agent", "claude-code"])
         assert result.exit_code == 0, result.output
-        mock_cfg.assert_called_once_with("claude")
+        mock_cfg.assert_called_once_with("claude", model_prefix=None)
 
     def test_upgrade_runs_uv_tool_install(self):
         with patch("subprocess.run") as mock_run:
@@ -611,7 +650,9 @@ class TestConfigureAgentsSelection:
         }
         configured_shared: list[tuple[str, str | None, tuple[str, ...] | None, bool]] = []
 
-        def fake_configure_shared_state(workspace, profile=None, tools=None, force_login=False):
+        def fake_configure_shared_state(
+            workspace, profile=None, tools=None, force_login=False, model_prefix=None
+        ):
             configured_shared.append(
                 (workspace, profile, tuple(tools) if tools is not None else None, force_login)
             )
@@ -662,7 +703,9 @@ class TestConfigureSharedStateMcpCleanup:
         monkeypatch.setattr(cli_mod, "find_profile_name_for_host", lambda w: None)
         monkeypatch.setattr(cli_mod, "get_databricks_token", lambda w, p: "token")
         monkeypatch.setattr(cli_mod, "ensure_ai_gateway_v2", lambda w, t: None)
-        monkeypatch.setattr(cli_mod, "discover_claude_models", lambda w, t: ({}, None))
+        monkeypatch.setattr(
+            cli_mod, "discover_claude_models", lambda w, t, prefix=None: ({}, [], None)
+        )
         monkeypatch.setattr(cli_mod, "discover_gemini_models", lambda w, t: ([], None))
         monkeypatch.setattr(cli_mod, "discover_codex_models", lambda w, t: ([], None))
         monkeypatch.setattr(cli_mod, "build_shared_base_urls", lambda w: {})
@@ -704,3 +747,69 @@ class TestConfigureSharedStateMcpCleanup:
         cli_mod.configure_shared_state("https://same.databricks.com")
 
         assert purge_calls == []
+
+
+class TestConfigureSharedStateModelPrefix:
+    """The --model-prefix override threads into Claude discovery and persists."""
+
+    @staticmethod
+    def _stub(monkeypatch, capture):
+        import ucode.cli as cli_mod
+
+        monkeypatch.setattr(cli_mod, "normalize_workspace_url", lambda w: w)
+        monkeypatch.setattr(cli_mod, "run_databricks_login", lambda w, p: None)
+        monkeypatch.setattr(cli_mod, "ensure_databricks_auth", lambda w, p=None: None)
+        monkeypatch.setattr(cli_mod, "find_profile_name_for_host", lambda w: None)
+        monkeypatch.setattr(cli_mod, "get_databricks_token", lambda w, p: "token")
+        monkeypatch.setattr(cli_mod, "ensure_ai_gateway_v2", lambda w, t: None)
+        monkeypatch.setattr(cli_mod, "load_state", lambda: {})
+        monkeypatch.setattr(cli_mod, "load_full_state", lambda: {"workspaces": {}})
+        monkeypatch.setattr(cli_mod, "build_shared_base_urls", lambda w: {})
+        monkeypatch.setattr(cli_mod, "discover_gemini_models", lambda w, t: ([], None))
+        monkeypatch.setattr(cli_mod, "discover_codex_models", lambda w, t: ([], None))
+
+        def fake_discover(w, t, prefix=None):
+            capture["prefix"] = prefix
+            return {"opus": f"{prefix}opus-4-8"}, [f"{prefix}opus-4-8"], None
+
+        monkeypatch.setattr(cli_mod, "discover_claude_models", fake_discover)
+
+    def test_flag_overrides_discovery_prefix_and_persists(self, monkeypatch):
+        import ucode.cli as cli_mod
+
+        capture: dict = {}
+        self._stub(monkeypatch, capture)
+
+        state = cli_mod.configure_shared_state(
+            "https://ws.databricks.com", model_prefix="acme-bedrock-claude-"
+        )
+
+        assert capture["prefix"] == "acme-bedrock-claude-"
+        assert state["claude_model_prefix"] == "acme-bedrock-claude-"
+        assert state["claude_models"] == {"opus": "acme-bedrock-claude-opus-4-8"}
+        assert state["claude_allowed_models"] == ["acme-bedrock-claude-opus-4-8"]
+
+    def test_persisted_prefix_used_when_no_flag(self, monkeypatch):
+        import ucode.cli as cli_mod
+
+        capture: dict = {}
+        self._stub(monkeypatch, capture)
+        monkeypatch.setattr(
+            cli_mod,
+            "load_full_state",
+            lambda: {"workspaces": {"https://ws.databricks.com": {"claude_model_prefix": "acme-"}}},
+        )
+
+        cli_mod.configure_shared_state("https://ws.databricks.com")
+
+        assert capture["prefix"] == "acme-"
+
+    def test_default_prefix_when_nothing_set(self, monkeypatch):
+        import ucode.cli as cli_mod
+
+        capture: dict = {}
+        self._stub(monkeypatch, capture)
+
+        cli_mod.configure_shared_state("https://ws.databricks.com")
+
+        assert capture["prefix"] == "databricks-claude-"

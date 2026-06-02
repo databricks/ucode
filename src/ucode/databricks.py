@@ -804,17 +804,53 @@ def build_auth_shell_command(workspace: str, profile: str | None = None) -> str:
     )
 
 
-def discover_claude_models(workspace: str, token: str) -> tuple[dict[str, str], str | None]:
+DEFAULT_CLAUDE_MODEL_PREFIX = "databricks-claude-"
+CLAUDE_FAMILIES: tuple[str, ...] = ("opus", "sonnet", "haiku")
+
+
+def resolve_claude_model_prefix(state: dict | None = None, override: str | None = None) -> str:
+    """Prefix shared by Claude endpoint names before the ``<family>`` token.
+
+    Endpoint names are expected to follow ``<prefix><family>-<version>``, e.g.
+    ``databricks-claude-opus-4-8`` or ``acme-bedrock-claude-opus-4-8``.
+
+    Resolution order: an explicit ``override`` (the ``--model-prefix`` flag,
+    wins), then a persisted ``claude_model_prefix`` state key, then the default
+    ``databricks-claude-`` (which preserves the built-in hosted behaviour).
+    Setting a Bedrock prefix (e.g. ``acme-bedrock-claude-``) scopes discovery to
+    those endpoints and excludes ``databricks-claude-*`` hosted models, since
+    they no longer share the configured prefix.
+    """
+    if isinstance(override, str) and override.strip():
+        return override.strip()
+    if isinstance(state, dict):
+        persisted = state.get("claude_model_prefix")
+        if isinstance(persisted, str) and persisted.strip():
+            return persisted.strip()
+    return DEFAULT_CLAUDE_MODEL_PREFIX
+
+
+def discover_claude_models(
+    workspace: str, token: str, prefix: str | None = None
+) -> tuple[dict[str, str], list[str], str | None]:
     """Discover Claude families on this workspace's AI Gateway.
 
-    Returns (models_by_family, reason). reason is None on success; otherwise it
-    describes why the dict is empty (HTTP error, network error, or no models
-    matching the expected naming convention).
+    Endpoint names are expected to follow ``<prefix><family>-<version>``. For
+    each family the newest matching id becomes the default; every matching id is
+    kept in the allowlist so additional versions stay selectable.
+
+    :param prefix: Name prefix before the ``<family>`` token. Defaults to
+        :func:`resolve_claude_model_prefix` (env / persisted / built-in).
+    :returns: ``(defaults, allowed, reason)``. ``reason`` is None on success;
+        otherwise it describes why ``defaults`` is empty (HTTP error, network
+        error, or no models matching ``<prefix>{opus,sonnet,haiku}-*``).
     """
+    if prefix is None:
+        prefix = resolve_claude_model_prefix()
     hostname = workspace_hostname(workspace)
     payload, reason = _http_get_json(f"https://{hostname}/ai-gateway/anthropic/v1/models", token)
     if payload is None:
-        return {}, reason
+        return {}, [], reason
 
     data = cast(dict, payload) if isinstance(payload, dict) else {}
     raw_ids = [
@@ -823,29 +859,35 @@ def discover_claude_models(workspace: str, token: str) -> tuple[dict[str, str], 
         if isinstance(m.get("id"), str) and not m["id"].endswith("-anthropic")
     ]
 
-    result: dict[str, str] = {}
-    for family, key in [("opus", "opus"), ("sonnet", "sonnet"), ("haiku", "haiku")]:
+    defaults: dict[str, str] = {}
+    allowed: list[str] = []
+    for family in CLAUDE_FAMILIES:
         candidates = sorted(
-            [m for m in raw_ids if f"databricks-claude-{family}-" in m],
+            [m for m in raw_ids if m.startswith(f"{prefix}{family}-")],
             reverse=True,
         )
         if candidates:
-            result[key] = candidates[0]
-    if result:
-        return result, None
+            defaults[family] = candidates[0]
+            allowed.extend(candidates)
+    if defaults:
+        return defaults, allowed, None
     if not raw_ids:
-        return {}, "AI Gateway returned no Claude model ids"
+        return {}, [], "AI Gateway returned no Claude model ids"
     sample = ", ".join(raw_ids[:5])
-    return {}, (
-        "AI Gateway returned model ids but none matched "
-        f"`databricks-claude-{{opus,sonnet,haiku}}-*` (got: {sample})"
+    return (
+        {},
+        [],
+        (
+            "AI Gateway returned model ids but none matched "
+            f"`{prefix}{{opus,sonnet,haiku}}-*` (got: {sample})"
+        ),
     )
 
 
 def fetch_ai_gateway_claude_models(workspace: str, token: str) -> dict[str, str]:
-    """Backwards-compatible wrapper that discards the diagnostic reason."""
-    models, _ = discover_claude_models(workspace, token)
-    return models
+    """Backwards-compatible wrapper that returns only the family defaults."""
+    defaults, _allowed, _reason = discover_claude_models(workspace, token)
+    return defaults
 
 
 def discover_endpoints_with_api_type(
