@@ -23,7 +23,7 @@ from ucode.databricks import (
 )
 from ucode.state import mark_tool_managed, save_state
 from ucode.telemetry import agent_version, ucode_version
-from ucode.tracing import agent_tracing, tracing_env
+from ucode.tracing import agent_tracing, apply_tracing_env
 
 OPENCODE_XDG_CONFIG_HOME = APP_DIR / "opencode-xdg"
 OPENCODE_CONFIG_DIR = OPENCODE_XDG_CONFIG_HOME / "opencode"
@@ -240,7 +240,9 @@ def build_runtime_env(token: str, state: dict | None = None) -> dict[str, str]:
     env["OAUTH_TOKEN"] = token
     env["XDG_CONFIG_HOME"] = str(OPENCODE_XDG_CONFIG_HOME)
     if state is not None:
-        env.update(tracing_env(state, "opencode"))
+        # apply_tracing_env clears the MLflow vars when tracing is off, so a
+        # stale outer-shell value can't leak through.
+        apply_tracing_env(env, state, "opencode")
     return env
 
 

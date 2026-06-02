@@ -332,7 +332,9 @@ def _install_claude_tracing_plugin() -> bool:
             output = (result.stderr or result.stdout or "").strip()
             last = output.splitlines()[-1] if output else f"exit {result.returncode}"
             # `marketplace add` / `install` are idempotent; treat "already
-            # added/installed" as success and keep going.
+            # added/installed" as success and keep going. Best-effort match
+            # against stderr — an upstream wording change would degrade this
+            # to a noisy warning on re-runs, but never corrupts state.
             if "already" in last.lower():
                 continue
             print_warning(f"Claude MLflow plugin step failed: {last}")

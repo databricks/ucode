@@ -23,7 +23,7 @@ from ucode.databricks import (
 )
 from ucode.state import mark_tool_managed, save_state
 from ucode.telemetry import agent_version, ucode_version
-from ucode.tracing import agent_tracing, tracing_env
+from ucode.tracing import agent_tracing, apply_tracing_env
 from ucode.ui import print_success, print_warning
 
 CODEX_CONFIG_DIR = Path.home() / ".codex"
@@ -262,8 +262,17 @@ def _apply_tracing_notify(doc: dict, state: dict) -> None:
     """Set/clear the Codex ``notify`` hook that streams session traces to MLflow.
 
     Only ucode's own notify value is removed on disable, so a user-defined
-    ``notify`` is left intact."""
+    ``notify`` is left intact. When enabling on top of a pre-existing user
+    ``notify``, warn before replacing — the prior value is in the backup file
+    but the user has to restore it manually."""
     if agent_tracing(state, "codex") is not None:
+        existing = doc.get("notify")
+        if existing is not None and list(existing) != CODEX_TRACING_NOTIFY:
+            print_warning(
+                f"Codex `notify` is already set to {existing!r}; replacing it with the "
+                "MLflow tracing hook. The previous value is preserved in the Codex "
+                "config backup — restore it manually if you need both."
+            )
         doc["notify"] = list(CODEX_TRACING_NOTIFY)
     elif list(doc.get("notify") or []) == CODEX_TRACING_NOTIFY:
         doc.pop("notify", None)
@@ -321,7 +330,8 @@ def launch(state: dict, tool_args: list[str]) -> None:
         os.environ["OAUTH_TOKEN"] = get_databricks_token(workspace, state.get("profile"))
     # The notify hook subprocess Codex spawns inherits this env, so MLflow
     # routing flows through to it without writing a separate tracing config.
-    os.environ.update(tracing_env(state, "codex"))
+    # When tracing is off this also clears any stale outer-shell value.
+    apply_tracing_env(os.environ, state, "codex")
     os.execvp(binary, [binary, "--profile", CODEX_PROFILE_NAME, *tool_args])
 
 

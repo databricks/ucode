@@ -211,6 +211,46 @@ class TestCodexTracingNotify:
         codex._apply_tracing_notify(doc, {})
         assert doc["notify"] == ["user-notify"]
 
+    def test_warns_when_overwriting_user_notify(self):
+        doc = {"notify": ["user-hook"]}
+        with patch.object(codex, "print_warning") as warn:
+            codex._apply_tracing_notify(doc, _enabled_state())
+        assert doc["notify"] == ["mlflow-codex", "notify-hook"]
+        warn.assert_called_once()
+        msg = warn.call_args[0][0]
+        assert "user-hook" in msg
+        assert "backup" in msg.lower()
+
+    def test_no_warn_when_already_ucode_notify(self):
+        doc = {"notify": ["mlflow-codex", "notify-hook"]}
+        with patch.object(codex, "print_warning") as warn:
+            codex._apply_tracing_notify(doc, _enabled_state())
+        warn.assert_not_called()
+
+
+class TestApplyTracingEnv:
+    def test_sets_keys_when_enabled(self):
+        env: dict[str, str] = {}
+        tracing.apply_tracing_env(env, _enabled_state(), "codex")
+        assert env == {"MLFLOW_TRACKING_URI": "databricks", "MLFLOW_EXPERIMENT_ID": "222"}
+
+    def test_clears_stale_keys_when_disabled(self):
+        env = {
+            "MLFLOW_TRACKING_URI": "databricks://stale",
+            "MLFLOW_EXPERIMENT_ID": "9999",
+            "UNRELATED": "keep-me",
+        }
+        tracing.apply_tracing_env(env, {}, "codex")
+        assert "MLFLOW_TRACKING_URI" not in env
+        assert "MLFLOW_EXPERIMENT_ID" not in env
+        assert env["UNRELATED"] == "keep-me"
+
+    def test_overwrites_stale_keys_when_enabled(self):
+        env = {"MLFLOW_TRACKING_URI": "databricks://stale", "MLFLOW_EXPERIMENT_ID": "9999"}
+        tracing.apply_tracing_env(env, _enabled_state("p"), "opencode")
+        assert env["MLFLOW_TRACKING_URI"] == "databricks://p"
+        assert env["MLFLOW_EXPERIMENT_ID"] == "333"
+
 
 class TestClaudeTracingEnv:
     def _write(self, state: dict, tmp_path, monkeypatch) -> dict:
@@ -312,6 +352,137 @@ class TestSelectTracingWorkspace:
         ):
             with pytest.raises(RuntimeError, match="no tracing-capable agents"):
                 tracing._select_tracing_workspace()
+
+    def test_single_candidate_skips_prompt(self):
+        full = {
+            "current_workspace": "https://a.databricks.com",
+            "workspaces": {
+                "https://a.databricks.com": {"available_tools": ["claude"], "profile": "pa"},
+            },
+        }
+        with (
+            patch.object(tracing, "load_full_state", return_value=full),
+            patch.object(tracing, "prompt_for_workspace") as prompt,
+        ):
+            state = tracing._select_tracing_workspace()
+        prompt.assert_not_called()
+        assert state["workspace"] == "https://a.databricks.com"
+
+
+class TestSelectTracingWorkspaceOnlyEnabled:
+    def test_empty_when_none_enabled(self):
+        full = {
+            "workspaces": {
+                "https://a.databricks.com": {"available_tools": ["claude"]},
+            },
+        }
+        with patch.object(tracing, "load_full_state", return_value=full):
+            assert tracing._select_tracing_workspace(only_enabled=True) == {}
+
+    def test_auto_selects_lone_enabled_workspace(self):
+        full = {
+            "current_workspace": "https://a.databricks.com",
+            "workspaces": {
+                "https://a.databricks.com": {"available_tools": ["claude"]},
+                "https://b.databricks.com": {
+                    "available_tools": ["claude"],
+                    "tracing": {"enabled": True, "agents": {}},
+                },
+            },
+        }
+        with (
+            patch.object(tracing, "load_full_state", return_value=full),
+            patch.object(tracing, "prompt_for_workspace") as prompt,
+        ):
+            state = tracing._select_tracing_workspace(only_enabled=True)
+        prompt.assert_not_called()
+        assert state["workspace"] == "https://b.databricks.com"
+
+    def test_prompts_when_multiple_enabled(self):
+        full = {
+            "current_workspace": "https://a.databricks.com",
+            "workspaces": {
+                "https://a.databricks.com": {
+                    "available_tools": ["claude"],
+                    "profile": "pa",
+                    "tracing": {"enabled": True, "agents": {}},
+                },
+                "https://b.databricks.com": {
+                    "available_tools": ["claude"],
+                    "profile": "pb",
+                    "tracing": {"enabled": True, "agents": {}},
+                },
+            },
+        }
+        with (
+            patch.object(tracing, "load_full_state", return_value=full),
+            patch.object(
+                tracing, "prompt_for_workspace", return_value=("https://b.databricks.com", "pb")
+            ) as prompt,
+        ):
+            state = tracing._select_tracing_workspace(only_enabled=True)
+        prompt.assert_called_once()
+        assert state["workspace"] == "https://b.databricks.com"
+
+
+class TestConfigureTracingPreservesCurrentWorkspace:
+    """``save_state`` flips ``current_workspace`` on every call. The tracing
+    command must not change which workspace ``ucode launch`` targets, even
+    when configuring tracing for a non-current workspace."""
+
+    def _full(self) -> dict:
+        return {
+            "current_workspace": "https://a.databricks.com",
+            "workspaces": {
+                "https://a.databricks.com": {
+                    "available_tools": ["claude"],
+                    "profile": "pa",
+                    "tracing": {"enabled": True, "agents": {}},
+                },
+                "https://b.databricks.com": {
+                    "available_tools": ["claude"],
+                    "profile": "pb",
+                    "tracing": {"enabled": True, "agents": {}},
+                },
+            },
+        }
+
+    def test_disable_restores_original_current(self):
+        captured: dict = {}
+        with (
+            patch.object(tracing, "load_full_state", return_value=self._full()),
+            patch.object(
+                tracing, "prompt_for_workspace", return_value=("https://b.databricks.com", "pb")
+            ),
+            patch.object(tracing, "ensure_databricks_auth"),
+            patch.object(tracing, "_rewrite_agent_configs", side_effect=lambda s: s),
+            patch.object(tracing, "save_state"),
+            patch.object(
+                tracing,
+                "set_current_workspace",
+                side_effect=lambda ws: captured.setdefault("restored_to", ws),
+            ),
+        ):
+            tracing.configure_tracing_command(disable=True)
+        assert captured["restored_to"] == "https://a.databricks.com"
+
+    def test_disable_with_none_enabled_still_calls_restore(self):
+        full = {
+            "current_workspace": "https://a.databricks.com",
+            "workspaces": {"https://a.databricks.com": {"available_tools": ["claude"]}},
+        }
+        captured: dict = {}
+        with (
+            patch.object(tracing, "load_full_state", return_value=full),
+            patch.object(
+                tracing,
+                "set_current_workspace",
+                side_effect=lambda ws: captured.setdefault("restored_to", ws),
+            ),
+        ):
+            rc = tracing.configure_tracing_command(disable=True)
+        assert rc == 0
+        assert captured["restored_to"] == "https://a.databricks.com"
 
 
 class TestDisableTracing:

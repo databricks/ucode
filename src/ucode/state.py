@@ -53,6 +53,25 @@ def save_state(state: dict) -> None:
         raise RuntimeError(f"Failed to write state file: {STATE_PATH}") from exc
 
 
+def set_current_workspace(workspace: str | None) -> None:
+    """Set ``current_workspace`` without touching the per-workspace blocks.
+
+    Used by flows like ``configure tracing`` that operate on a non-current
+    workspace and must not silently change which workspace ``ucode launch``
+    targets afterwards."""
+    if is_dry_run():
+        return
+    full = load_full_state()
+    if full.get("current_workspace") == workspace:
+        return
+    full["current_workspace"] = workspace
+    try:
+        APP_DIR.mkdir(parents=True, exist_ok=True)
+        STATE_PATH.write_text(json.dumps(full, indent=2), encoding="utf-8")
+    except OSError as exc:
+        raise RuntimeError(f"Failed to write state file: {STATE_PATH}") from exc
+
+
 def hydrate_state(state: dict) -> dict:
     """Normalize a workspace state entry and add derived harness config.
 

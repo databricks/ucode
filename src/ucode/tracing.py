@@ -16,13 +16,15 @@ configure command imports agents lazily to avoid a cycle.
 
 from __future__ import annotations
 
+from collections.abc import MutableMapping
+
 from ucode.databricks import (
     ensure_databricks_auth,
     get_current_user_name,
     get_databricks_token,
     get_or_create_mlflow_experiment,
 )
-from ucode.state import hydrate_state, load_full_state, save_state
+from ucode.state import hydrate_state, load_full_state, save_state, set_current_workspace
 from ucode.ui import (
     print_kv,
     print_note,
@@ -97,6 +99,24 @@ def tracing_env(state: dict, tool: str) -> dict[str, str]:
     }
 
 
+# Keys ``tracing_env`` produces — also the set we actively clear when tracing
+# is off, so a stale value already in the outer shell can't leak into the
+# agent subprocess and route traces somewhere unintended.
+TRACING_ENV_KEYS: tuple[str, ...] = ("MLFLOW_TRACKING_URI", "MLFLOW_EXPERIMENT_ID")
+
+
+def apply_tracing_env(env: MutableMapping[str, str], state: dict, tool: str) -> None:
+    """Set MLflow tracing vars on ``env`` when tracing is on for ``tool``;
+    actively remove them when it's off, so an outer-shell value doesn't bleed
+    into the agent subprocess."""
+    new = tracing_env(state, tool)
+    if new:
+        env.update(new)
+        return
+    for key in TRACING_ENV_KEYS:
+        env.pop(key, None)
+
+
 def disable_tracing(state: dict) -> dict:
     """Mark tracing disabled and rewrite each configured agent's config so the
     injected tracing keys are stripped."""
@@ -123,38 +143,68 @@ def _tracing_capable_workspaces(full: dict) -> list[str]:
     return out
 
 
-def _select_tracing_workspace() -> dict:
-    """Prompt for which configured workspace to trace, current first. Returns
-    that workspace's hydrated flat state. Mirrors the top-level configure
-    picker but offers only workspaces that already have tracing-capable agents."""
-    full = load_full_state()
+def _tracing_enabled_workspaces(full: dict) -> list[str]:
+    """Configured workspaces that currently have tracing enabled."""
     workspaces = full.get("workspaces") or {}
-    candidates = _tracing_capable_workspaces(full)
-    if not candidates:
-        raise RuntimeError(
-            "No tracing-capable agents are configured. Run `ucode configure` for "
-            "Claude Code, OpenCode, or Codex first."
-        )
+    return [ws for ws, st in workspaces.items() if ((st or {}).get("tracing") or {}).get("enabled")]
 
-    current = full.get("current_workspace")
-    candidates.sort(key=lambda ws: (ws != current, ws))
-    # Coerce a missing profile to "" (falsy) so the type matches and downstream
-    # resolves the default ~/.databrickscfg profile for that host.
-    profiles = [(ws, (workspaces.get(ws) or {}).get("profile") or "") for ws in candidates]
-    workspace, profile = prompt_for_workspace(
-        "Select the workspace to configure MLflow tracing for", profiles
-    )
 
+def _hydrate_workspace_entry(full: dict, workspace: str, profile: str | None) -> dict:
+    workspaces = full.get("workspaces") or {}
     entry = dict(workspaces.get(workspace) or {})
-    if not (set(entry.get("available_tools") or []) & set(TRACING_AGENTS)):
-        raise RuntimeError(
-            f"{workspace} has no tracing-capable agents configured. "
-            "Run `ucode configure` for it first."
-        )
     entry["workspace"] = workspace
     if profile:
         entry["profile"] = profile
     return hydrate_state(entry)
+
+
+def _select_tracing_workspace(*, only_enabled: bool = False) -> dict:
+    """Prompt for which workspace's tracing to configure, current first. Returns
+    that workspace's hydrated flat state.
+
+    ``only_enabled=True`` restricts to workspaces that currently have tracing
+    enabled (used by ``--disable``) and skips the prompt entirely when there's
+    only one match — the user has nothing meaningful to choose."""
+    full = load_full_state()
+    workspaces = full.get("workspaces") or {}
+    if only_enabled:
+        candidates = _tracing_enabled_workspaces(full)
+        if not candidates:
+            return {}
+    else:
+        candidates = _tracing_capable_workspaces(full)
+        if not candidates:
+            raise RuntimeError(
+                "No tracing-capable agents are configured. Run `ucode configure` for "
+                "Claude Code, OpenCode, or Codex first."
+            )
+
+    current = full.get("current_workspace")
+    candidates.sort(key=lambda ws: (ws != current, ws))
+
+    if len(candidates) == 1:
+        # Single match — no choice to present.
+        workspace = candidates[0]
+        profile = (workspaces.get(workspace) or {}).get("profile") or ""
+    else:
+        # Coerce a missing profile to "" (falsy) so the type matches and
+        # downstream resolves the default ~/.databrickscfg profile.
+        profiles = [(ws, (workspaces.get(ws) or {}).get("profile") or "") for ws in candidates]
+        prompt = (
+            "Tracing is enabled on multiple workspaces — pick which to disable"
+            if only_enabled
+            else "Select the workspace to configure MLflow tracing for"
+        )
+        workspace, profile = prompt_for_workspace(prompt, profiles)
+
+    if not only_enabled:
+        entry_check = workspaces.get(workspace) or {}
+        if not (set(entry_check.get("available_tools") or []) & set(TRACING_AGENTS)):
+            raise RuntimeError(
+                f"{workspace} has no tracing-capable agents configured. "
+                "Run `ucode configure` for it first."
+            )
+    return _hydrate_workspace_entry(full, workspace, profile or None)
 
 
 def _rewrite_agent_configs(state: dict) -> dict:
@@ -182,6 +232,22 @@ def _install_agent_tracing_deps(state: dict) -> None:
 
 
 def configure_tracing_command(disable: bool = False) -> int:
+    # `save_state` (called by us and by every agent config writer underneath
+    # us) flips `current_workspace` to the workspace it's saving. Tracing can
+    # be configured on a non-current workspace, so snapshot here and restore
+    # at the end — running `configure tracing` must not change which workspace
+    # `ucode launch` targets.
+    original_current = load_full_state().get("current_workspace")
+    try:
+        return _configure_tracing(disable=disable)
+    finally:
+        set_current_workspace(original_current)
+
+
+def _configure_tracing(disable: bool) -> int:
+    if disable:
+        return _disable_tracing_command()
+
     state = _select_tracing_workspace()
     workspace = state["workspace"]
     configured = _configured_tracing_agents(state)
@@ -193,14 +259,6 @@ def configure_tracing_command(disable: bool = False) -> int:
 
     # Running `ucode configure tracing` is itself the opt-in, so there's no
     # confirmation prompt; `--disable` is the explicit way back off.
-    if disable:
-        if (state.get("tracing") or {}).get("enabled"):
-            disable_tracing(state)
-            print_success("Tracing disabled")
-        else:
-            print_note("Tracing is not enabled — nothing to do.")
-        return 0
-
     token = get_databricks_token(workspace, profile)
     user_name = get_current_user_name(workspace, token)
 
@@ -232,4 +290,24 @@ def configure_tracing_command(disable: bool = False) -> int:
     state = _rewrite_agent_configs(state)
 
     print_success(f"Tracing configured for: {', '.join(agents_cfg)}")
+    return 0
+
+
+def _disable_tracing_command() -> int:
+    """``--disable`` flow: pick (or auto-select) a workspace that has tracing
+    enabled, then strip the tracing config from its agent files."""
+    state = _select_tracing_workspace(only_enabled=True)
+    if not state:
+        print_section("MLflow Tracing")
+        print_note("Tracing is not enabled on any configured workspace — nothing to do.")
+        return 0
+
+    workspace = state["workspace"]
+    profile = state.get("profile")
+    ensure_databricks_auth(workspace, profile)
+
+    print_section("MLflow Tracing")
+    print_kv("Workspace", workspace)
+    disable_tracing(state)
+    print_success("Tracing disabled")
     return 0
