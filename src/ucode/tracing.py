@@ -1,17 +1,16 @@
-"""MLflow tracing: route coding-agent sessions to a Databricks experiment.
+"""MLflow tracing: route Claude Code sessions to a Databricks experiment.
 
-ucode points every agent's MLflow integration at a single Databricks-hosted
-experiment (tracking URI ``databricks``/``databricks://<profile>`` + a numeric
-experiment id), reusing the workspace auth ucode already configures in
-``~/.databrickscfg``. Traces land in the experiment's default MLflow trace store
-(the MLflow Traces UI), not Unity Catalog.
+ucode points Claude Code's MLflow integration at a single, pre-provisioned
+experiment named ``ucode-traces`` whose traces are stored in a Unity Catalog
+table. ucode asserts the experiment exists and is UC-backed (it does not create
+it), resolves a SQL warehouse for UC writes, and persists the tracking URI,
+experiment id, and warehouse id. Auth reuses the workspace profile ucode
+already configures in ``~/.databrickscfg``.
 
-All agents and all users share one experiment, ``/Shared/ucode-traces``: it lives
-in the workspace-shared folder, so every user resolves (or first-creates) the
-same experiment by name and their sessions converge in one place.
-
-Scope: Claude Code, OpenCode, Codex. Gemini's exporter is OTLP-only and is not
-wired here yet.
+Scope: Claude Code only. Its `mlflow autolog claude` Stop hook writes traces to
+the UC table. Codex and OpenCode used the `@mlflow/codex`/`@mlflow/opencode` JS
+clients, which only reach the classic (non-UC) trace store, so their tracing was
+removed. Gemini's exporter is OTLP-only and was never wired here.
 
 This module must not import ``mlflow`` (the heavy optional dependency) or
 ``ucode.agents`` at import time: agents import the small helpers here, and the
@@ -19,8 +18,6 @@ configure command imports agents lazily to avoid a cycle.
 """
 
 from __future__ import annotations
-
-from collections.abc import MutableMapping
 
 from ucode.databricks import (
     ensure_databricks_auth,
@@ -38,9 +35,12 @@ from ucode.ui import (
     spinner,
 )
 
-# Agents whose MLflow integration routes to a Databricks tracking URI. Gemini is
-# excluded: its exporter is OTLP-only and needs a separate endpoint.
-TRACING_AGENTS: tuple[str, ...] = ("claude", "opencode", "codex")
+# Agents whose MLflow integration routes to a Databricks tracking URI. Only
+# Claude Code is supported: its `mlflow autolog claude` Stop hook writes traces
+# to the experiment's Unity Catalog table. Codex and OpenCode used the
+# `@mlflow/codex`/`@mlflow/opencode` JS clients, which only reach the classic
+# (non-UC) trace store, so their tracing was removed.
+TRACING_AGENTS: tuple[str, ...] = ("claude",)
 
 # Leaf name of the experiment every agent and every user routes to. ucode does
 # not create it: an admin provisions an experiment with this name whose traces
@@ -139,28 +139,6 @@ def tracing_env(state: dict, tool: str) -> dict[str, str]:
     return env
 
 
-# Keys ``tracing_env`` produces — also the set we actively clear when tracing
-# is off, so a stale value already in the outer shell can't leak into the
-# agent subprocess and route traces somewhere unintended.
-TRACING_ENV_KEYS: tuple[str, ...] = (
-    "MLFLOW_TRACKING_URI",
-    "MLFLOW_EXPERIMENT_ID",
-    "MLFLOW_TRACING_SQL_WAREHOUSE_ID",
-)
-
-
-def apply_tracing_env(env: MutableMapping[str, str], state: dict, tool: str) -> None:
-    """Set MLflow tracing vars on ``env`` when tracing is on for ``tool``;
-    actively remove them when it's off, so an outer-shell value doesn't bleed
-    into the agent subprocess."""
-    new = tracing_env(state, tool)
-    if new:
-        env.update(new)
-        return
-    for key in TRACING_ENV_KEYS:
-        env.pop(key, None)
-
-
 def disable_tracing(state: dict) -> dict:
     """Mark tracing disabled and rewrite each configured agent's config so the
     injected tracing keys are stripped."""
@@ -219,8 +197,7 @@ def _select_tracing_workspace(*, only_enabled: bool = False) -> dict:
         candidates = _tracing_capable_workspaces(full)
         if not candidates:
             raise RuntimeError(
-                "No tracing-capable agents are configured. Run `ucode configure` for "
-                "Claude Code, OpenCode, or Codex first."
+                "Claude Code is not configured. Run `ucode configure` for Claude Code first."
             )
 
     current = full.get("current_workspace")
@@ -264,17 +241,14 @@ def _rewrite_agent_configs(state: dict) -> dict:
 
 
 def _install_agent_tracing_deps(state: dict) -> None:
-    """One-time, per-agent dependency installs (Claude plugin + mlflow CLI,
-    Codex npm package), only for agents that are configured on this workspace
-    and have tracing on. OpenCode's plugin is auto-installed by OpenCode from
-    the ``plugin`` list."""
-    from ucode.agents import claude, codex
+    """Install the Claude tracing runtime (pinned mlflow CLI) when Claude is
+    configured on this workspace and has tracing on. Claude is the only
+    tracing-capable agent."""
+    from ucode.agents import claude
 
     configured = _configured_tracing_agents(state)
     if "claude" in configured and agent_tracing(state, "claude"):
         claude.ensure_tracing_runtime()
-    if "codex" in configured and agent_tracing(state, "codex"):
-        codex.ensure_tracing_dependency()
 
 
 def configure_tracing_command(

@@ -9,7 +9,7 @@ import pytest
 
 import ucode.databricks as databricks
 from ucode import tracing
-from ucode.agents import claude, codex, opencode
+from ucode.agents import claude
 
 WS = "https://example.databricks.com"
 
@@ -58,13 +58,11 @@ class TestAgentTracing:
         entry = tracing.agent_tracing(_enabled_state(), "claude")
         assert entry["experiment_id"] == "111"
 
-    def test_same_entry_for_every_agent(self):
+    def test_none_for_non_tracing_agents(self):
+        # Claude is the only tracing-capable agent now.
         state = _enabled_state()
-        for tool in ("claude", "codex", "opencode"):
-            assert tracing.agent_tracing(state, tool)["experiment_id"] == "111"
-
-    def test_none_for_non_tracing_agent(self):
-        assert tracing.agent_tracing(_enabled_state(), "gemini") is None
+        for tool in ("codex", "opencode", "gemini"):
+            assert tracing.agent_tracing(state, tool) is None
 
     def test_none_when_disabled(self):
         assert tracing.agent_tracing({}, "claude") is None
@@ -79,17 +77,18 @@ class TestTracingEnv:
         assert tracing.tracing_env({}, "claude") == {}
 
     def test_uri_and_experiment(self):
-        env = tracing.tracing_env(_enabled_state("p"), "codex")
+        env = tracing.tracing_env(_enabled_state("p"), "claude")
         assert env == {
             "MLFLOW_TRACKING_URI": "databricks://p",
             "MLFLOW_EXPERIMENT_ID": "111",
             "MLFLOW_TRACING_SQL_WAREHOUSE_ID": "wh123",
         }
 
-    def test_shared_experiment_across_agents(self):
+    def test_empty_for_non_claude_agents(self):
+        # Only Claude is tracing-capable; codex/opencode get nothing.
         state = _enabled_state()
-        assert tracing.tracing_env(state, "claude")["MLFLOW_EXPERIMENT_ID"] == "111"
-        assert tracing.tracing_env(state, "opencode")["MLFLOW_EXPERIMENT_ID"] == "111"
+        assert tracing.tracing_env(state, "codex") == {}
+        assert tracing.tracing_env(state, "opencode") == {}
 
     def test_includes_sql_warehouse_id(self):
         env = tracing.tracing_env(_enabled_state(), "claude")
@@ -220,101 +219,15 @@ class TestResolveSqlWarehouseId:
         assert "403" in reason
 
 
-class TestOpencodeTracingPlugin:
-    def test_added_when_enabled(self):
-        config: dict = {}
-        opencode._apply_tracing_plugin(config, _enabled_state())
-        assert config["plugin"] == ["@mlflow/opencode"]
-
-    def test_not_duplicated(self):
-        config = {"plugin": ["@mlflow/opencode"]}
-        opencode._apply_tracing_plugin(config, _enabled_state())
-        assert config["plugin"] == ["@mlflow/opencode"]
-
-    def test_removed_when_disabled(self):
-        config = {"plugin": ["@mlflow/opencode"]}
-        opencode._apply_tracing_plugin(config, {})
-        assert "plugin" not in config
-
-    def test_preserves_user_plugins_when_enabled(self):
-        config = {"plugin": ["user/thing"]}
-        opencode._apply_tracing_plugin(config, _enabled_state())
-        assert config["plugin"] == ["user/thing", "@mlflow/opencode"]
-
-    def test_preserves_user_plugins_when_disabled(self):
-        config = {"plugin": ["user/thing", "@mlflow/opencode"]}
-        opencode._apply_tracing_plugin(config, {})
-        assert config["plugin"] == ["user/thing"]
-
-
-class TestCodexTracingNotify:
-    def test_set_when_enabled(self):
-        doc: dict = {}
-        codex._apply_tracing_notify(doc, _enabled_state())
-        assert doc["notify"] == ["mlflow-codex", "notify-hook"]
-
-    def test_cleared_when_disabled(self):
-        doc = {"notify": ["mlflow-codex", "notify-hook"]}
-        codex._apply_tracing_notify(doc, {})
-        assert "notify" not in doc
-
-    def test_preserves_user_notify_when_disabled(self):
-        doc = {"notify": ["user-notify"]}
-        codex._apply_tracing_notify(doc, {})
-        assert doc["notify"] == ["user-notify"]
-
-    def test_warns_when_overwriting_user_notify(self):
-        doc = {"notify": ["user-hook"]}
-        with patch.object(codex, "print_warning") as warn:
-            codex._apply_tracing_notify(doc, _enabled_state())
-        assert doc["notify"] == ["mlflow-codex", "notify-hook"]
-        warn.assert_called_once()
-        msg = warn.call_args[0][0]
-        assert "user-hook" in msg
-        assert "backup" in msg.lower()
-
-    def test_no_warn_when_already_ucode_notify(self):
-        doc = {"notify": ["mlflow-codex", "notify-hook"]}
-        with patch.object(codex, "print_warning") as warn:
-            codex._apply_tracing_notify(doc, _enabled_state())
-        warn.assert_not_called()
-
-
-class TestApplyTracingEnv:
-    def test_sets_keys_when_enabled(self):
-        env: dict[str, str] = {}
-        tracing.apply_tracing_env(env, _enabled_state(), "codex")
-        assert env == {
-            "MLFLOW_TRACKING_URI": "databricks",
-            "MLFLOW_EXPERIMENT_ID": "111",
-            "MLFLOW_TRACING_SQL_WAREHOUSE_ID": "wh123",
-        }
-
-    def test_clears_stale_keys_when_disabled(self):
-        env = {
-            "MLFLOW_TRACKING_URI": "databricks://stale",
-            "MLFLOW_EXPERIMENT_ID": "9999",
-            "MLFLOW_TRACING_SQL_WAREHOUSE_ID": "stale-wh",
-            "UNRELATED": "keep-me",
-        }
-        tracing.apply_tracing_env(env, {}, "codex")
-        assert "MLFLOW_TRACKING_URI" not in env
-        assert "MLFLOW_EXPERIMENT_ID" not in env
-        assert "MLFLOW_TRACING_SQL_WAREHOUSE_ID" not in env
-        assert env["UNRELATED"] == "keep-me"
-
-    def test_overwrites_stale_keys_when_enabled(self):
-        env = {"MLFLOW_TRACKING_URI": "databricks://stale", "MLFLOW_EXPERIMENT_ID": "9999"}
-        tracing.apply_tracing_env(env, _enabled_state("p"), "opencode")
-        assert env["MLFLOW_TRACKING_URI"] == "databricks://p"
-        assert env["MLFLOW_EXPERIMENT_ID"] == "111"
-
-
 class TestClaudeTracingEnv:
+    STOP_HOOK_CMD = "/uv/bin/mlflow autolog claude stop-hook"
+
     def _write(self, state: dict, tmp_path, monkeypatch) -> dict:
         settings = tmp_path / "ucode-settings.json"
         monkeypatch.setattr(claude, "CLAUDE_SETTINGS_PATH", settings)
         monkeypatch.setattr(claude, "CLAUDE_BACKUP_PATH", tmp_path / "backup.json")
+        # Pin the resolved hook command so tests don't depend on a real uv/mlflow.
+        monkeypatch.setattr(claude, "claude_tracing_stop_hook_command", lambda: self.STOP_HOOK_CMD)
         claude.write_tool_config(state, "databricks-claude-opus-4-7")
         return json.loads(settings.read_text())
 
@@ -326,10 +239,17 @@ class TestClaudeTracingEnv:
         assert env["MLFLOW_EXPERIMENT_ID"] == "111"
         assert env["MLFLOW_TRACING_SQL_WAREHOUSE_ID"] == "wh123"
 
+    def test_writes_stop_hook_when_enabled(self, tmp_path, monkeypatch):
+        state = {**_enabled_state(), "claude_models": {}}
+        settings = self._write(state, tmp_path, monkeypatch)
+        hooks = settings["hooks"]["Stop"]
+        assert hooks[0]["hooks"][0]["command"] == self.STOP_HOOK_CMD
+
     def test_no_mlflow_env_when_disabled(self, tmp_path, monkeypatch):
         state = {"workspace": WS, "claude_models": {}}
-        env = self._write(state, tmp_path, monkeypatch).get("env", {})
-        assert "MLFLOW_TRACKING_URI" not in env
+        settings = self._write(state, tmp_path, monkeypatch)
+        assert "MLFLOW_TRACKING_URI" not in settings.get("env", {})
+        assert "hooks" not in settings
 
     def test_strips_stale_keys_when_disabled(self, tmp_path, monkeypatch):
         settings = tmp_path / "ucode-settings.json"
@@ -341,7 +261,8 @@ class TestClaudeTracingEnv:
                         "MLFLOW_TRACKING_URI": "databricks",
                         "MLFLOW_EXPERIMENT_ID": "1",
                         "MLFLOW_TRACING_SQL_WAREHOUSE_ID": "old-wh",
-                    }
+                    },
+                    "hooks": {"Stop": [{"hooks": [{"type": "command", "command": "stale"}]}]},
                 }
             )
         )
@@ -350,11 +271,13 @@ class TestClaudeTracingEnv:
         claude.write_tool_config(
             {"workspace": WS, "claude_models": {}}, "databricks-claude-opus-4-7"
         )
-        env = json.loads(settings.read_text())["env"]
+        doc = json.loads(settings.read_text())
+        env = doc["env"]
         assert "MLFLOW_TRACKING_URI" not in env
         assert "MLFLOW_EXPERIMENT_ID" not in env
         assert "MLFLOW_CLAUDE_TRACING_ENABLED" not in env
         assert "MLFLOW_TRACING_SQL_WAREHOUSE_ID" not in env
+        assert "hooks" not in doc
 
 
 class TestSelectTracingWorkspace:
@@ -363,15 +286,15 @@ class TestSelectTracingWorkspace:
             "current_workspace": "https://a.databricks.com",
             "workspaces": {
                 "https://a.databricks.com": {"available_tools": ["claude"], "profile": "pa"},
-                "https://b.databricks.com": {"available_tools": ["codex"], "profile": "pb"},
-                # gemini isn't a tracing-capable agent → excluded from candidates
-                "https://c.databricks.com": {"available_tools": ["gemini"]},
+                "https://b.databricks.com": {"available_tools": ["claude"], "profile": "pb"},
+                # codex/gemini aren't tracing-capable agents → excluded from candidates
+                "https://c.databricks.com": {"available_tools": ["codex", "gemini"]},
             },
         }
 
     def test_raises_when_none_configured(self):
         with patch.object(tracing, "load_full_state", return_value={"workspaces": {}}):
-            with pytest.raises(RuntimeError, match="No tracing-capable"):
+            with pytest.raises(RuntimeError, match="Claude Code is not configured"):
                 tracing._select_tracing_workspace()
 
     def test_lists_current_first_and_excludes_non_tracing(self):
@@ -402,7 +325,7 @@ class TestSelectTracingWorkspace:
             state = tracing._select_tracing_workspace()
         assert state["workspace"] == "https://b.databricks.com"
         assert state["profile"] == "pb"
-        assert "codex" in state["available_tools"]
+        assert "claude" in state["available_tools"]
 
     def test_raises_when_picked_workspace_unconfigured(self):
         with (
@@ -594,19 +517,21 @@ class TestEnableTracingForWorkspaces:
 
 
 class TestInstallAgentTracingDeps:
-    """Deps install only for agents configured on the workspace, even though the
-    shared experiment means ``agent_tracing`` would otherwise resolve for all."""
+    """Only Claude has a tracing runtime; it installs when Claude is configured
+    with tracing on, and is skipped otherwise."""
 
-    def test_only_configured_agents_get_deps(self):
-        # Codex is configured here; claude is not, so its runtime must be skipped.
+    def test_installs_claude_runtime_when_configured(self):
+        state = {**_enabled_state(), "available_tools": ["claude"]}
+        with patch("ucode.agents.claude.ensure_tracing_runtime") as claude_dep:
+            tracing._install_agent_tracing_deps(state)
+        claude_dep.assert_called_once()
+
+    def test_skips_when_claude_not_configured(self):
+        # Claude isn't configured on this workspace, so its runtime is skipped.
         state = {**_enabled_state(), "available_tools": ["codex"]}
-        with (
-            patch("ucode.agents.claude.ensure_tracing_runtime") as claude_dep,
-            patch("ucode.agents.codex.ensure_tracing_dependency") as codex_dep,
-        ):
+        with patch("ucode.agents.claude.ensure_tracing_runtime") as claude_dep:
             tracing._install_agent_tracing_deps(state)
         claude_dep.assert_not_called()
-        codex_dep.assert_called_once()
 
 
 class TestDisableTracing:
@@ -621,6 +546,18 @@ class TestDisableTracing:
         rewrite.assert_called_once()
 
 
+class TestStopHookCommand:
+    def test_builds_command_from_resolved_path(self, monkeypatch):
+        monkeypatch.setattr(claude, "_uv_tool_mlflow_path", lambda: "/uv/bin/mlflow")
+        assert (
+            claude.claude_tracing_stop_hook_command() == "/uv/bin/mlflow autolog claude stop-hook"
+        )
+
+    def test_none_when_mlflow_missing(self, monkeypatch):
+        monkeypatch.setattr(claude, "_uv_tool_mlflow_path", lambda: None)
+        assert claude.claude_tracing_stop_hook_command() is None
+
+
 class TestParseMlflowVersion:
     def test_parses_full_version(self):
         assert claude._parse_mlflow_version("mlflow, version 3.12.0") == (3, 12)
@@ -633,9 +570,9 @@ class TestParseMlflowVersion:
 
 
 class TestEnsureMlflowCli:
-    def test_noop_when_already_satisfied(self):
+    def test_noop_when_already_in_range(self):
         with (
-            patch.object(claude, "_installed_mlflow_version", return_value=(3, 5)),
+            patch.object(claude, "_installed_mlflow_version", return_value=(3, 11)),
             patch.object(claude.subprocess, "run") as run,
         ):
             assert claude._ensure_mlflow_cli() is True
@@ -644,15 +581,27 @@ class TestEnsureMlflowCli:
     def test_installs_when_missing(self, monkeypatch):
         monkeypatch.setattr(claude, "_installed_mlflow_version", lambda: None)
         monkeypatch.setattr(claude.shutil, "which", lambda binary: f"/bin/{binary}")
+        monkeypatch.setattr(claude, "_uv_tool_mlflow_path", lambda: "/bin/mlflow")
         with patch.object(claude.subprocess, "run") as run:
             assert claude._ensure_mlflow_cli() is True
         cmd = run.call_args[0][0]
         assert cmd[:3] == ["uv", "tool", "install"]
+        assert claude.MLFLOW_CLI_SPEC in cmd
         assert "--force" not in cmd
 
-    def test_force_upgrades_when_below_minimum(self, monkeypatch):
-        monkeypatch.setattr(claude, "_installed_mlflow_version", lambda: (3, 1))
+    def test_force_replaces_when_below_minimum(self, monkeypatch):
+        monkeypatch.setattr(claude, "_installed_mlflow_version", lambda: (3, 4))
         monkeypatch.setattr(claude.shutil, "which", lambda binary: f"/bin/{binary}")
+        monkeypatch.setattr(claude, "_uv_tool_mlflow_path", lambda: "/bin/mlflow")
+        with patch.object(claude.subprocess, "run") as run:
+            assert claude._ensure_mlflow_cli() is True
+        assert "--force" in run.call_args[0][0]
+
+    def test_force_replaces_when_above_maximum(self, monkeypatch):
+        # 3.12 dropped UC trace writes — it must be replaced, not left alone.
+        monkeypatch.setattr(claude, "_installed_mlflow_version", lambda: (3, 12))
+        monkeypatch.setattr(claude.shutil, "which", lambda binary: f"/bin/{binary}")
+        monkeypatch.setattr(claude, "_uv_tool_mlflow_path", lambda: "/bin/mlflow")
         with patch.object(claude.subprocess, "run") as run:
             assert claude._ensure_mlflow_cli() is True
         assert "--force" in run.call_args[0][0]
