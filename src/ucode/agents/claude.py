@@ -398,10 +398,10 @@ def _ensure_mlflow_cli() -> bool:
         return False
 
     print_note(f"{'Replacing' if current else 'Installing'} the mlflow CLI ({MLFLOW_CLI_SPEC})...")
-    # --force replaces an existing (out-of-range) uv-managed mlflow in place.
-    cmd = ["uv", "tool", "install", MLFLOW_CLI_SPEC]
-    if current:
-        cmd.append("--force")
+    # Always --force: it installs fresh when absent and replaces in place when
+    # present. Keying it on `current` broke when an mlflow existed but its
+    # version couldn't be parsed — uv still errors "Executable already exists".
+    cmd = ["uv", "tool", "install", "--force", MLFLOW_CLI_SPEC]
     try:
         subprocess.run(cmd, check=True, timeout=600)
     except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:

@@ -650,7 +650,9 @@ class TestEnsureMlflowCli:
         cmd = run.call_args[0][0]
         assert cmd[:3] == ["uv", "tool", "install"]
         assert claude.MLFLOW_CLI_SPEC in cmd
-        assert "--force" not in cmd
+        # Always --force so an unparseable-version mlflow on disk doesn't trip
+        # uv's "Executable already exists" error.
+        assert "--force" in cmd
 
     def test_force_replaces_when_below_minimum(self, monkeypatch):
         monkeypatch.setattr(claude, "_installed_mlflow_version", lambda: (3, 4))
