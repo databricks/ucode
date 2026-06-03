@@ -380,6 +380,34 @@ def find_uc_backed_experiment(
     )
 
 
+def resolve_sql_warehouse_id(workspace: str, token: str) -> tuple[str | None, str | None]:
+    """Pick a SQL warehouse for writing traces to a UC-backed experiment.
+
+    Writing traces to a Unity Catalog table requires a SQL warehouse
+    (``MLFLOW_TRACING_SQL_WAREHOUSE_ID``); without one the MLflow exporter
+    silently drops them. We prefer a RUNNING warehouse so the first trace isn't
+    blocked on a cold start, falling back to any existing warehouse (a stopped
+    one auto-starts on first query). Returns (warehouse_id, reason); reason is
+    None on success, else explains why none could be resolved."""
+    hostname = workspace_hostname(workspace)
+    payload, reason = _http_get_json(f"https://{hostname}/api/2.0/sql/warehouses", token)
+    if not isinstance(payload, dict):
+        return None, reason or "could not list SQL warehouses"
+
+    warehouses = payload.get("warehouses")
+    warehouses = (
+        [w for w in warehouses if isinstance(w, dict) and w.get("id")]
+        if isinstance(warehouses, list)
+        else []
+    )
+    if not warehouses:
+        return None, "no SQL warehouse exists on this workspace"
+
+    running = next((w for w in warehouses if str(w.get("state")).upper() == "RUNNING"), None)
+    chosen = running or warehouses[0]
+    return str(chosen["id"]), None
+
+
 @overload
 def run(
     args: list[str],

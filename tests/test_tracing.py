@@ -27,6 +27,7 @@ def _enabled_state(profile: str | None = None) -> dict:
             "experiment_id": SHARED_EXPERIMENT_ID,
             "experiment_name": "/Shared/ucode-traces",
             "uc_destination": "main.default.ucode_traces",
+            "sql_warehouse_id": "wh123",
         },
     }
 
@@ -82,12 +83,22 @@ class TestTracingEnv:
         assert env == {
             "MLFLOW_TRACKING_URI": "databricks://p",
             "MLFLOW_EXPERIMENT_ID": "111",
+            "MLFLOW_TRACING_SQL_WAREHOUSE_ID": "wh123",
         }
 
     def test_shared_experiment_across_agents(self):
         state = _enabled_state()
         assert tracing.tracing_env(state, "claude")["MLFLOW_EXPERIMENT_ID"] == "111"
         assert tracing.tracing_env(state, "opencode")["MLFLOW_EXPERIMENT_ID"] == "111"
+
+    def test_includes_sql_warehouse_id(self):
+        env = tracing.tracing_env(_enabled_state(), "claude")
+        assert env["MLFLOW_TRACING_SQL_WAREHOUSE_ID"] == "wh123"
+
+    def test_omits_warehouse_when_absent(self):
+        state = _enabled_state()
+        del state["tracing"]["sql_warehouse_id"]
+        assert "MLFLOW_TRACING_SQL_WAREHOUSE_ID" not in tracing.tracing_env(state, "claude")
 
 
 class TestExperimentName:
@@ -171,6 +182,44 @@ class TestFindUcBackedExperiment:
         assert "403" in reason
 
 
+class TestResolveSqlWarehouseId:
+    def test_prefers_running_warehouse(self):
+        payload = {
+            "warehouses": [
+                {"id": "stopped1", "state": "STOPPED"},
+                {"id": "running1", "state": "RUNNING"},
+            ]
+        }
+        with patch.object(databricks, "_http_get_json", return_value=(payload, None)):
+            wh, reason = databricks.resolve_sql_warehouse_id(WS, "tok")
+        assert wh == "running1"
+        assert reason is None
+
+    def test_falls_back_to_first_when_none_running(self):
+        payload = {
+            "warehouses": [
+                {"id": "stopped1", "state": "STOPPED"},
+                {"id": "stopped2", "state": "STOPPED"},
+            ]
+        }
+        with patch.object(databricks, "_http_get_json", return_value=(payload, None)):
+            wh, reason = databricks.resolve_sql_warehouse_id(WS, "tok")
+        assert wh == "stopped1"
+        assert reason is None
+
+    def test_none_when_no_warehouses(self):
+        with patch.object(databricks, "_http_get_json", return_value=({"warehouses": []}, None)):
+            wh, reason = databricks.resolve_sql_warehouse_id(WS, "tok")
+        assert wh is None
+        assert "no SQL warehouse" in reason
+
+    def test_returns_reason_on_failure(self):
+        with patch.object(databricks, "_http_get_json", return_value=(None, "HTTP 403 Forbidden")):
+            wh, reason = databricks.resolve_sql_warehouse_id(WS, "tok")
+        assert wh is None
+        assert "403" in reason
+
+
 class TestOpencodeTracingPlugin:
     def test_added_when_enabled(self):
         config: dict = {}
@@ -235,17 +284,23 @@ class TestApplyTracingEnv:
     def test_sets_keys_when_enabled(self):
         env: dict[str, str] = {}
         tracing.apply_tracing_env(env, _enabled_state(), "codex")
-        assert env == {"MLFLOW_TRACKING_URI": "databricks", "MLFLOW_EXPERIMENT_ID": "111"}
+        assert env == {
+            "MLFLOW_TRACKING_URI": "databricks",
+            "MLFLOW_EXPERIMENT_ID": "111",
+            "MLFLOW_TRACING_SQL_WAREHOUSE_ID": "wh123",
+        }
 
     def test_clears_stale_keys_when_disabled(self):
         env = {
             "MLFLOW_TRACKING_URI": "databricks://stale",
             "MLFLOW_EXPERIMENT_ID": "9999",
+            "MLFLOW_TRACING_SQL_WAREHOUSE_ID": "stale-wh",
             "UNRELATED": "keep-me",
         }
         tracing.apply_tracing_env(env, {}, "codex")
         assert "MLFLOW_TRACKING_URI" not in env
         assert "MLFLOW_EXPERIMENT_ID" not in env
+        assert "MLFLOW_TRACING_SQL_WAREHOUSE_ID" not in env
         assert env["UNRELATED"] == "keep-me"
 
     def test_overwrites_stale_keys_when_enabled(self):
@@ -269,6 +324,7 @@ class TestClaudeTracingEnv:
         assert env["MLFLOW_CLAUDE_TRACING_ENABLED"] == "true"
         assert env["MLFLOW_TRACKING_URI"] == "databricks"
         assert env["MLFLOW_EXPERIMENT_ID"] == "111"
+        assert env["MLFLOW_TRACING_SQL_WAREHOUSE_ID"] == "wh123"
 
     def test_no_mlflow_env_when_disabled(self, tmp_path, monkeypatch):
         state = {"workspace": WS, "claude_models": {}}
@@ -284,6 +340,7 @@ class TestClaudeTracingEnv:
                         "MLFLOW_CLAUDE_TRACING_ENABLED": "true",
                         "MLFLOW_TRACKING_URI": "databricks",
                         "MLFLOW_EXPERIMENT_ID": "1",
+                        "MLFLOW_TRACING_SQL_WAREHOUSE_ID": "old-wh",
                     }
                 }
             )
@@ -297,6 +354,7 @@ class TestClaudeTracingEnv:
         assert "MLFLOW_TRACKING_URI" not in env
         assert "MLFLOW_EXPERIMENT_ID" not in env
         assert "MLFLOW_CLAUDE_TRACING_ENABLED" not in env
+        assert "MLFLOW_TRACING_SQL_WAREHOUSE_ID" not in env
 
 
 class TestSelectTracingWorkspace:

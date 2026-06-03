@@ -26,6 +26,7 @@ from ucode.databricks import (
     ensure_databricks_auth,
     find_uc_backed_experiment,
     get_databricks_token,
+    resolve_sql_warehouse_id,
 )
 from ucode.state import hydrate_state, load_full_state, save_state, set_current_workspace
 from ucode.ui import (
@@ -79,6 +80,19 @@ def _missing_experiment_error(name: str, reason: str | None) -> str:
     )
 
 
+def _missing_warehouse_error(reason: str | None) -> str:
+    """Actionable error when no SQL warehouse can back UC trace writes. The
+    warehouse is mandatory: traces to a UC table are silently dropped without
+    ``MLFLOW_TRACING_SQL_WAREHOUSE_ID``."""
+    detail = f" ({reason})" if reason else ""
+    return (
+        f"No SQL warehouse is available to write traces to Unity Catalog{detail}.\n"
+        "Writing traces to a UC-backed experiment requires a SQL warehouse:\n"
+        "  1. Create a SQL warehouse in the workspace (SQL > SQL Warehouses).\n"
+        "  2. Re-run `ucode configure tracing`."
+    )
+
+
 def tracing_config(state: dict) -> dict | None:
     """Return the persisted tracing block iff tracing is enabled."""
     cfg = state.get("tracing")
@@ -106,21 +120,33 @@ def agent_tracing(state: dict, tool: str) -> dict | None:
 def tracing_env(state: dict, tool: str) -> dict[str, str]:
     """MLflow env vars for one agent. Empty when tracing is disabled for it. The
     tracking URI carries the profile, so auth resolves from ``~/.databrickscfg``
-    without extra vars."""
+    without extra vars.
+
+    ``MLFLOW_TRACING_SQL_WAREHOUSE_ID`` is required for the experiment's
+    Unity Catalog trace table: without it the MLflow exporter silently drops
+    every trace."""
     cfg = tracing_config(state)
     entry = agent_tracing(state, tool)
     if not cfg or not entry:
         return {}
-    return {
+    env = {
         "MLFLOW_TRACKING_URI": str(cfg["tracking_uri"]),
         "MLFLOW_EXPERIMENT_ID": str(entry["experiment_id"]),
     }
+    warehouse_id = cfg.get("sql_warehouse_id")
+    if warehouse_id:
+        env["MLFLOW_TRACING_SQL_WAREHOUSE_ID"] = str(warehouse_id)
+    return env
 
 
 # Keys ``tracing_env`` produces — also the set we actively clear when tracing
 # is off, so a stale value already in the outer shell can't leak into the
 # agent subprocess and route traces somewhere unintended.
-TRACING_ENV_KEYS: tuple[str, ...] = ("MLFLOW_TRACKING_URI", "MLFLOW_EXPERIMENT_ID")
+TRACING_ENV_KEYS: tuple[str, ...] = (
+    "MLFLOW_TRACKING_URI",
+    "MLFLOW_EXPERIMENT_ID",
+    "MLFLOW_TRACING_SQL_WAREHOUSE_ID",
+)
 
 
 def apply_tracing_env(env: MutableMapping[str, str], state: dict, tool: str) -> None:
@@ -320,12 +346,21 @@ def _enable_tracing_for_state(state: dict) -> dict:
     if not experiment:
         raise RuntimeError(_missing_experiment_error(name, reason))
 
+    # A UC-backed experiment needs a SQL warehouse to write traces — without
+    # `MLFLOW_TRACING_SQL_WAREHOUSE_ID` the exporter silently drops them — so a
+    # warehouse is mandatory, not optional.
+    with spinner("Resolving a SQL warehouse for trace storage..."):
+        warehouse_id, wh_reason = resolve_sql_warehouse_id(workspace, token)
+    if not warehouse_id:
+        raise RuntimeError(_missing_warehouse_error(wh_reason))
+
     state["tracing"] = {
         "enabled": True,
         "tracking_uri": tracking_uri_for_state(state),
         "experiment_id": experiment["experiment_id"],
         "experiment_name": experiment["experiment_name"],
         "uc_destination": experiment["uc_destination"],
+        "sql_warehouse_id": warehouse_id,
     }
     save_state(state)
 
@@ -335,6 +370,7 @@ def _enable_tracing_for_state(state: dict) -> dict:
         f"{experiment['experiment_name']} (id {experiment['experiment_id']})",
     )
     print_kv("Unity Catalog", experiment["uc_destination"])
+    print_kv("SQL warehouse", warehouse_id)
 
     _install_agent_tracing_deps(state)
     state = _rewrite_agent_configs(state)

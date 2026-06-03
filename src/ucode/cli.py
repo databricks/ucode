@@ -401,6 +401,9 @@ def status() -> int:
         uc_destination = tracing.get("uc_destination")
         if uc_destination:
             print_kv("Unity Catalog", str(uc_destination))
+        sql_warehouse_id = tracing.get("sql_warehouse_id")
+        if sql_warehouse_id:
+            print_kv("SQL warehouse", str(sql_warehouse_id))
     else:
         print_kv("MLflow tracing", "disabled")
 
