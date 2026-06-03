@@ -304,4 +304,3 @@ class TestPromptForWorkspace:
         assert "…" in row_title
         # Value tuple still carries the full name.
         assert choices[1].value == profiles[0]
-
