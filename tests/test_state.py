@@ -17,6 +17,7 @@ from ucode.state import (
     load_state,
     mark_tool_managed,
     save_state,
+    select_model_for_policies,
 )
 
 FAKE_WS = "https://example.databricks.com"
@@ -147,7 +148,12 @@ class TestClearState:
 class TestHydrateState:
     def test_empty_input_returns_empty(self):
         result = hydrate_state({})
-        assert result == {"managed_configs": {}, "base_urls": {}, "agents": {}}
+        assert result == {
+            "managed_configs": {},
+            "policies": {},
+            "base_urls": {},
+            "agents": {},
+        }
 
     def test_non_dict_returns_empty(self):
         assert hydrate_state(None) == {}  # type: ignore[arg-type]
@@ -210,6 +216,83 @@ class TestBuildAgentState:
 # mark_tool_managed
 # ---------------------------------------------------------------------------
 
+
+class TestPolicies:
+    """Schema preservation + pure policy evaluation."""
+    _SPENDING_POLICY = {
+        "spending_limit": {
+            "threshold_usd": 50,
+            "fallback_model": "databricks-claude-haiku-3.5",
+        },
+    }
+
+    def test_policies_round_trip_through_save_and_load(self):
+        save_state({"workspace": FAKE_WS, "policies": self._SPENDING_POLICY})
+        loaded = load_state()
+        assert loaded["policies"] == self._SPENDING_POLICY
+
+    def test_hydrate_defaults_policies_to_empty_dict(self):
+        result = hydrate_state({"workspace": FAKE_WS})
+        assert result["policies"] == {}
+
+    def test_hydrate_drops_malformed_spending_limit(self):
+        result = hydrate_state(
+            {
+                "workspace": FAKE_WS,
+                "policies": {
+                    "spending_limit": {
+                        "threshold_usd": "fifty",
+                        "fallback_model": "databricks-claude-haiku-3.5",
+                    },
+                },
+            }
+        )
+        assert result["policies"] == {}
+
+    def test_select_model_returns_requested_when_under_threshold(self):
+        assert (
+            select_model_for_policies(
+                {"policies": self._SPENDING_POLICY},
+                "databricks-claude-opus-4",
+                current_spend_usd=49.99,
+            )
+            == "databricks-claude-opus-4"
+        )
+
+    def test_select_model_returns_fallback_when_at_or_over_threshold(self):
+        assert (
+            select_model_for_policies(
+                {"policies": self._SPENDING_POLICY},
+                "databricks-claude-opus-4",
+                current_spend_usd=75.0,
+            )
+            == "databricks-claude-haiku-3.5"
+        )
+
+    def test_select_model_returns_requested_when_no_policy_configured(self):
+        assert (
+            select_model_for_policies(
+                {}, "databricks-claude-opus-4", current_spend_usd=9999.0
+            )
+            == "databricks-claude-opus-4"
+        )
+
+    def test_select_model_uses_default_model_when_under_threshold(self):
+        state = {
+            "policies": {
+                "spending_limit": {
+                    "threshold_usd": 50,
+                    "default_model": "databricks-claude-sonnet-4",
+                    "fallback_model": "databricks-claude-haiku-3.5",
+                },
+            },
+        }
+        assert (
+            select_model_for_policies(
+                state, "databricks-claude-opus-4", current_spend_usd=10.0
+            )
+            == "databricks-claude-sonnet-4"
+        )
 
 class TestMarkToolManaged:
     def test_sets_managed_keys(self):

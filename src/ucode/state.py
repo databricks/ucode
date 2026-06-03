@@ -72,12 +72,45 @@ def set_current_workspace(workspace: str | None) -> None:
         raise RuntimeError(f"Failed to write state file: {STATE_PATH}") from exc
 
 
+def _normalize_policies(raw: object) -> dict:
+    """Return a well-formed ``policies`` block, dropping anything malformed.
+    Today the only supported policy is ``spending_limit``::
+        {
+          "threshold_usd": <number>,           # required
+          "fallback_model": <model_id string>, # required — over-threshold model
+          "default_model":  <model_id string>, # optional — under-threshold model
+        }
+    """
+    if not isinstance(raw, dict):
+        return {}
+    out: dict = {}
+    spending = raw.get("spending_limit")
+    if isinstance(spending, dict):
+        threshold = spending.get("threshold_usd")
+        fallback = spending.get("fallback_model")
+        if (
+            isinstance(threshold, (int, float))
+            and not isinstance(threshold, bool)
+            and isinstance(fallback, str)
+            and fallback
+        ):
+            normalized: dict = {
+                "threshold_usd": threshold,
+                "fallback_model": fallback,
+            }
+            default = spending.get("default_model")
+            if isinstance(default, str) and default:
+                normalized["default_model"] = default
+            out["spending_limit"] = normalized
+    return out
+
+
 def hydrate_state(state: dict) -> dict:
     """Normalize a workspace state entry and add derived harness config.
 
     :param state: Raw workspace state entry from ``state.json``.
     :returns: Hydrated workspace state with stable ``managed_configs``,
-        ``base_urls``, and per-agent ``agents`` entries.
+        ``policies``, ``base_urls``, and per-agent ``agents`` entries.
     """
     if not isinstance(state, dict):
         return {}
@@ -94,6 +127,7 @@ def hydrate_state(state: dict) -> dict:
         elif entry:
             normalized[tool] = {"keys": []}
     hydrated["managed_configs"] = normalized
+    hydrated["policies"] = _normalize_policies(hydrated.get("policies"))
 
     workspace = hydrated.get("workspace")
     if workspace:
@@ -104,6 +138,44 @@ def hydrate_state(state: dict) -> dict:
         hydrated["agents"] = {}
 
     return hydrated
+
+
+def select_model_for_policies(
+    state: dict,
+    requested_model: str,
+    current_spend_usd: float,
+) -> str:
+    """Apply any configured policies to a model selection decision.
+    Today only the ``spending_limit`` policy is consulted.
+
+    TODO: ``current_spend_usd`` is currently expected from the caller.
+    Wire this to the Databricks Budgets API"""
+    policies = state.get("policies") or {}
+    if not isinstance(policies, dict):
+        return requested_model
+
+    spending_limit = policies.get("spending_limit")
+    if not isinstance(spending_limit, dict):
+        return requested_model
+
+    threshold = spending_limit.get("threshold_usd")
+    fallback = spending_limit.get("fallback_model")
+    if (
+        not isinstance(threshold, (int, float))
+        or isinstance(threshold, bool)
+        or not isinstance(fallback, str)
+        or not fallback
+    ):
+        return requested_model
+
+    if current_spend_usd >= threshold:
+        return fallback
+
+    default = spending_limit.get("default_model")
+    if isinstance(default, str) and default:
+        return default
+
+    return requested_model
 
 
 def build_agent_state(state: dict) -> dict[str, dict]:
