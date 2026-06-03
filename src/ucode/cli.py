@@ -398,6 +398,9 @@ def status() -> int:
             "Experiment",
             f"{tracing.get('experiment_name')} (id {tracing.get('experiment_id')})",
         )
+        uc_destination = tracing.get("uc_destination")
+        if uc_destination:
+            print_kv("Unity Catalog", str(uc_destination))
     else:
         print_kv("MLflow tracing", "disabled")
 

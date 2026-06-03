@@ -26,6 +26,7 @@ def _enabled_state(profile: str | None = None) -> dict:
             "tracking_uri": f"databricks://{profile}" if profile else "databricks",
             "experiment_id": SHARED_EXPERIMENT_ID,
             "experiment_name": "/Shared/ucode-traces",
+            "uc_destination": "main.default.ucode_traces",
         },
     }
 
@@ -90,64 +91,82 @@ class TestTracingEnv:
 
 
 class TestExperimentName:
-    def test_single_shared_path(self):
-        assert tracing.experiment_name() == "/Shared/ucode-traces"
+    def test_leaf_name(self):
+        assert tracing.experiment_name() == "ucode-traces"
 
 
-class TestGetOrCreateExperiment:
-    def test_existing_returns_id(self):
-        with patch.object(
-            databricks,
-            "_http_get_json",
-            return_value=({"experiment": {"experiment_id": "42"}}, None),
-        ):
-            exp, reason = databricks.get_or_create_mlflow_experiment(WS, "tok", "/Shared/x")
-        assert exp == "42"
-        assert reason is None
+def _experiment(name: str, exp_id: str, uc_destination: str | None) -> dict:
+    tags = [{"key": "mlflow.experiment.sourceName", "value": name}]
+    if uc_destination is not None:
+        tags.append({"key": databricks.UC_TRACE_DESTINATION_TAG, "value": uc_destination})
+    return {"experiment_id": exp_id, "name": name, "tags": tags}
 
-    def test_creates_when_missing(self):
-        with (
-            patch.object(
-                databricks,
-                "_http_get_json",
-                return_value=(None, "HTTP 404 RESOURCE_DOES_NOT_EXIST"),
-            ),
-            patch.object(
-                databricks, "_http_post_json", return_value=({"experiment_id": "99"}, None)
-            ) as post,
-        ):
-            exp, reason = databricks.get_or_create_mlflow_experiment(WS, "tok", "/Shared/x")
-        assert exp == "99"
-        assert reason is None
-        post.assert_called_once()
 
-    def test_refetches_on_already_exists_race(self):
-        get_results = iter(
-            [
-                (None, "HTTP 404 RESOURCE_DOES_NOT_EXIST"),
-                ({"experiment": {"experiment_id": "7"}}, None),
+class TestFindUcBackedExperiment:
+    def test_returns_uc_backed_match(self):
+        payload = {
+            "experiments": [
+                _experiment("/Users/me@example.com/ucode-traces", "42", "main.default.ucode_traces")
             ]
-        )
-        with (
-            patch.object(
-                databricks, "_http_get_json", side_effect=lambda *a, **k: next(get_results)
-            ),
-            patch.object(
-                databricks,
-                "_http_post_json",
-                return_value=(None, "HTTP 400: RESOURCE_ALREADY_EXISTS"),
-            ),
-        ):
-            exp, reason = databricks.get_or_create_mlflow_experiment(WS, "tok", "/Shared/x")
-        assert exp == "7"
+        }
+        with patch.object(databricks, "_http_post_json", return_value=(payload, None)):
+            exp, reason = databricks.find_uc_backed_experiment(WS, "tok", "ucode-traces")
         assert reason is None
+        assert exp == {
+            "experiment_id": "42",
+            "experiment_name": "/Users/me@example.com/ucode-traces",
+            "uc_destination": "main.default.ucode_traces",
+        }
 
-    def test_returns_reason_on_failure(self):
-        with (
-            patch.object(databricks, "_http_get_json", return_value=(None, "HTTP 403 Forbidden")),
-            patch.object(databricks, "_http_post_json", return_value=(None, "HTTP 403 Forbidden")),
-        ):
-            exp, reason = databricks.get_or_create_mlflow_experiment(WS, "tok", "/Shared/x")
+    def test_any_catalog_schema_table_qualifies(self):
+        payload = {"experiments": [_experiment("/Shared/ucode-traces", "7", "cat.sch.tbl")]}
+        with patch.object(databricks, "_http_post_json", return_value=(payload, None)):
+            exp, _ = databricks.find_uc_backed_experiment(WS, "tok", "ucode-traces")
+        assert exp["uc_destination"] == "cat.sch.tbl"
+
+    def test_none_when_no_experiment(self):
+        with patch.object(databricks, "_http_post_json", return_value=({"experiments": []}, None)):
+            exp, reason = databricks.find_uc_backed_experiment(WS, "tok", "ucode-traces")
+        assert exp is None
+        assert "no experiment named 'ucode-traces'" in reason
+
+    def test_none_when_match_not_uc_backed(self):
+        payload = {"experiments": [_experiment("/Shared/ucode-traces", "9", None)]}
+        with patch.object(databricks, "_http_post_json", return_value=(payload, None)):
+            exp, reason = databricks.find_uc_backed_experiment(WS, "tok", "ucode-traces")
+        assert exp is None
+        assert "not backed by Unity Catalog" in reason
+
+    def test_rejects_non_three_part_destination(self):
+        payload = {"experiments": [_experiment("/Shared/ucode-traces", "9", "main.default")]}
+        with patch.object(databricks, "_http_post_json", return_value=(payload, None)):
+            exp, reason = databricks.find_uc_backed_experiment(WS, "tok", "ucode-traces")
+        assert exp is None
+        assert "not backed by Unity Catalog" in reason
+
+    def test_leaf_match_excludes_substring_names(self):
+        # "team-ucode-traces" ends with the leaf as a substring but is a
+        # different experiment — only an exact final path segment counts.
+        payload = {"experiments": [_experiment("/Shared/team-ucode-traces", "1", "c.s.t")]}
+        with patch.object(databricks, "_http_post_json", return_value=(payload, None)):
+            exp, reason = databricks.find_uc_backed_experiment(WS, "tok", "ucode-traces")
+        assert exp is None
+        assert "no experiment named 'ucode-traces'" in reason
+
+    def test_prefers_uc_backed_over_plain_duplicate(self):
+        payload = {
+            "experiments": [
+                _experiment("/Users/a@x.com/ucode-traces", "1", None),
+                _experiment("/Shared/ucode-traces", "2", "main.default.tbl"),
+            ]
+        }
+        with patch.object(databricks, "_http_post_json", return_value=(payload, None)):
+            exp, _ = databricks.find_uc_backed_experiment(WS, "tok", "ucode-traces")
+        assert exp["experiment_id"] == "2"
+
+    def test_returns_reason_on_search_failure(self):
+        with patch.object(databricks, "_http_post_json", return_value=(None, "HTTP 403 Forbidden")):
+            exp, reason = databricks.find_uc_backed_experiment(WS, "tok", "ucode-traces")
         assert exp is None
         assert "403" in reason
 

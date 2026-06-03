@@ -24,8 +24,8 @@ from collections.abc import MutableMapping
 
 from ucode.databricks import (
     ensure_databricks_auth,
+    find_uc_backed_experiment,
     get_databricks_token,
-    get_or_create_mlflow_experiment,
 )
 from ucode.state import hydrate_state, load_full_state, save_state, set_current_workspace
 from ucode.ui import (
@@ -41,10 +41,12 @@ from ucode.ui import (
 # excluded: its exporter is OTLP-only and needs a separate endpoint.
 TRACING_AGENTS: tuple[str, ...] = ("claude", "opencode", "codex")
 
-# Single experiment every agent and every user routes to. It lives under the
-# workspace-shared folder (not `/Users/<email>/...`) so all users resolve — or
-# first-create — the same experiment by name and their sessions converge there.
-SHARED_EXPERIMENT_NAME = "/Shared/ucode-traces"
+# Leaf name of the experiment every agent and every user routes to. ucode does
+# not create it: an admin provisions an experiment with this name whose traces
+# are backed by Unity Catalog, and ucode asserts it exists. The full path can be
+# anything (e.g. `/Users/<email>/ucode-traces` or `/Shared/ucode-traces`) — only
+# the final segment must match, and the traces must land in a UC table.
+EXPERIMENT_LEAF_NAME = "ucode-traces"
 
 
 def tracking_uri_for_state(state: dict) -> str:
@@ -56,8 +58,25 @@ def tracking_uri_for_state(state: dict) -> str:
 
 
 def experiment_name() -> str:
-    """The single shared experiment path all agents and users route to."""
-    return SHARED_EXPERIMENT_NAME
+    """The leaf name of the shared, UC-backed experiment ucode requires."""
+    return EXPERIMENT_LEAF_NAME
+
+
+def _missing_experiment_error(name: str, reason: str | None) -> str:
+    """Actionable error when no UC-backed ``ucode-traces`` experiment is found.
+    ucode no longer creates the experiment, so the fix is for an admin to set
+    one up with Unity Catalog trace storage."""
+    detail = f" ({reason})" if reason else ""
+    return (
+        f"No Unity Catalog-backed MLflow experiment named '{name}' was found on this "
+        f"workspace{detail}.\n"
+        "ucode does not create it — an admin must provision one whose traces are "
+        "stored in Unity Catalog:\n"
+        f"  1. In the workspace, create an MLflow experiment named '{name}'.\n"
+        "  2. Configure its trace storage to a Unity Catalog table "
+        "(any catalog.schema.table you have access to).\n"
+        "  3. Re-run `ucode configure tracing`."
+    )
 
 
 def tracing_config(state: dict) -> dict | None:
@@ -291,23 +310,31 @@ def _enable_tracing_for_state(state: dict) -> dict:
     # confirmation prompt; `--disable` is the explicit way back off.
     token = get_databricks_token(workspace, profile)
 
-    # One shared experiment for every agent and every user on this workspace.
+    # ucode does not create the experiment: an admin must have already
+    # provisioned a `ucode-traces` experiment whose traces are backed by Unity
+    # Catalog. Assert it exists (and is UC-backed), failing with setup steps if
+    # not, so every agent and user routes to the same UC-backed sink.
     name = experiment_name()
-    with spinner("Resolving MLflow experiment..."):
-        exp_id, reason = get_or_create_mlflow_experiment(workspace, token, name)
-    if not exp_id:
-        raise RuntimeError(f"Could not resolve MLflow experiment {name}: {reason}")
+    with spinner("Looking for the ucode-traces experiment..."):
+        experiment, reason = find_uc_backed_experiment(workspace, token, name)
+    if not experiment:
+        raise RuntimeError(_missing_experiment_error(name, reason))
 
     state["tracing"] = {
         "enabled": True,
         "tracking_uri": tracking_uri_for_state(state),
-        "experiment_id": exp_id,
-        "experiment_name": name,
+        "experiment_id": experiment["experiment_id"],
+        "experiment_name": experiment["experiment_name"],
+        "uc_destination": experiment["uc_destination"],
     }
     save_state(state)
 
     print_kv("Tracking URI", str(state["tracing"]["tracking_uri"]))
-    print_kv("Experiment", f"{name} (id {exp_id})")
+    print_kv(
+        "Experiment",
+        f"{experiment['experiment_name']} (id {experiment['experiment_id']})",
+    )
+    print_kv("Unity Catalog", experiment["uc_destination"])
 
     _install_agent_tracing_deps(state)
     state = _rewrite_agent_configs(state)

@@ -26,7 +26,7 @@ import time
 import pytest
 
 from ucode import tracing
-from ucode.databricks import get_or_create_mlflow_experiment
+from ucode.databricks import find_uc_backed_experiment
 
 # How long to wait for an emitted trace to show up in the experiment. Trace
 # ingestion is asynchronous, so we poll.
@@ -91,12 +91,14 @@ class TestClaudeTracingE2E:
         monkeypatch.setattr(claude, "CLAUDE_SETTINGS_PATH", tmp_path / "ucode-settings.json")
         monkeypatch.setattr(claude, "CLAUDE_BACKUP_PATH", tmp_path / "claude-settings.backup.json")
 
-        # Resolve the single shared experiment all agents/users route to.
-        experiment_name = tracing.experiment_name()
-        experiment_id, reason = get_or_create_mlflow_experiment(
-            e2e_workspace, token, experiment_name
-        )
-        assert experiment_id, f"could not resolve experiment {experiment_name}: {reason}"
+        # Find the shared, UC-backed `ucode-traces` experiment. ucode no longer
+        # creates it, so this workspace must already have one provisioned.
+        leaf_name = tracing.experiment_name()
+        experiment, reason = find_uc_backed_experiment(e2e_workspace, token, leaf_name)
+        if not experiment:
+            pytest.skip(f"no UC-backed '{leaf_name}' experiment on this workspace: {reason}")
+        experiment_id = experiment["experiment_id"]
+        experiment_name = experiment["experiment_name"]
 
         state = {
             **e2e_state,
@@ -106,6 +108,7 @@ class TestClaudeTracingE2E:
                 "tracking_uri": tracing.tracking_uri_for_state({"workspace": e2e_workspace}),
                 "experiment_id": experiment_id,
                 "experiment_name": experiment_name,
+                "uc_destination": experiment["uc_destination"],
             },
         }
 

@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Literal, cast, overload
 from urllib import error as urllib_error
 from urllib import request as urllib_request
-from urllib.parse import quote, urlparse
+from urllib.parse import urlparse
 
 from databricks.sql.exc import ServerOperationError
 
@@ -300,56 +300,84 @@ def get_current_user_name(workspace: str, token: str) -> str | None:
     return None
 
 
-def _mlflow_experiment_id_from_payload(payload: dict | list | None) -> str | None:
-    """Pull an experiment_id from a get-by-name (`{"experiment": {...}}`) or
-    create (`{"experiment_id": ...}`) MLflow REST response."""
-    if not isinstance(payload, dict):
-        return None
-    experiment = payload.get("experiment")
-    if isinstance(experiment, dict) and experiment.get("experiment_id"):
-        return str(experiment["experiment_id"])
-    if payload.get("experiment_id"):
-        return str(payload["experiment_id"])
+# Experiment tag Databricks sets when an experiment's traces are written to a
+# Unity Catalog table. Its value is the UC destination, e.g.
+# "my_catalog.my_schema.my_table". A plain (file/DBFS-backed) experiment does
+# not carry this tag, so its presence is our signal that traces land in UC.
+UC_TRACE_DESTINATION_TAG = "mlflow.experiment.databricksTraceDestinationPath"
+
+
+def _experiment_tags(experiment: dict) -> dict[str, str | None]:
+    """Flatten an experiment's ``tags`` list ([{key, value}, ...]) into a dict."""
+    out: dict[str, str | None] = {}
+    tags = experiment.get("tags")
+    if isinstance(tags, list):
+        for tag in tags:
+            if isinstance(tag, dict) and isinstance(tag.get("key"), str):
+                out[tag["key"]] = tag.get("value")
+    return out
+
+
+def _uc_trace_destination(experiment: dict) -> str | None:
+    """The Unity Catalog destination (``catalog.schema.table``) an experiment
+    logs traces to, or None when it isn't UC-backed. Any three-part UC name
+    qualifies — the specific catalog/schema/table is not constrained."""
+    value = _experiment_tags(experiment).get(UC_TRACE_DESTINATION_TAG)
+    if isinstance(value, str):
+        parts = value.split(".")
+        if len(parts) == 3 and all(parts):
+            return value
     return None
 
 
-def get_or_create_mlflow_experiment(
-    workspace: str, token: str, name: str
-) -> tuple[str | None, str | None]:
-    """Resolve the numeric MLflow experiment id for ``name`` in this workspace,
-    creating the experiment if it doesn't exist. Returns (experiment_id, reason);
-    reason is None on success, otherwise describes the failure."""
+def find_uc_backed_experiment(
+    workspace: str, token: str, leaf_name: str
+) -> tuple[dict | None, str | None]:
+    """Find an existing experiment whose final path segment is ``leaf_name`` and
+    whose traces are backed by Unity Catalog.
+
+    Returns (experiment, reason). On success ``experiment`` is
+    ``{"experiment_id", "experiment_name", "uc_destination"}`` and reason is
+    None. On failure ``experiment`` is None and reason explains why (no such
+    experiment, or it exists but isn't UC-backed) so the caller can tell the
+    user to create one."""
     hostname = workspace_hostname(workspace)
-    encoded = quote(name, safe="")
-    payload, get_reason = _http_get_json(
-        f"https://{hostname}/api/2.0/mlflow/experiments/get-by-name?experiment_name={encoded}",
+    # Leaf-match in the filter (anything ending in the name), then confirm the
+    # exact leaf segment in Python so "/Users/<me>/ucode-traces" matches but
+    # "team-ucode-traces" does not.
+    safe_leaf = leaf_name.replace("'", "")
+    payload, reason = _http_post_json(
+        f"https://{hostname}/api/2.0/mlflow/experiments/search",
         token,
+        {"filter": f"name LIKE '%{safe_leaf}'", "max_results": 1000},
     )
-    existing = _mlflow_experiment_id_from_payload(payload)
-    if existing:
-        return existing, None
+    if not isinstance(payload, dict):
+        return None, reason or "could not search MLflow experiments"
 
-    created, create_reason = _http_post_json(
-        f"https://{hostname}/api/2.0/mlflow/experiments/create",
-        token,
-        {"name": name},
+    experiments = payload.get("experiments")
+    named = [
+        exp
+        for exp in (experiments if isinstance(experiments, list) else [])
+        if isinstance(exp, dict)
+        and str(exp.get("name") or "").rsplit("/", 1)[-1] == leaf_name
+        and exp.get("experiment_id")
+    ]
+    if not named:
+        return None, f"no experiment named '{leaf_name}' exists on this workspace"
+
+    for exp in named:
+        dest = _uc_trace_destination(exp)
+        if dest:
+            return {
+                "experiment_id": str(exp["experiment_id"]),
+                "experiment_name": str(exp.get("name") or leaf_name),
+                "uc_destination": dest,
+            }, None
+
+    return (
+        None,
+        f"experiment '{leaf_name}' exists but its traces are not backed by Unity Catalog",
     )
-    created_id = _mlflow_experiment_id_from_payload(created)
-    if created_id:
-        return created_id, None
-
-    # A concurrent create (or a get that failed transiently) can leave us here
-    # even though the experiment now exists — re-fetch once before giving up.
-    if create_reason and "RESOURCE_ALREADY_EXISTS" in create_reason:
-        payload, _ = _http_get_json(
-            f"https://{hostname}/api/2.0/mlflow/experiments/get-by-name?experiment_name={encoded}",
-            token,
-        )
-        retried = _mlflow_experiment_id_from_payload(payload)
-        if retried:
-            return retried, None
-
-    return None, create_reason or get_reason or "could not resolve MLflow experiment"
 
 
 @overload
