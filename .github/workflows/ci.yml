@@ -15,7 +15,7 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
-      - run: uv run pytest --ignore=tests/test_e2e.py
+      - run: uv run pytest --ignore=tests/test_e2e.py --ignore=tests/test_e2e_tracing.py
 
   e2e:
     if: vars.E2E_ENABLED == 'true'
@@ -54,3 +54,10 @@ jobs:
       # set, the auth code path doesn't shell out at all — this is a safety
       # net for any code path we may have missed.
       - run: uv run pytest tests/test_e2e.py -v < /dev/null
+      # MLflow tracing e2e lives in its own file and needs the `tracing`
+      # extra so `import mlflow` resolves (otherwise the test importorskips
+      # and silently passes as skipped). `!cancelled()` lets this run even
+      # when the previous pytest step failed — the two suites are
+      # independent and one shouldn't mask the other.
+      - if: ${{ !cancelled() }}
+        run: uv run --extra tracing pytest tests/test_e2e_tracing.py -v < /dev/null

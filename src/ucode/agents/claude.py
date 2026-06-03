@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import subprocess
 from pathlib import Path
 
 from ucode.agent_updates import available_npm_package_update
@@ -23,7 +24,8 @@ from ucode.databricks import (
 )
 from ucode.state import mark_tool_managed, save_state
 from ucode.telemetry import agent_version, ucode_version
-from ucode.ui import print_warning
+from ucode.tracing import tracing_env
+from ucode.ui import print_note, print_success, print_warning
 
 CLAUDE_CONFIG_DIR = Path.home() / ".claude"
 CLAUDE_SETTINGS_PATH = CLAUDE_CONFIG_DIR / "ucode-settings.json"
@@ -60,6 +62,20 @@ def _resolve_web_search_model(state: dict) -> str | None:
 
 WEB_SEARCH_MCP_NAME = "web_search"
 _CLAUDE_MODEL_RE = re.compile(r"^databricks-claude-(opus|sonnet)-(\d+)-(\d+)(.*)$")
+
+# Env keys consumed by the MLflow Claude tracing plugin. Written into the
+# settings `env` block; the plugin runtime (installed separately) reads them.
+CLAUDE_TRACING_ENV_KEYS = (
+    "MLFLOW_CLAUDE_TRACING_ENABLED",
+    "MLFLOW_TRACKING_URI",
+    "MLFLOW_EXPERIMENT_ID",
+)
+CLAUDE_TRACING_MARKETPLACE = "mlflow/mlflow"
+CLAUDE_TRACING_PLUGIN = "mlflow-tracing@mlflow-plugins"
+# The plugin runtime shells out to the `mlflow` CLI, so it must be on PATH at
+# this minimum version. ucode installs/upgrades it via `uv tool`.
+MLFLOW_CLI_SPEC = "mlflow[databricks]>=3.4"
+MINIMUM_MLFLOW_VERSION = (3, 4)
 
 
 def _web_search_mcp_entry(workspace: str, search_model: str, profile: str | None = None) -> dict:
@@ -198,8 +214,19 @@ def write_tool_config(state: dict, model: str) -> dict:
         disable_web_search=web_search_model is not None,
         profile=state.get("profile"),
     )
+    tracing_env_vars = tracing_env(state, "claude")
+    if tracing_env_vars:
+        overlay["env"]["MLFLOW_CLAUDE_TRACING_ENABLED"] = "true"
+        overlay["env"].update(tracing_env_vars)
+        managed_keys = managed_keys + [["env", key] for key in CLAUDE_TRACING_ENV_KEYS]
+
     existing = read_json_safe(CLAUDE_SETTINGS_PATH)
     merged = deep_merge_dict(existing, overlay)
+    if not tracing_env_vars:
+        env_block = merged.get("env")
+        if isinstance(env_block, dict):
+            for key in CLAUDE_TRACING_ENV_KEYS:
+                env_block.pop(key, None)
     write_json_file(CLAUDE_SETTINGS_PATH, merged)
 
     if web_search_model:
@@ -208,6 +235,112 @@ def write_tool_config(state: dict, model: str) -> dict:
     state = mark_tool_managed(state, "claude", managed_keys)
     save_state(state)
     return state
+
+
+def ensure_tracing_runtime() -> bool:
+    """Ensure Claude's MLflow tracing runtime is ready: an `mlflow` CLI >= 3.4 on
+    PATH (the plugin shells out to it) and the MLflow Claude plugin installed.
+
+    Best-effort — warns and returns False if a piece can't be set up, so
+    `ucode configure tracing` can still finish for other agents."""
+    if not _ensure_mlflow_cli():
+        return False
+    return _install_claude_tracing_plugin()
+
+
+def _parse_mlflow_version(text: str) -> tuple[int, int] | None:
+    match = re.search(r"(\d+)\.(\d+)", text)
+    if not match:
+        return None
+    return int(match.group(1)), int(match.group(2))
+
+
+def _installed_mlflow_version() -> tuple[int, int] | None:
+    """The (major, minor) of the `mlflow` CLI on PATH, or None if absent."""
+    if not shutil.which("mlflow"):
+        return None
+    try:
+        result = subprocess.run(
+            ["mlflow", "--version"], check=False, capture_output=True, text=True, timeout=30
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return _parse_mlflow_version(result.stdout or result.stderr or "")
+
+
+def _ensure_mlflow_cli() -> bool:
+    """Ensure an `mlflow` CLI >= 3.4 is on PATH, installing or upgrading it via
+    `uv tool` when needed."""
+    current = _installed_mlflow_version()
+    if current and current >= MINIMUM_MLFLOW_VERSION:
+        return True
+
+    if not shutil.which("uv"):
+        verb = "upgrade" if current else "install"
+        print_warning(
+            f"Claude tracing needs the `mlflow` CLI >= 3.4 on PATH, but `uv` is not "
+            f'available to {verb} it. Run `uv tool install "{MLFLOW_CLI_SPEC}"` '
+            f'(or `pip install "{MLFLOW_CLI_SPEC}"`), then re-run `ucode configure tracing`.'
+        )
+        return False
+
+    print_note(f"{'Upgrading' if current else 'Installing'} the mlflow CLI ({MLFLOW_CLI_SPEC})...")
+    # --force replaces an existing (older) uv-managed mlflow tool in place.
+    cmd = ["uv", "tool", "install", MLFLOW_CLI_SPEC]
+    if current:
+        cmd.append("--force")
+    try:
+        subprocess.run(cmd, check=True, timeout=600)
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        print_warning(f"Could not install the mlflow CLI automatically: {exc}")
+        return False
+
+    if not shutil.which("mlflow"):
+        print_warning(
+            "Installed mlflow, but `mlflow` is still not on PATH. Ensure your uv tool "
+            "bin directory (e.g. ~/.local/bin) is on PATH, then re-run `ucode configure tracing`."
+        )
+        return False
+    print_success("mlflow CLI ready")
+    return True
+
+
+def _install_claude_tracing_plugin() -> bool:
+    binary = SPEC["binary"]
+    if not shutil.which(binary):
+        print_warning("`claude` is not installed; skipping MLflow tracing plugin install.")
+        return False
+    commands = [
+        [
+            binary,
+            "plugin",
+            "marketplace",
+            "add",
+            CLAUDE_TRACING_MARKETPLACE,
+            "--sparse",
+            ".claude-plugin",
+        ],
+        [binary, "plugin", "install", CLAUDE_TRACING_PLUGIN],
+    ]
+    for cmd in commands:
+        try:
+            result = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=120)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            print_warning(f"Could not install the Claude MLflow plugin: {exc}")
+            return False
+        if result.returncode != 0:
+            output = (result.stderr or result.stdout or "").strip()
+            last = output.splitlines()[-1] if output else f"exit {result.returncode}"
+            # `marketplace add` / `install` are idempotent; treat "already
+            # added/installed" as success and keep going. Best-effort match
+            # against stderr — an upstream wording change would degrade this
+            # to a noisy warning on re-runs, but never corrupts state.
+            if "already" in last.lower():
+                continue
+            print_warning(f"Claude MLflow plugin step failed: {last}")
+            return False
+    print_success("Claude MLflow tracing plugin installed")
+    return True
 
 
 def default_model(state: dict) -> str | None:

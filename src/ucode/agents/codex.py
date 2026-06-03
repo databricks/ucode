@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import subprocess
 from pathlib import Path
 
 from ucode.agent_updates import available_npm_package_update
@@ -22,6 +23,8 @@ from ucode.databricks import (
 )
 from ucode.state import mark_tool_managed, save_state
 from ucode.telemetry import agent_version, ucode_version
+from ucode.tracing import agent_tracing, apply_tracing_env
+from ucode.ui import print_success, print_warning
 
 CODEX_CONFIG_DIR = Path.home() / ".codex"
 CODEX_PROFILE_NAME = "ucode"
@@ -32,6 +35,8 @@ LEGACY_CODEX_BACKUP_PATH = APP_DIR / "codex-config.backup.toml"
 CODEX_MODEL_PROVIDER_NAME = "ucode-databricks"
 MINIMUM_CODEX_VERSION = (0, 134, 0)
 MINIMUM_CODEX_VERSION_TEXT = "0.134.0"
+CODEX_TRACING_NOTIFY = ["mlflow-codex", "notify-hook"]
+CODEX_TRACING_PACKAGE = "@mlflow/codex"
 
 
 SPEC: ToolSpec = {
@@ -55,6 +60,15 @@ LEGACY_MANAGED_KEYS: list[list[str]] = [
     ["model_providers", CODEX_MODEL_PROVIDER_NAME],
     ["model_providers", CODEX_MODEL_PROVIDER_NAME, "http_headers"],
 ]
+
+_GPT_RE = re.compile(r"(?:databricks-)?gpt-(\d+)(?:[.-](\d+))?(?:[.-](\d+))?(-.+|[a-z].*)?")
+
+# These models should use the Databricks ID, not the OpenAI ID, as the OpenAI
+# ID is incompatible with Codex.
+CODEX_OPENAI_ID_INCOMPATIBLE_MODELS = {
+    "databricks-gpt-5-2-codex",
+    "databricks-gpt-5-4-nano",
+}
 
 
 def is_update_available() -> tuple[str, str] | None:
@@ -177,9 +191,44 @@ def _remove_legacy_ucode_profile() -> None:
         write_toml_file(path, doc)
 
 
+def _openai_model_id(model: str | None) -> str | None:
+    """Map Databricks GPT endpoint ids to OpenAI model ids for Codex metadata."""
+    parsed = _parse_gpt(model)
+    if parsed is None:
+        return model
+    major, minor, patch, suffix = parsed
+    version = str(major)
+    if minor is not None:
+        version += f".{minor}"
+    if patch is not None:
+        version += f".{patch}"
+    return f"gpt-{version}{suffix}"
+
+
+def _codex_model_id(model: str | None) -> str | None:
+    if model in CODEX_OPENAI_ID_INCOMPATIBLE_MODELS:
+        return model
+    return _openai_model_id(model)
+
+
+def _parse_gpt(model: str | None) -> tuple[int, int | None, int | None, str] | None:
+    if not model:
+        return None
+    match = _GPT_RE.fullmatch(model.split("/")[-1])
+    if not match:
+        return None
+    major, minor, patch, suffix = match.groups()
+    return (
+        int(major),
+        int(minor) if minor is not None else None,
+        int(patch) if patch is not None else None,
+        suffix or "",
+    )
+
+
 def write_tool_config(state: dict, model: str | None = None) -> dict:
     workspace = state["workspace"]
-    chosen_model = model or default_model(state)
+    chosen_model = _codex_model_id(model or default_model(state))
     databricks_profile = state.get("profile")
 
     if _use_legacy_layout():
@@ -191,6 +240,7 @@ def write_tool_config(state: dict, model: str | None = None) -> dict:
         overlay = render_legacy_overlay(workspace, chosen_model, databricks_profile)
         doc = read_toml_safe(LEGACY_CODEX_CONFIG_PATH)
         deep_merge_dict(doc, overlay)
+        _apply_tracing_notify(doc, state)
         write_toml_file(LEGACY_CODEX_CONFIG_PATH, doc)
         state = mark_tool_managed(state, "codex", LEGACY_MANAGED_KEYS)
         save_state(state)
@@ -201,15 +251,76 @@ def write_tool_config(state: dict, model: str | None = None) -> dict:
     overlay = render_overlay(workspace, chosen_model, databricks_profile)
     doc = read_toml_safe(CODEX_CONFIG_PATH)
     deep_merge_dict(doc, overlay)
+    _apply_tracing_notify(doc, state)
     write_toml_file(CODEX_CONFIG_PATH, doc)
     state = mark_tool_managed(state, "codex", MANAGED_KEYS)
     save_state(state)
     return state
 
 
+def _apply_tracing_notify(doc: dict, state: dict) -> None:
+    """Set/clear the Codex ``notify`` hook that streams session traces to MLflow.
+
+    Only ucode's own notify value is removed on disable, so a user-defined
+    ``notify`` is left intact. When enabling on top of a pre-existing user
+    ``notify``, warn before replacing — the prior value is in the backup file
+    but the user has to restore it manually."""
+    if agent_tracing(state, "codex") is not None:
+        existing = doc.get("notify")
+        if existing is not None and list(existing) != CODEX_TRACING_NOTIFY:
+            print_warning(
+                f"Codex `notify` is already set to {existing!r}; replacing it with the "
+                "MLflow tracing hook. The previous value is preserved in the Codex "
+                "config backup — restore it manually if you need both."
+            )
+        doc["notify"] = list(CODEX_TRACING_NOTIFY)
+    elif list(doc.get("notify") or []) == CODEX_TRACING_NOTIFY:
+        doc.pop("notify", None)
+
+
+def ensure_tracing_dependency() -> bool:
+    """Install the `@mlflow/codex` npm package that provides the `mlflow-codex`
+    notify-hook binary. Best-effort: warns and returns False on failure."""
+    import shutil
+
+    if shutil.which("mlflow-codex"):
+        return True
+    if not shutil.which("npm"):
+        print_warning(
+            f"`npm` is not available to install {CODEX_TRACING_PACKAGE}; "
+            "Codex tracing will be inactive until it is installed."
+        )
+        return False
+    try:
+        subprocess.run(["npm", "install", "-g", CODEX_TRACING_PACKAGE], check=True, timeout=300)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        print_warning(f"Could not install {CODEX_TRACING_PACKAGE}; Codex tracing will be inactive.")
+        return False
+    print_success("Codex MLflow tracing hook installed")
+    return True
+
+
 def default_model(state: dict) -> str | None:
+    """Pick the newest GPT model when multiple are available.
+
+    The discovery list is alphabetically sorted, which can put
+    "databricks-gpt-5" ahead of "databricks-gpt-5-5". Prefer the
+    highest semantic version instead. Falls back to the first
+    discovered entry when parsing fails.
+    """
     codex_models = state.get("codex_models") or []
-    return codex_models[0] if codex_models else None
+    if not codex_models:
+        return None
+
+    def _gpt_version_key(mid: str) -> tuple[int, int, int, int]:
+        parsed = _parse_gpt(mid)
+        if parsed is None:
+            return (0, 0, 0, 0)
+        major, minor, patch, suffix = parsed
+        base_bonus = 1 if not suffix else 0
+        return (major, minor or 0, patch or 0, base_bonus)
+
+    return max(codex_models, key=_gpt_version_key)
 
 
 def launch(state: dict, tool_args: list[str]) -> None:
@@ -217,6 +328,10 @@ def launch(state: dict, tool_args: list[str]) -> None:
     workspace = state.get("workspace")
     if workspace:
         os.environ["OAUTH_TOKEN"] = get_databricks_token(workspace, state.get("profile"))
+    # The notify hook subprocess Codex spawns inherits this env, so MLflow
+    # routing flows through to it without writing a separate tracing config.
+    # When tracing is off this also clears any stale outer-shell value.
+    apply_tracing_env(os.environ, state, "codex")
     os.execvp(binary, [binary, "--profile", CODEX_PROFILE_NAME, *tool_args])
 
 
