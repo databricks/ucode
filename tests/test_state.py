@@ -16,6 +16,8 @@ from ucode.state import (
     load_full_state,
     load_state,
     mark_tool_managed,
+    merge_managed_policies,
+    resolve_policy_model,
     save_state,
     select_model_for_policies,
 )
@@ -349,6 +351,69 @@ class TestPolicies:
             )
             == "databricks-claude-sonnet-4-5"
         )
+
+
+class TestResolvePolicyModel:
+    """`resolve_policy_model` — the wrapper that callers (CLI, agents) use.
+
+    Verifies it threads the workspace-scoped spend stub into
+    ``select_model_for_policies`` and surfaces the admin-pinned default.
+    """
+
+    def test_returns_admin_default_when_pinned(self):
+        state = {
+            "workspace": FAKE_WS,
+            "policies": {"claude": {"default_model": "admin-pinned"}},
+        }
+        assert resolve_policy_model(state, "claude", "user-requested") == "admin-pinned"
+
+    def test_returns_requested_when_no_policy(self):
+        state = {"workspace": FAKE_WS}
+        assert resolve_policy_model(state, "claude", "user-requested") == "user-requested"
+
+    def test_returns_requested_when_no_workspace(self):
+        # No workspace means no spend lookup, but absent policies still falls
+        # straight through to the requested model.
+        assert resolve_policy_model({}, "claude", "user-requested") == "user-requested"
+
+
+class TestMergeManagedPolicies:
+    """`merge_managed_policies` — pull/overlay layer between UC and local state."""
+
+    def test_overlays_policies_for_matching_workspace(self):
+        local = {"workspace": FAKE_WS, "claude_models": {"opus": "o4"}}
+        remote = {
+            "workspaces": {
+                FAKE_WS: {
+                    "policies": {"claude": {"default_model": "admin-pinned"}},
+                }
+            }
+        }
+        merged = merge_managed_policies(local, remote)
+        assert merged["policies"] == {"claude": {"default_model": "admin-pinned"}}
+        # Other local fields untouched.
+        assert merged["claude_models"] == {"opus": "o4"}
+        assert merged["workspace"] == FAKE_WS
+
+    def test_no_op_when_remote_has_no_matching_workspace(self):
+        local = {"workspace": FAKE_WS, "claude_models": {}}
+        remote = {"workspaces": {"https://other.databricks.com": {"policies": {}}}}
+        assert merge_managed_policies(local, remote) == local
+
+    def test_no_op_when_remote_workspace_lacks_policies(self):
+        local = {"workspace": FAKE_WS, "claude_models": {}}
+        remote = {"workspaces": {FAKE_WS: {"claude_models": {"opus": "ignored"}}}}
+        assert merge_managed_policies(local, remote) == local
+
+    def test_no_op_when_local_has_no_workspace(self):
+        local = {"claude_models": {}}
+        remote = {"workspaces": {FAKE_WS: {"policies": {"claude": {}}}}}
+        assert merge_managed_policies(local, remote) == local
+
+    def test_no_op_when_remote_blob_malformed(self):
+        local = {"workspace": FAKE_WS}
+        assert merge_managed_policies(local, {}) == local
+        assert merge_managed_policies(local, {"workspaces": "nope"}) == local
 
 
 class TestMarkToolManaged:

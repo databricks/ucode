@@ -1140,6 +1140,44 @@ def upload_managed_config(workspace: str, profile: str | None, state_file: Path)
         ) from exc
 
 
+def download_managed_config(workspace: str, profile: str | None) -> dict | None:
+    """Fetch the published ``state.json`` from the managed-config UC volume."""
+    env = build_databricks_cli_env(workspace, profile)
+    try:
+        result = run(
+            [
+                "databricks",
+                "fs",
+                "cat",
+                MANAGED_CONFIG_VOLUME_PATH,
+                *_profile_args(profile),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        _debug("download_managed_config.exec_failed", repr(exc))
+        return None
+
+    if result.returncode != 0:
+        _debug("download_managed_config.nonzero", _format_subprocess_result(result))
+        return None
+
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        _debug("download_managed_config.bad_json", repr(exc))
+        return None
+
+    if not isinstance(payload, dict):
+        _debug("download_managed_config.not_dict", type(payload).__name__)
+        return None
+    return payload
+
+
 def build_auth_shell_command(workspace: str, profile: str | None = None) -> str:
     workspace_arg = shlex.quote(workspace.rstrip("/"))
     if profile:

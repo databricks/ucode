@@ -252,6 +252,44 @@ def select_model_for_policies(
     return requested_model
 
 
+def _current_spend_usd(workspace: str, agent: str) -> float:
+    """Return the current-period spend for ``agent`` in ``workspace``.
+
+    TODO: wire to the Databricks Budgets API
+    Kept as a single call site so the real Budgets API integration is a
+    one-line swap that automatically reaches every launch + refresh path.
+    """
+    del workspace, agent
+    return 0.0
+
+
+def resolve_policy_model(state: dict, agent: str, requested_model: str) -> str:
+    """Apply per-agent policies to ``requested_model``, looking up spend internally."""
+    workspace = state.get("workspace")
+    workspace_str = workspace if isinstance(workspace, str) else ""
+    spend = _current_spend_usd(workspace_str, agent) if workspace_str else 0.0
+    return select_model_for_policies(state, agent, requested_model, spend)
+
+
+def merge_managed_policies(local_state: dict, remote_blob: dict) -> dict:
+    """Overlay admin-managed ``policies`` from a pulled UC ``state.json``."""
+    workspace = local_state.get("workspace")
+    if not isinstance(workspace, str) or not workspace:
+        return local_state
+    workspaces = remote_blob.get("workspaces")
+    if not isinstance(workspaces, dict):
+        return local_state
+    remote_ws = workspaces.get(workspace)
+    if not isinstance(remote_ws, dict):
+        return local_state
+    remote_policies = remote_ws.get("policies")
+    if remote_policies is None:
+        return local_state
+    merged = dict(local_state)
+    merged["policies"] = remote_policies
+    return merged
+
+
 def build_agent_state(state: dict) -> dict[str, dict]:
     """Build per-agent harness configuration for a workspace.
 

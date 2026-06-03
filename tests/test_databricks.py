@@ -21,6 +21,7 @@ from ucode.databricks import (
     build_opencode_base_urls,
     build_shared_base_urls,
     build_tool_base_url,
+    download_managed_config,
     ensure_databricks_cli_version,
     get_databricks_token,
     list_databricks_apps,
@@ -765,6 +766,77 @@ class TestUploadManagedConfig:
 
         with pytest.raises(RuntimeError, match="quota exceeded"):
             upload_managed_config(WS, None, state_file)
+
+
+class TestDownloadManagedConfig:
+    """`download_managed_config` is best-effort and must never raise.
+
+    It runs ``databricks fs cat <UC path>``, returning the parsed dict on
+    success and ``None`` on every failure mode (file missing, no permission,
+    timeout, garbage JSON, non-object payload).
+    """
+
+    @staticmethod
+    def _mock_cat(monkeypatch, *, returncode: int, stdout: str = "", stderr: str = ""):
+        calls: list[list[str]] = []
+
+        def fake_run(args, **kwargs):
+            calls.append(args)
+            return subprocess.CompletedProcess(args, returncode, stdout=stdout, stderr=stderr)
+
+        monkeypatch.setattr(db_mod, "run", fake_run)
+        return calls
+
+    def test_returns_parsed_dict_on_success(self, monkeypatch):
+        payload = {"state_version": 3, "workspaces": {WS: {"policies": {}}}}
+        self._mock_cat(monkeypatch, returncode=0, stdout=json.dumps(payload))
+
+        assert download_managed_config(WS, None) == payload
+
+    def test_invokes_fs_cat_with_uc_path(self, monkeypatch):
+        calls = self._mock_cat(monkeypatch, returncode=0, stdout="{}")
+
+        download_managed_config(WS, None)
+
+        assert len(calls) == 1
+        assert calls[0][:3] == ["databricks", "fs", "cat"]
+        assert MANAGED_CONFIG_VOLUME_PATH in calls[0]
+
+    def test_returns_none_when_file_missing(self, monkeypatch):
+        # `databricks fs cat` exits non-zero with a NOT_FOUND-style message.
+        self._mock_cat(
+            monkeypatch,
+            returncode=1,
+            stderr="Error: NOT_FOUND: File not found at dbfs:/Volumes/...",
+        )
+
+        assert download_managed_config(WS, None) is None
+
+    def test_returns_none_on_invalid_json(self, monkeypatch):
+        self._mock_cat(monkeypatch, returncode=0, stdout="not-json{")
+
+        assert download_managed_config(WS, None) is None
+
+    def test_returns_none_when_payload_is_not_a_dict(self, monkeypatch):
+        self._mock_cat(monkeypatch, returncode=0, stdout="[1, 2, 3]")
+
+        assert download_managed_config(WS, None) is None
+
+    def test_returns_none_on_timeout(self, monkeypatch):
+        def fake_run(args, **kwargs):
+            raise subprocess.TimeoutExpired(cmd=args, timeout=30)
+
+        monkeypatch.setattr(db_mod, "run", fake_run)
+
+        assert download_managed_config(WS, None) is None
+
+    def test_passes_profile_to_cli(self, monkeypatch):
+        calls = self._mock_cat(monkeypatch, returncode=0, stdout="{}")
+
+        download_managed_config(WS, "my-profile")
+
+        assert "--profile" in calls[0]
+        assert calls[0][calls[0].index("--profile") + 1] == "my-profile"
 
 
 class TestEnsureAiGatewayV2:

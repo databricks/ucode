@@ -20,7 +20,7 @@ from ucode.config_io import ToolSpec
 from ucode.databricks import (
     install_databricks_cli,
 )
-from ucode.state import load_state, save_state
+from ucode.state import load_state, resolve_policy_model, save_state
 from ucode.telemetry import agent_version
 from ucode.ui import (
     console,
@@ -194,6 +194,7 @@ def resolve_launch_model(
         raise RuntimeError(
             f"No models available for {tool}. Run `ucode configure` to set up your workspace."
         )
+    model = resolve_policy_model(state, tool, model)
     return state, model
 
 

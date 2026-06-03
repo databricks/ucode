@@ -727,6 +727,7 @@ class TestConfigureSharedStateMcpCleanup:
         monkeypatch.setattr(cli_mod, "discover_gemini_models", lambda w, t: ([], None))
         monkeypatch.setattr(cli_mod, "discover_codex_models", lambda w, t: ([], None))
         monkeypatch.setattr(cli_mod, "build_shared_base_urls", lambda w: {})
+        monkeypatch.setattr(cli_mod, "download_managed_config", lambda w, p: None)
 
     def test_purges_residue_when_workspace_changes(self, monkeypatch):
         import ucode.cli as cli_mod
@@ -765,3 +766,64 @@ class TestConfigureSharedStateMcpCleanup:
         cli_mod.configure_shared_state("https://same.databricks.com")
 
         assert purge_calls == []
+
+
+class TestConfigureSharedStatePullsManagedPolicies:
+    """`configure_shared_state` should silently pull the UC ``state.json`` and
+    overlay only its ``policies``. Failures (no admin export yet, no permission,
+    network down) must not block the user — ``download_managed_config`` returns
+    ``None`` and the local state is unchanged."""
+
+    @staticmethod
+    def _stub_external_deps(monkeypatch):
+        import ucode.cli as cli_mod
+
+        monkeypatch.setattr(cli_mod, "normalize_workspace_url", lambda w: w)
+        monkeypatch.setattr(cli_mod, "run_databricks_login", lambda w, p: None)
+        monkeypatch.setattr(cli_mod, "ensure_databricks_auth", lambda w, p=None: None)
+        monkeypatch.setattr(cli_mod, "find_profile_name_for_host", lambda w: None)
+        monkeypatch.setattr(cli_mod, "get_databricks_token", lambda w, p: "token")
+        monkeypatch.setattr(cli_mod, "ensure_ai_gateway_v2", lambda w, t: None)
+        monkeypatch.setattr(cli_mod, "discover_claude_models", lambda w, t: ({}, None))
+        monkeypatch.setattr(cli_mod, "discover_gemini_models", lambda w, t: ([], None))
+        monkeypatch.setattr(cli_mod, "discover_codex_models", lambda w, t: ([], None))
+        monkeypatch.setattr(cli_mod, "build_shared_base_urls", lambda w: {})
+        monkeypatch.setattr(cli_mod, "load_state", lambda: {})
+        monkeypatch.setattr(cli_mod, "purge_cross_workspace_mcp_residue", lambda *a, **k: None)
+
+    def test_overlays_policies_from_uc_into_saved_state(self, monkeypatch):
+        import ucode.cli as cli_mod
+
+        ws = "https://example.databricks.com"
+        self._stub_external_deps(monkeypatch)
+        monkeypatch.setattr(
+            cli_mod,
+            "download_managed_config",
+            lambda w, p: {
+                "workspaces": {ws: {"policies": {"claude": {"default_model": "admin-pinned"}}}}
+            },
+        )
+        saved: list[dict] = []
+        monkeypatch.setattr(cli_mod, "save_state", lambda state: saved.append(state))
+
+        cli_mod.configure_shared_state(ws)
+
+        assert len(saved) == 1
+        assert saved[0]["policies"] == {"claude": {"default_model": "admin-pinned"}}
+
+    def test_silent_when_download_returns_none(self, monkeypatch):
+        # First-time / no admin export yet — local state must save cleanly with
+        # an empty policies block (added by hydrate_state, not by the pull).
+        import ucode.cli as cli_mod
+
+        self._stub_external_deps(monkeypatch)
+        monkeypatch.setattr(cli_mod, "download_managed_config", lambda w, p: None)
+        saved: list[dict] = []
+        monkeypatch.setattr(cli_mod, "save_state", lambda state: saved.append(state))
+
+        cli_mod.configure_shared_state("https://example.databricks.com")
+
+        assert len(saved) == 1
+        # The saved state dict passed to save_state should NOT contain a
+        # policies key from the pull (hydrate_state adds an empty one later).
+        assert "policies" not in saved[0]

@@ -33,6 +33,7 @@ from ucode.databricks import (
     discover_claude_models,
     discover_codex_models,
     discover_gemini_models,
+    download_managed_config,
     ensure_ai_gateway_v2,
     ensure_databricks_auth,
     find_profile_name_for_host,
@@ -49,7 +50,14 @@ from ucode.mcp import (
     purge_cross_workspace_mcp_residue,
     revert_mcp_configs,
 )
-from ucode.state import STATE_PATH, clear_state, load_full_state, load_state, save_state
+from ucode.state import (
+    STATE_PATH,
+    clear_state,
+    load_full_state,
+    load_state,
+    merge_managed_policies,
+    save_state,
+)
 from ucode.tracing import configure_tracing_command
 from ucode.ui import (
     console,
@@ -219,6 +227,15 @@ def configure_shared_state(
         state["codex_models"] = codex_models
     if fetch_all or "opencode" in tools:
         state["opencode_models"] = opencode_models
+
+    # Best-effort pull of admin-managed policies from the UC volume. Silent on
+    # failure (no admin export yet, missing READ_VOLUME, etc.) — never block the
+    # user. `merge_managed_policies` only overlays the `policies` field; all
+    # other local state (discovered models, profile, managed_configs) wins.
+    remote = download_managed_config(workspace, profile)
+    if remote is not None:
+        state = merge_managed_policies(state, remote)
+
     save_state(state)
     # Scrub MCP entries that ucode wrote for the previous workspace so the new
     # workspace's agent configs aren't stale.
