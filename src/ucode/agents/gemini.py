@@ -24,7 +24,7 @@ from ucode.databricks import (
     build_tool_base_url,
     get_databricks_token,
 )
-from ucode.state import mark_tool_managed, save_state
+from ucode.state import mark_tool_managed, resolve_policy_model, save_state
 from ucode.telemetry import agent_version, ucode_version
 
 GEMINI_CONFIG_DIR = Path.home() / ".gemini"
@@ -117,8 +117,16 @@ def default_model(state: dict) -> str | None:
     return gemini_models[0] if gemini_models else None
 
 
+def _policy_resolved_default(state: dict) -> str | None:
+    """Default model with admin policies applied. ``None`` if no model is configured."""
+    base = default_model(state)
+    if not base:
+        return None
+    return resolve_policy_model(state, "gemini", base)
+
+
 def _refresh_token_once(state: dict, *, force_refresh: bool = False) -> str:
-    model = default_model(state)
+    model = _policy_resolved_default(state)
     if not model:
         raise RuntimeError("No Gemini model is configured.")
     _, token = write_tool_config(state, model, force_refresh=force_refresh)
@@ -135,7 +143,7 @@ def _refresh_forever(state: dict, stop_event: threading.Event) -> None:
 
 def launch(state: dict, tool_args: list[str]) -> None:
     token = _refresh_token_once(state)
-    model = default_model(state)
+    model = _policy_resolved_default(state)
     if not model:
         raise RuntimeError("No Gemini model is configured.")
     env = build_runtime_env(state["workspace"], model, token)

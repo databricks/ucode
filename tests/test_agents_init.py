@@ -178,6 +178,25 @@ class TestResolveLaunchModel:
         with pytest.raises(RuntimeError, match="No models available"):
             resolve_launch_model("claude", {}, None)
 
+    def test_admin_default_model_policy_overrides_per_tool_default(self):
+        state = {
+            "workspace": "https://example.cloud.databricks.com",
+            "claude_models": {"sonnet": "s4"},
+            "policies": {"claude": {"default_model": "admin-pinned-claude"}},
+        }
+        _, model = resolve_launch_model("claude", state, None)
+        assert model == "admin-pinned-claude"
+
+    def test_policy_does_not_override_other_tools(self):
+        # codex has no policy entry -> unaffected by claude's pinned default.
+        state = {
+            "workspace": "https://example.cloud.databricks.com",
+            "codex_models": ["c1"],
+            "policies": {"claude": {"default_model": "admin-pinned-claude"}},
+        }
+        _, model = resolve_launch_model("codex", state, None)
+        assert model == "c1"
+
 
 class TestInstallToolBinary:
     def test_non_strict_returns_false_when_npm_missing(self, monkeypatch):

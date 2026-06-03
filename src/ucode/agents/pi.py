@@ -46,7 +46,7 @@ from ucode.databricks import (
     build_pi_base_urls,
     get_databricks_token,
 )
-from ucode.state import mark_tool_managed, save_state
+from ucode.state import mark_tool_managed, resolve_policy_model, save_state
 from ucode.telemetry import agent_version, ucode_version
 
 PI_UCODE_HOME = APP_DIR / "pi-home"
@@ -218,8 +218,16 @@ def default_model(state: dict) -> str | None:
     return gemini_models[0] if gemini_models else None
 
 
+def _policy_resolved_default(state: dict) -> str | None:
+    """Default model with admin policies applied. ``None`` if no model is configured."""
+    base = default_model(state)
+    if not base:
+        return None
+    return resolve_policy_model(state, "pi", base)
+
+
 def _refresh_token_once(state: dict, *, force_refresh: bool = False) -> str:
-    model = default_model(state)
+    model = _policy_resolved_default(state)
     if not model:
         raise RuntimeError("No Pi model is available on this workspace.")
     _, token = write_tool_config(state, model, force_refresh=force_refresh)

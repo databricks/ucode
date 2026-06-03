@@ -20,7 +20,7 @@ from ucode.databricks import (
     build_tool_base_url,
     get_databricks_token,
 )
-from ucode.state import mark_tool_managed, save_state
+from ucode.state import mark_tool_managed, resolve_policy_model, save_state
 from ucode.telemetry import agent_version, ucode_version
 
 CODEX_CONFIG_DIR = Path.home() / ".codex"
@@ -223,7 +223,10 @@ def _parse_gpt(model: str | None) -> tuple[int, int | None, int | None, str] | N
 
 def write_tool_config(state: dict, model: str | None = None) -> dict:
     workspace = state["workspace"]
-    chosen_model = _codex_model_id(model or default_model(state))
+    base_model = model or default_model(state)
+    if base_model:
+        base_model = resolve_policy_model(state, "codex", base_model)
+    chosen_model = _codex_model_id(base_model)
     databricks_profile = state.get("profile")
 
     if _use_legacy_layout():

@@ -35,7 +35,7 @@ from ucode.databricks import (
     build_copilot_base_url,
     get_databricks_token,
 )
-from ucode.state import mark_tool_managed, save_state
+from ucode.state import mark_tool_managed, resolve_policy_model, save_state
 
 COPILOT_CONFIG_DIR = Path.home() / ".copilot"
 COPILOT_ENV_PATH = COPILOT_CONFIG_DIR / "ucode.env"
@@ -157,8 +157,16 @@ def write_tool_config(
     return state, token
 
 
+def _policy_resolved_default(state: dict) -> str | None:
+    """Default model with admin policies applied. ``None`` if no model is configured."""
+    base = default_model(state)
+    if not base:
+        return None
+    return resolve_policy_model(state, "copilot", base)
+
+
 def _refresh_token_once(state: dict, *, force_refresh: bool = False) -> tuple[str, str]:
-    model = default_model(state)
+    model = _policy_resolved_default(state)
     if not model:
         raise RuntimeError("No Copilot model is available on this workspace.")
     _, token = write_tool_config(state, model, force_refresh=force_refresh)
