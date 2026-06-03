@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from typing import cast
 
 from ucode.config_io import APP_DIR, is_dry_run
 from ucode.databricks import build_auth_shell_command, build_shared_base_urls
@@ -83,25 +84,31 @@ def _normalize_policies(raw: object) -> dict:
     """
     if not isinstance(raw, dict):
         return {}
+    # ty narrows `object` -> `dict[Never, Never]`, which breaks `.get(str)`.
+    # The runtime isinstance check above guarantees a dict; cast to give ty
+    # usable key/value types without weakening callers to `Any`.
+    raw_dict = cast("dict[str, object]", raw)
     out: dict = {}
-    spending = raw.get("spending_limit")
-    if isinstance(spending, dict):
-        threshold = spending.get("threshold_usd")
-        fallback = spending.get("fallback_model")
-        if (
-            isinstance(threshold, (int, float))
-            and not isinstance(threshold, bool)
-            and isinstance(fallback, str)
-            and fallback
-        ):
-            normalized: dict = {
-                "threshold_usd": threshold,
-                "fallback_model": fallback,
-            }
-            default = spending.get("default_model")
-            if isinstance(default, str) and default:
-                normalized["default_model"] = default
-            out["spending_limit"] = normalized
+    spending = raw_dict.get("spending_limit")
+    if not isinstance(spending, dict):
+        return out
+    spending_dict = cast("dict[str, object]", spending)
+    threshold = spending_dict.get("threshold_usd")
+    fallback = spending_dict.get("fallback_model")
+    if (
+        isinstance(threshold, (int, float))
+        and not isinstance(threshold, bool)
+        and isinstance(fallback, str)
+        and fallback
+    ):
+        normalized: dict = {
+            "threshold_usd": threshold,
+            "fallback_model": fallback,
+        }
+        default = spending_dict.get("default_model")
+        if isinstance(default, str) and default:
+            normalized["default_model"] = default
+        out["spending_limit"] = normalized
     return out
 
 

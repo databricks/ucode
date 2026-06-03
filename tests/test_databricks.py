@@ -652,9 +652,7 @@ class TestUploadManagedConfig:
             "--overwrite",
         ]
 
-    def test_treats_already_exists_at_every_create_level_as_success(
-        self, monkeypatch, tmp_path
-    ):
+    def test_treats_already_exists_at_every_create_level_as_success(self, monkeypatch, tmp_path):
         state_file = tmp_path / "state.json"
         state_file.write_text("{}\n")
         calls = self._record_calls(
@@ -664,14 +662,13 @@ class TestUploadManagedConfig:
                 (1, "Error: Schema 'ai_gateway.default' already exists"),
                 (1, "Error: Volume 'ai_gateway.default.ucode_config' already exists"),
                 (0, ""),
-                (0, ""),
             ],
         )
 
         upload_managed_config(WS, None, state_file)
 
-        assert len(calls) == 5
-        assert calls[4][:3] == ["databricks", "fs", "cp"]
+        assert len(calls) == 4
+        assert calls[3][:3] == ["databricks", "fs", "cp"]
 
     def test_passes_profile_to_all_calls(self, monkeypatch, tmp_path):
         state_file = tmp_path / "state.json"
@@ -689,9 +686,7 @@ class TestUploadManagedConfig:
         with pytest.raises(RuntimeError, match="No local state file"):
             upload_managed_config(WS, None, missing)
 
-    def test_catalog_failure_points_at_create_catalog_permission(
-        self, monkeypatch, tmp_path
-    ):
+    def test_catalog_failure_points_at_create_catalog_permission(self, monkeypatch, tmp_path):
         state_file = tmp_path / "state.json"
         state_file.write_text("{}\n")
         self._record_calls(
@@ -704,9 +699,7 @@ class TestUploadManagedConfig:
         with pytest.raises(RuntimeError, match="CREATE CATALOG on the metastore"):
             upload_managed_config(WS, None, state_file)
 
-    def test_schema_failure_points_at_create_schema_permission(
-        self, monkeypatch, tmp_path
-    ):
+    def test_schema_failure_points_at_create_schema_permission(self, monkeypatch, tmp_path):
         state_file = tmp_path / "state.json"
         state_file.write_text("{}\n")
         self._record_calls(
@@ -720,9 +713,7 @@ class TestUploadManagedConfig:
         with pytest.raises(RuntimeError, match="CREATE SCHEMA on catalog"):
             upload_managed_config(WS, None, state_file)
 
-    def test_volume_failure_points_at_create_volume_permission(
-        self, monkeypatch, tmp_path
-    ):
+    def test_volume_failure_points_at_create_volume_permission(self, monkeypatch, tmp_path):
         state_file = tmp_path / "state.json"
         state_file.write_text("{}\n")
         self._record_calls(

@@ -219,6 +219,7 @@ class TestBuildAgentState:
 
 class TestPolicies:
     """Schema preservation + pure policy evaluation."""
+
     _SPENDING_POLICY = {
         "spending_limit": {
             "threshold_usd": 50,
@@ -271,9 +272,7 @@ class TestPolicies:
 
     def test_select_model_returns_requested_when_no_policy_configured(self):
         assert (
-            select_model_for_policies(
-                {}, "databricks-claude-opus-4", current_spend_usd=9999.0
-            )
+            select_model_for_policies({}, "databricks-claude-opus-4", current_spend_usd=9999.0)
             == "databricks-claude-opus-4"
         )
 
@@ -288,11 +287,10 @@ class TestPolicies:
             },
         }
         assert (
-            select_model_for_policies(
-                state, "databricks-claude-opus-4", current_spend_usd=10.0
-            )
+            select_model_for_policies(state, "databricks-claude-opus-4", current_spend_usd=10.0)
             == "databricks-claude-sonnet-4"
         )
+
 
 class TestMarkToolManaged:
     def test_sets_managed_keys(self):

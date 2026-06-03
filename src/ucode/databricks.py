@@ -1004,9 +1004,7 @@ def _run_idempotent_create(
     )
 
 
-def _grant_managed_config_read_access(
-    workspace: str, profile: str | None
-) -> None:
+def _grant_managed_config_read_access(workspace: str, profile: str | None) -> None:
     """Grant ``account users`` ``READ_VOLUME`` on the managed-config volume."""
     env = build_databricks_cli_env(workspace, profile)
     grant_payload = json.dumps(

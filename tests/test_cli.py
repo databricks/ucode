@@ -267,9 +267,7 @@ class TestExport:
             result = runner.invoke(app, ["export"])
 
         assert result.exit_code == 0, result.output
-        mock_auth.assert_called_once_with(
-            "https://example.databricks.com", "my-profile"
-        )
+        mock_auth.assert_called_once_with("https://example.databricks.com", "my-profile")
         mock_upload.assert_called_once()
         upload_args = mock_upload.call_args[0]
         assert upload_args[0] == "https://example.databricks.com"
