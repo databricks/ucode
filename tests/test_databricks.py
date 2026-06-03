@@ -11,6 +11,7 @@ import pytest
 import ucode.databricks as db_mod
 from ucode.databricks import (
     AI_GATEWAY_V2_DOCS_URL,
+    MANAGED_CONFIG_VOLUME_PATH,
     _format_subprocess_result,
     _parse_databricks_cli_version,
     _scrub_databrickscfg,
@@ -25,6 +26,7 @@ from ucode.databricks import (
     list_databricks_apps,
     list_databricks_connections,
     list_genie_spaces,
+    upload_managed_config,
     workspace_hostname,
 )
 
@@ -586,6 +588,192 @@ class TestListDatabricksApps:
 
         with pytest.raises(RuntimeError, match="invalid JSON"):
             list_databricks_apps(WS)
+
+
+class TestUploadManagedConfig:
+    @staticmethod
+    def _record_calls(monkeypatch, side_effects=None):
+        calls: list[list[str]] = []
+        effects = list(side_effects or [])
+
+        def fake_run(args, **kwargs):
+            calls.append(args)
+            if effects:
+                rc, stderr = effects.pop(0)
+            else:
+                rc, stderr = 0, ""
+            return subprocess.CompletedProcess(args, rc, stdout="", stderr=stderr)
+
+        monkeypatch.setattr(db_mod, "run", fake_run)
+        return calls
+
+    def test_runs_catalog_schema_volume_grant_then_fs_cp(self, monkeypatch, tmp_path):
+        state_file = tmp_path / "state.json"
+        state_file.write_text('{"workspace": "https://example.databricks.com"}\n')
+        calls = self._record_calls(monkeypatch)
+
+        upload_managed_config(WS, None, state_file)
+
+        assert len(calls) == 5
+        assert calls[0][:4] == ["databricks", "catalogs", "create", "ai_gateway"]
+        assert calls[1][:5] == [
+            "databricks",
+            "schemas",
+            "create",
+            "default",
+            "ai_gateway",
+        ]
+        assert calls[2][:7] == [
+            "databricks",
+            "volumes",
+            "create",
+            "ai_gateway",
+            "default",
+            "ucode_config",
+            "MANAGED",
+        ]
+        assert calls[3][:5] == [
+            "databricks",
+            "grants",
+            "update",
+            "volume",
+            "ai_gateway.default.ucode_config",
+        ]
+        grant_json_idx = calls[3].index("--json") + 1
+        assert json.loads(calls[3][grant_json_idx]) == {
+            "changes": [{"principal": "account users", "add": ["READ_VOLUME"]}]
+        }
+        assert calls[4] == [
+            "databricks",
+            "fs",
+            "cp",
+            str(state_file),
+            MANAGED_CONFIG_VOLUME_PATH,
+            "--overwrite",
+        ]
+
+    def test_treats_already_exists_at_every_create_level_as_success(
+        self, monkeypatch, tmp_path
+    ):
+        state_file = tmp_path / "state.json"
+        state_file.write_text("{}\n")
+        calls = self._record_calls(
+            monkeypatch,
+            side_effects=[
+                (1, "Error: Catalog 'ai_gateway' already exists"),
+                (1, "Error: Schema 'ai_gateway.default' already exists"),
+                (1, "Error: Volume 'ai_gateway.default.ucode_config' already exists"),
+                (0, ""),
+                (0, ""),
+            ],
+        )
+
+        upload_managed_config(WS, None, state_file)
+
+        assert len(calls) == 5
+        assert calls[4][:3] == ["databricks", "fs", "cp"]
+
+    def test_passes_profile_to_all_calls(self, monkeypatch, tmp_path):
+        state_file = tmp_path / "state.json"
+        state_file.write_text("{}\n")
+        calls = self._record_calls(monkeypatch)
+
+        upload_managed_config(WS, "my-profile", state_file)
+
+        for call in calls:
+            assert "--profile" in call, call
+            assert call[call.index("--profile") + 1] == "my-profile"
+
+    def test_raises_when_state_file_missing(self, tmp_path):
+        missing = tmp_path / "does-not-exist.json"
+        with pytest.raises(RuntimeError, match="No local state file"):
+            upload_managed_config(WS, None, missing)
+
+    def test_catalog_failure_points_at_create_catalog_permission(
+        self, monkeypatch, tmp_path
+    ):
+        state_file = tmp_path / "state.json"
+        state_file.write_text("{}\n")
+        self._record_calls(
+            monkeypatch,
+            side_effects=[
+                (1, "PERMISSION_DENIED: user does not have CREATE CATALOG"),
+            ],
+        )
+
+        with pytest.raises(RuntimeError, match="CREATE CATALOG on the metastore"):
+            upload_managed_config(WS, None, state_file)
+
+    def test_schema_failure_points_at_create_schema_permission(
+        self, monkeypatch, tmp_path
+    ):
+        state_file = tmp_path / "state.json"
+        state_file.write_text("{}\n")
+        self._record_calls(
+            monkeypatch,
+            side_effects=[
+                (0, ""),
+                (1, "PERMISSION_DENIED: user does not have CREATE SCHEMA"),
+            ],
+        )
+
+        with pytest.raises(RuntimeError, match="CREATE SCHEMA on catalog"):
+            upload_managed_config(WS, None, state_file)
+
+    def test_volume_failure_points_at_create_volume_permission(
+        self, monkeypatch, tmp_path
+    ):
+        state_file = tmp_path / "state.json"
+        state_file.write_text("{}\n")
+        self._record_calls(
+            monkeypatch,
+            side_effects=[
+                (0, ""),
+                (0, ""),
+                (1, "PERMISSION_DENIED: user does not have CREATE VOLUME"),
+            ],
+        )
+
+        with pytest.raises(RuntimeError, match="CREATE VOLUME on schema"):
+            upload_managed_config(WS, None, state_file)
+
+    def test_grant_failure_points_at_manage_permission(self, monkeypatch, tmp_path):
+        state_file = tmp_path / "state.json"
+        state_file.write_text("{}\n")
+        self._record_calls(
+            monkeypatch,
+            side_effects=[
+                (0, ""),
+                (0, ""),
+                (0, ""),
+                (1, "PERMISSION_DENIED: user does not have MANAGE on volume"),
+            ],
+        )
+
+        with pytest.raises(RuntimeError, match="MANAGE on the volume"):
+            upload_managed_config(WS, None, state_file)
+
+    def test_fs_cp_failure_surfaces_stderr(self, monkeypatch, tmp_path):
+        """The final `fs cp` step still uses run(check=True), so a failure
+        comes through as CalledProcessError — make sure the stderr is exposed."""
+        state_file = tmp_path / "state.json"
+        state_file.write_text("{}\n")
+        call_count = {"n": 0}
+
+        def fake_run(args, **kwargs):
+            call_count["n"] += 1
+            if call_count["n"] < 5:
+                return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+            raise subprocess.CalledProcessError(
+                returncode=1,
+                cmd=args,
+                stderr="quota exceeded",
+            )
+
+        monkeypatch.setattr(db_mod, "run", fake_run)
+
+        with pytest.raises(RuntimeError, match="quota exceeded"):
+            upload_managed_config(WS, None, state_file)
 
 
 class TestEnsureAiGatewayV2:

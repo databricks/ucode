@@ -43,6 +43,25 @@ AI_GATEWAY_V2_DOCS_URL = "https://docs.databricks.com/aws/en/ai-gateway/overview
 MIN_DATABRICKS_CLI_VERSION = (0, 298, 0)
 TOKEN_REFRESH_INTERVAL_SECONDS = 1800
 
+# UC volume that stores the shared ucode `state.json`. Lives in dedicated
+# top-level `ai_gateway` catalog.
+#
+# `ucode export` creates the catalog → schema → volume on first run (each step
+# idempotent) and grants `account users` READ_VOLUME so every developer in the
+# workspace can pull the published config.
+MANAGED_CONFIG_CATALOG = "ai_gateway"
+MANAGED_CONFIG_SCHEMA = "default"
+MANAGED_CONFIG_VOLUME = "ucode_config"
+MANAGED_CONFIG_FILENAME = "state.json"
+MANAGED_CONFIG_VOLUME_FULL_NAME = (
+    f"{MANAGED_CONFIG_CATALOG}.{MANAGED_CONFIG_SCHEMA}.{MANAGED_CONFIG_VOLUME}"
+)
+MANAGED_CONFIG_VOLUME_PATH = (
+    f"dbfs:/Volumes/{MANAGED_CONFIG_CATALOG}/{MANAGED_CONFIG_SCHEMA}"
+    f"/{MANAGED_CONFIG_VOLUME}/{MANAGED_CONFIG_FILENAME}"
+)
+MANAGED_CONFIG_READ_PRINCIPAL = "account users"
+
 
 def _debug_enabled() -> bool:
     return os.environ.get("UCODE_DEBUG") == "1"
@@ -953,6 +972,174 @@ def list_databricks_apps(workspace: str, profile: str | None = None) -> list[dic
         raise RuntimeError("Timed out while listing Databricks apps.") from exc
     except json.JSONDecodeError as exc:
         raise RuntimeError("Databricks apps listing returned invalid JSON.") from exc
+
+
+def _run_idempotent_create(
+    cmd: list[str],
+    env: dict[str, str],
+    *,
+    label: str,
+    required_permission: str,
+) -> bool:
+    """Run a `databricks <object> create` command and treat 'already exists'
+    as success. Any other non-zero exit surfaces an actionable error that
+    names the specific UC permission the admin needs."""
+    result = run(
+        cmd,
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
+    )
+    if result.returncode == 0:
+        return True
+    stderr = (result.stderr or "").strip()
+    if "already exists" in stderr.lower():
+        return False
+    detail = f": {stderr}" if stderr else ""
+    raise RuntimeError(
+        f"Failed to create {label}{detail}. The admin running `ucode export` "
+        f"needs {required_permission}."
+    )
+
+
+def _grant_managed_config_read_access(
+    workspace: str, profile: str | None
+) -> None:
+    """Grant ``account users`` ``READ_VOLUME`` on the managed-config volume."""
+    env = build_databricks_cli_env(workspace, profile)
+    grant_payload = json.dumps(
+        {
+            "changes": [
+                {
+                    "principal": MANAGED_CONFIG_READ_PRINCIPAL,
+                    "add": ["READ_VOLUME"],
+                }
+            ]
+        }
+    )
+    grant_result = run(
+        [
+            "databricks",
+            "grants",
+            "update",
+            "volume",
+            MANAGED_CONFIG_VOLUME_FULL_NAME,
+            "--json",
+            grant_payload,
+            *_profile_args(profile),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
+    )
+    if grant_result.returncode != 0:
+        stderr = (grant_result.stderr or "").strip()
+        detail = f": {stderr}" if stderr else ""
+        raise RuntimeError(
+            f"Failed to grant READ_VOLUME on {MANAGED_CONFIG_VOLUME_FULL_NAME} "
+            f"to `{MANAGED_CONFIG_READ_PRINCIPAL}`{detail}. The admin running "
+            "`ucode export` needs MANAGE on the volume (or to be its owner)."
+        )
+
+
+def _ensure_managed_config_volume(workspace: str, profile: str | None) -> None:
+    """Make sure ``ai_gateway.default.ucode_config`` exists and is readable
+    by every workspace developer."""
+    env = build_databricks_cli_env(workspace, profile)
+    profile_args = _profile_args(profile)
+
+    _run_idempotent_create(
+        [
+            "databricks",
+            "catalogs",
+            "create",
+            MANAGED_CONFIG_CATALOG,
+            *profile_args,
+        ],
+        env,
+        label=f"UC catalog `{MANAGED_CONFIG_CATALOG}`",
+        required_permission="CREATE CATALOG on the metastore (typically the metastore admin role)",
+    )
+    _run_idempotent_create(
+        [
+            "databricks",
+            "schemas",
+            "create",
+            MANAGED_CONFIG_SCHEMA,
+            MANAGED_CONFIG_CATALOG,
+            *profile_args,
+        ],
+        env,
+        label=f"UC schema `{MANAGED_CONFIG_CATALOG}.{MANAGED_CONFIG_SCHEMA}`",
+        required_permission=f"CREATE SCHEMA on catalog `{MANAGED_CONFIG_CATALOG}`",
+    )
+    volume_was_created = _run_idempotent_create(
+        [
+            "databricks",
+            "volumes",
+            "create",
+            MANAGED_CONFIG_CATALOG,
+            MANAGED_CONFIG_SCHEMA,
+            MANAGED_CONFIG_VOLUME,
+            "MANAGED",
+            *profile_args,
+        ],
+        env,
+        label=f"UC volume `{MANAGED_CONFIG_VOLUME_FULL_NAME}`",
+        required_permission=(
+            f"CREATE VOLUME on schema `{MANAGED_CONFIG_CATALOG}.{MANAGED_CONFIG_SCHEMA}`"
+        ),
+    )
+
+    if volume_was_created:
+        _grant_managed_config_read_access(workspace, profile)
+
+
+def upload_managed_config(workspace: str, profile: str | None, state_file: Path) -> None:
+    """Publish local state.json to the UC managed-config volume."""
+    if not state_file.is_file():
+        raise RuntimeError(
+            f"No local state file to upload at {state_file}. "
+            "Run `ucode configure` first to create one."
+        )
+
+    _ensure_managed_config_volume(workspace, profile)
+
+    env = build_databricks_cli_env(workspace, profile)
+    cmd = [
+        "databricks",
+        "fs",
+        "cp",
+        str(state_file),
+        MANAGED_CONFIG_VOLUME_PATH,
+        "--overwrite",
+        *_profile_args(profile),
+    ]
+    try:
+        # Explicit `check=True` (matches the default) so a future refactor
+        # can't silently flip this into a swallowed failure.
+        run(
+            cmd,
+            check=True,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=60,
+        )
+    except subprocess.CalledProcessError as exc:
+        stderr = (exc.stderr or "").strip()
+        detail = f": {stderr}" if stderr else ""
+        raise RuntimeError(
+            f"Failed to upload {state_file} to {MANAGED_CONFIG_VOLUME_PATH}{detail}"
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"Timed out uploading {state_file} to {MANAGED_CONFIG_VOLUME_PATH}."
+        ) from exc
 
 
 def build_auth_shell_command(workspace: str, profile: str | None = None) -> str:

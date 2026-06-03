@@ -9,6 +9,7 @@ import pytest
 from typer.testing import CliRunner
 
 from ucode.cli import app
+from ucode.databricks import MANAGED_CONFIG_VOLUME_PATH
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
@@ -252,6 +253,68 @@ class TestRevert:
         assert reverted_mcp == [state]
         assert cleared == [True]
         assert "Claude Code MCP config: restored" in result.output
+
+
+class TestExport:
+    def test_uploads_state_to_uc_volume(self):
+        state = {**MINIMAL_STATE, "profile": "my-profile"}
+        with (
+            patch("ucode.cli.install_databricks_cli"),
+            patch("ucode.cli.load_state", return_value=state),
+            patch("ucode.cli.ensure_databricks_auth") as mock_auth,
+            patch("ucode.cli.upload_managed_config") as mock_upload,
+        ):
+            result = runner.invoke(app, ["export"])
+
+        assert result.exit_code == 0, result.output
+        mock_auth.assert_called_once_with(
+            "https://example.databricks.com", "my-profile"
+        )
+        mock_upload.assert_called_once()
+        upload_args = mock_upload.call_args[0]
+        assert upload_args[0] == "https://example.databricks.com"
+        assert upload_args[1] == "my-profile"
+        assert f"Config uploaded to {MANAGED_CONFIG_VOLUME_PATH}" in result.output
+
+    def test_uploads_without_profile(self):
+        state = {k: v for k, v in MINIMAL_STATE.items() if k != "profile"}
+        with (
+            patch("ucode.cli.install_databricks_cli"),
+            patch("ucode.cli.load_state", return_value=state),
+            patch("ucode.cli.ensure_databricks_auth"),
+            patch("ucode.cli.upload_managed_config") as mock_upload,
+        ):
+            result = runner.invoke(app, ["export"])
+
+        assert result.exit_code == 0, result.output
+        assert mock_upload.call_args[0][1] is None
+
+    def test_errors_when_no_workspace_configured(self):
+        with (
+            patch("ucode.cli.install_databricks_cli"),
+            patch("ucode.cli.load_state", return_value={}),
+            patch("ucode.cli.upload_managed_config") as mock_upload,
+        ):
+            result = runner.invoke(app, ["export"])
+
+        assert result.exit_code == 1
+        assert "No workspace is configured" in result.output
+        mock_upload.assert_not_called()
+
+    def test_surfaces_upload_failure_as_error(self):
+        with (
+            patch("ucode.cli.install_databricks_cli"),
+            patch("ucode.cli.load_state", return_value=MINIMAL_STATE),
+            patch("ucode.cli.ensure_databricks_auth"),
+            patch(
+                "ucode.cli.upload_managed_config",
+                side_effect=RuntimeError("PERMISSION_DENIED: not an admin"),
+            ),
+        ):
+            result = runner.invoke(app, ["export"])
+
+        assert result.exit_code == 1
+        assert "PERMISSION_DENIED" in result.output
 
 
 class TestAutoConfigureOnFirstRun:

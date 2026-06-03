@@ -28,6 +28,7 @@ from ucode.agents import (
 from ucode.agents.pi import PI_SETTINGS_BACKUP_PATH, PI_SETTINGS_PATH
 from ucode.config_io import restore_file, set_dry_run
 from ucode.databricks import (
+    MANAGED_CONFIG_VOLUME_PATH,
     build_shared_base_urls,
     discover_claude_models,
     discover_codex_models,
@@ -40,6 +41,7 @@ from ucode.databricks import (
     install_databricks_cli,
     normalize_workspace_url,
     run_databricks_login,
+    upload_managed_config,
 )
 from ucode.mcp import (
     MCP_CLIENTS,
@@ -728,6 +730,33 @@ def usage_cmd() -> None:
     except RuntimeError as exc:
         print_err(str(exc))
         raise typer.Exit(1) from None
+
+
+@app.command("export")
+def export_cmd() -> None:
+    """Upload the local ucode config to Unity Catalog for workspace-wide distribution."""
+    try:
+        install_databricks_cli()
+        state = load_state()
+        workspace = state.get("workspace")
+        if not workspace:
+            raise RuntimeError(
+                "No workspace is configured. Run `ucode configure` before `ucode export`."
+            )
+        profile = state.get("profile")
+        ensure_databricks_auth(workspace, profile)
+        print_section("Export")
+        print_kv("Workspace", workspace)
+        print_kv("Destination", MANAGED_CONFIG_VOLUME_PATH)
+        with spinner("Uploading state.json to Unity Catalog..."):
+            upload_managed_config(workspace, profile, STATE_PATH)
+        print_success(f"Config uploaded to {MANAGED_CONFIG_VOLUME_PATH}")
+    except RuntimeError as exc:
+        print_err(str(exc))
+        raise typer.Exit(1) from None
+    except KeyboardInterrupt:
+        print_err("Interrupted.")
+        raise typer.Exit(130) from None
 
 
 @app.command("upgrade")
