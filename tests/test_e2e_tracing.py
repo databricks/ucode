@@ -26,7 +26,7 @@ import time
 import pytest
 
 from ucode import tracing
-from ucode.databricks import get_current_user_name, get_or_create_mlflow_experiment
+from ucode.databricks import get_or_create_mlflow_experiment
 
 # How long to wait for an emitted trace to show up in the experiment. Trace
 # ingestion is asynchronous, so we poll.
@@ -91,9 +91,8 @@ class TestClaudeTracingE2E:
         monkeypatch.setattr(claude, "CLAUDE_SETTINGS_PATH", tmp_path / "ucode-settings.json")
         monkeypatch.setattr(claude, "CLAUDE_BACKUP_PATH", tmp_path / "claude-settings.backup.json")
 
-        # Resolve the real per-agent experiment for this user.
-        user_name = get_current_user_name(e2e_workspace, token)
-        experiment_name = tracing.experiment_name("claude", user_name)
+        # Resolve the single shared experiment all agents/users route to.
+        experiment_name = tracing.experiment_name()
         experiment_id, reason = get_or_create_mlflow_experiment(
             e2e_workspace, token, experiment_name
         )
@@ -105,12 +104,8 @@ class TestClaudeTracingE2E:
             "tracing": {
                 "enabled": True,
                 "tracking_uri": tracing.tracking_uri_for_state({"workspace": e2e_workspace}),
-                "agents": {
-                    "claude": {
-                        "experiment_id": experiment_id,
-                        "experiment_name": experiment_name,
-                    }
-                },
+                "experiment_id": experiment_id,
+                "experiment_name": experiment_name,
             },
         }
 

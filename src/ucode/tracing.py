@@ -1,10 +1,14 @@
 """MLflow tracing: route coding-agent sessions to a Databricks experiment.
 
-ucode points each agent's MLflow integration at a Databricks-hosted experiment
-(tracking URI ``databricks``/``databricks://<profile>`` + a numeric experiment
-id), reusing the workspace auth ucode already configures in ``~/.databrickscfg``.
-Traces land in the experiment's default MLflow trace store (the MLflow Traces
-UI), not Unity Catalog.
+ucode points every agent's MLflow integration at a single Databricks-hosted
+experiment (tracking URI ``databricks``/``databricks://<profile>`` + a numeric
+experiment id), reusing the workspace auth ucode already configures in
+``~/.databrickscfg``. Traces land in the experiment's default MLflow trace store
+(the MLflow Traces UI), not Unity Catalog.
+
+All agents and all users share one experiment, ``/Shared/ucode-traces``: it lives
+in the workspace-shared folder, so every user resolves (or first-creates) the
+same experiment by name and their sessions converge in one place.
 
 Scope: Claude Code, OpenCode, Codex. Gemini's exporter is OTLP-only and is not
 wired here yet.
@@ -20,7 +24,6 @@ from collections.abc import MutableMapping
 
 from ucode.databricks import (
     ensure_databricks_auth,
-    get_current_user_name,
     get_databricks_token,
     get_or_create_mlflow_experiment,
 )
@@ -30,7 +33,6 @@ from ucode.ui import (
     print_note,
     print_section,
     print_success,
-    print_warning,
     prompt_for_workspace,
     spinner,
 )
@@ -39,14 +41,10 @@ from ucode.ui import (
 # excluded: its exporter is OTLP-only and needs a separate endpoint.
 TRACING_AGENTS: tuple[str, ...] = ("claude", "opencode", "codex")
 
-# Per-agent experiment-name slug, so each agent's sessions land in their own
-# experiment (e.g. `/Users/<email>/ucode-claude-code-traces`) rather than a
-# single shared one.
-AGENT_EXPERIMENT_SLUG: dict[str, str] = {
-    "claude": "claude-code",
-    "codex": "codex",
-    "opencode": "opencode",
-}
+# Single experiment every agent and every user routes to. It lives under the
+# workspace-shared folder (not `/Users/<email>/...`) so all users resolve — or
+# first-create — the same experiment by name and their sessions converge there.
+SHARED_EXPERIMENT_NAME = "/Shared/ucode-traces"
 
 
 def tracking_uri_for_state(state: dict) -> str:
@@ -57,12 +55,9 @@ def tracking_uri_for_state(state: dict) -> str:
     return f"databricks://{profile}" if profile else "databricks"
 
 
-def experiment_name(tool: str, user_name: str | None) -> str:
-    """Per-agent experiment path. Per-user (`/Users/<email>/...`) when the
-    current user resolves, else a shared (`/Shared/...`) path."""
-    slug = AGENT_EXPERIMENT_SLUG[tool]
-    base = f"/Users/{user_name}" if user_name else "/Shared"
-    return f"{base}/ucode-{slug}-traces"
+def experiment_name() -> str:
+    """The single shared experiment path all agents and users route to."""
+    return SHARED_EXPERIMENT_NAME
 
 
 def tracing_config(state: dict) -> dict | None:
@@ -74,15 +69,19 @@ def tracing_config(state: dict) -> dict | None:
 
 
 def agent_tracing(state: dict, tool: str) -> dict | None:
-    """The resolved per-agent tracing entry ({experiment_id, experiment_name})
-    for ``tool``, or None when tracing is off or that agent has no experiment."""
+    """The resolved shared tracing entry ({experiment_id, experiment_name}) when
+    ``tool`` should be traced, else None. All tracing-capable agents share one
+    experiment, so this returns the same entry for each; it still gates per-tool
+    (Gemini/Copilot/Pi never trace) and on the experiment having resolved."""
     cfg = tracing_config(state)
-    if not cfg:
+    if not cfg or tool not in TRACING_AGENTS:
         return None
-    entry = (cfg.get("agents") or {}).get(tool)
-    if isinstance(entry, dict) and entry.get("experiment_id"):
-        return entry
-    return None
+    if not cfg.get("experiment_id"):
+        return None
+    return {
+        "experiment_id": cfg["experiment_id"],
+        "experiment_name": cfg.get("experiment_name"),
+    }
 
 
 def tracing_env(state: dict, tool: str) -> dict[str, str]:
@@ -221,17 +220,21 @@ def _rewrite_agent_configs(state: dict) -> dict:
 
 def _install_agent_tracing_deps(state: dict) -> None:
     """One-time, per-agent dependency installs (Claude plugin + mlflow CLI,
-    Codex npm package), only for agents whose experiment resolved. OpenCode's
-    plugin is auto-installed by OpenCode from the ``plugin`` list."""
+    Codex npm package), only for agents that are configured on this workspace
+    and have tracing on. OpenCode's plugin is auto-installed by OpenCode from
+    the ``plugin`` list."""
     from ucode.agents import claude, codex
 
-    if agent_tracing(state, "claude"):
+    configured = _configured_tracing_agents(state)
+    if "claude" in configured and agent_tracing(state, "claude"):
         claude.ensure_tracing_runtime()
-    if agent_tracing(state, "codex"):
+    if "codex" in configured and agent_tracing(state, "codex"):
         codex.ensure_tracing_dependency()
 
 
-def configure_tracing_command(disable: bool = False) -> int:
+def configure_tracing_command(
+    disable: bool = False, workspaces: list[tuple[str, str | None]] | None = None
+) -> int:
     # `save_state` (called by us and by every agent config writer underneath
     # us) flips `current_workspace` to the workspace it's saving. Tracing can
     # be configured on a non-current workspace, so snapshot here and restore
@@ -239,9 +242,29 @@ def configure_tracing_command(disable: bool = False) -> int:
     # `ucode launch` targets.
     original_current = load_full_state().get("current_workspace")
     try:
+        if workspaces is not None:
+            return _enable_tracing_for_workspaces(workspaces)
         return _configure_tracing(disable=disable)
     finally:
         set_current_workspace(original_current)
+
+
+def _enable_tracing_for_workspaces(workspaces: list[tuple[str, str | None]]) -> int:
+    """Enable tracing for an explicit set of (url, profile) workspaces without
+    prompting — used by `configure --tracing`, which already knows which
+    workspace(s) it just set up. Workspaces with no tracing-capable agent are
+    skipped with a note rather than treated as an error."""
+    full = load_full_state()
+    enabled_any = False
+    for workspace, profile in workspaces:
+        state = _hydrate_workspace_entry(full, workspace, profile)
+        if not _configured_tracing_agents(state):
+            print_section("MLflow Tracing")
+            print_note(f"{workspace}: no tracing-capable agents configured — skipping.")
+            continue
+        _enable_tracing_for_state(state)
+        enabled_any = True
+    return 0 if enabled_any else 1
 
 
 def _configure_tracing(disable: bool) -> int:
@@ -249,6 +272,13 @@ def _configure_tracing(disable: bool) -> int:
         return _disable_tracing_command()
 
     state = _select_tracing_workspace()
+    _enable_tracing_for_state(state)
+    return 0
+
+
+def _enable_tracing_for_state(state: dict) -> dict:
+    """Resolve the shared experiment, persist tracing config, install deps, and
+    rewrite agent configs for one already-selected, hydrated workspace state."""
     workspace = state["workspace"]
     configured = _configured_tracing_agents(state)
     profile = state.get("profile")
@@ -260,37 +290,30 @@ def _configure_tracing(disable: bool) -> int:
     # Running `ucode configure tracing` is itself the opt-in, so there's no
     # confirmation prompt; `--disable` is the explicit way back off.
     token = get_databricks_token(workspace, profile)
-    user_name = get_current_user_name(workspace, token)
 
-    agents_cfg: dict[str, dict] = {}
-    for tool in configured:
-        name = experiment_name(tool, user_name)
-        with spinner(f"Resolving MLflow experiment for {tool}..."):
-            exp_id, reason = get_or_create_mlflow_experiment(workspace, token, name)
-        if not exp_id:
-            print_warning(f"{tool}: could not resolve experiment {name}: {reason}")
-            continue
-        agents_cfg[tool] = {"experiment_id": exp_id, "experiment_name": name}
-
-    if not agents_cfg:
-        raise RuntimeError("Could not resolve an MLflow experiment for any configured agent.")
+    # One shared experiment for every agent and every user on this workspace.
+    name = experiment_name()
+    with spinner("Resolving MLflow experiment..."):
+        exp_id, reason = get_or_create_mlflow_experiment(workspace, token, name)
+    if not exp_id:
+        raise RuntimeError(f"Could not resolve MLflow experiment {name}: {reason}")
 
     state["tracing"] = {
         "enabled": True,
         "tracking_uri": tracking_uri_for_state(state),
-        "agents": agents_cfg,
+        "experiment_id": exp_id,
+        "experiment_name": name,
     }
     save_state(state)
 
     print_kv("Tracking URI", str(state["tracing"]["tracking_uri"]))
-    for tool, entry in agents_cfg.items():
-        print_kv(f"{tool} experiment", f"{entry['experiment_name']} (id {entry['experiment_id']})")
+    print_kv("Experiment", f"{name} (id {exp_id})")
 
     _install_agent_tracing_deps(state)
     state = _rewrite_agent_configs(state)
 
-    print_success(f"Tracing configured for: {', '.join(agents_cfg)}")
-    return 0
+    print_success(f"Tracing configured for: {', '.join(configured)}")
+    return state
 
 
 def _disable_tracing_command() -> int:

@@ -47,7 +47,7 @@ from ucode.mcp import (
     purge_cross_workspace_mcp_residue,
     revert_mcp_configs,
 )
-from ucode.state import STATE_PATH, clear_state, load_state, save_state
+from ucode.state import STATE_PATH, clear_state, load_full_state, load_state, save_state
 from ucode.tracing import configure_tracing_command
 from ucode.ui import (
     console,
@@ -394,12 +394,10 @@ def status() -> int:
     if tracing.get("enabled"):
         print_kv("MLflow tracing", "enabled")
         print_kv("Tracking URI", str(tracing.get("tracking_uri") or "unknown"))
-        for tool, entry in (tracing.get("agents") or {}).items():
-            if isinstance(entry, dict):
-                print_kv(
-                    f"{tool} experiment",
-                    f"{entry.get('experiment_name')} (id {entry.get('experiment_id')})",
-                )
+        print_kv(
+            "Experiment",
+            f"{tracing.get('experiment_name')} (id {tracing.get('experiment_id')})",
+        )
     else:
         print_kv("MLflow tracing", "disabled")
 
@@ -607,6 +605,13 @@ def configure(
             help="Configure a comma-separated list of workspaces without prompting.",
         ),
     ] = None,
+    tracing: Annotated[
+        bool,
+        typer.Option(
+            "--tracing",
+            help="Also enable MLflow tracing for the configured workspace(s).",
+        ),
+    ] = False,
 ) -> None:
     """Configure workspace URL and AI Gateway."""
     if ctx.invoked_subcommand is not None:
@@ -639,6 +644,16 @@ def configure(
                 configure_workspace_command()
             else:
                 configure_workspace_command(workspaces=workspace_entries)
+        if tracing:
+            # The workspaces were just configured, so enable tracing for them
+            # directly instead of re-prompting. Fall back to the workspace that
+            # `configure_workspace_command` made current (the interactive pick).
+            tracing_workspaces = workspace_entries
+            if tracing_workspaces is None:
+                current = load_full_state().get("current_workspace")
+                tracing_workspaces = [(current, None)] if current else None
+            if tracing_workspaces:
+                configure_tracing_command(workspaces=tracing_workspaces)
     except RuntimeError as exc:
         print_err(str(exc))
         raise typer.Exit(1) from None

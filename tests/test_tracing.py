@@ -14,20 +14,7 @@ from ucode.agents import claude, codex, opencode
 WS = "https://example.databricks.com"
 
 
-_AGENT_EXPERIMENTS = {
-    "claude": {
-        "experiment_id": "111",
-        "experiment_name": "/Users/me@example.com/ucode-claude-code-traces",
-    },
-    "codex": {
-        "experiment_id": "222",
-        "experiment_name": "/Users/me@example.com/ucode-codex-traces",
-    },
-    "opencode": {
-        "experiment_id": "333",
-        "experiment_name": "/Users/me@example.com/ucode-opencode-traces",
-    },
-}
+SHARED_EXPERIMENT_ID = "111"
 
 
 def _enabled_state(profile: str | None = None) -> dict:
@@ -37,7 +24,8 @@ def _enabled_state(profile: str | None = None) -> dict:
         "tracing": {
             "enabled": True,
             "tracking_uri": f"databricks://{profile}" if profile else "databricks",
-            "agents": {tool: dict(entry) for tool, entry in _AGENT_EXPERIMENTS.items()},
+            "experiment_id": SHARED_EXPERIMENT_ID,
+            "experiment_name": "/Shared/ucode-traces",
         },
     }
 
@@ -64,15 +52,23 @@ class TestTracingConfig:
 
 
 class TestAgentTracing:
-    def test_returns_agent_entry(self):
+    def test_returns_shared_entry(self):
         entry = tracing.agent_tracing(_enabled_state(), "claude")
         assert entry["experiment_id"] == "111"
+
+    def test_same_entry_for_every_agent(self):
+        state = _enabled_state()
+        for tool in ("claude", "codex", "opencode"):
+            assert tracing.agent_tracing(state, tool)["experiment_id"] == "111"
+
+    def test_none_for_non_tracing_agent(self):
+        assert tracing.agent_tracing(_enabled_state(), "gemini") is None
 
     def test_none_when_disabled(self):
         assert tracing.agent_tracing({}, "claude") is None
 
-    def test_none_when_agent_absent(self):
-        state = {"tracing": {"enabled": True, "tracking_uri": "databricks", "agents": {}}}
+    def test_none_when_experiment_unresolved(self):
+        state = {"tracing": {"enabled": True, "tracking_uri": "databricks"}}
         assert tracing.agent_tracing(state, "claude") is None
 
 
@@ -80,34 +76,22 @@ class TestTracingEnv:
     def test_empty_when_disabled(self):
         assert tracing.tracing_env({}, "claude") == {}
 
-    def test_per_agent_uri_and_experiment(self):
+    def test_uri_and_experiment(self):
         env = tracing.tracing_env(_enabled_state("p"), "codex")
         assert env == {
             "MLFLOW_TRACKING_URI": "databricks://p",
-            "MLFLOW_EXPERIMENT_ID": "222",
+            "MLFLOW_EXPERIMENT_ID": "111",
         }
 
-    def test_distinct_experiment_per_agent(self):
+    def test_shared_experiment_across_agents(self):
         state = _enabled_state()
         assert tracing.tracing_env(state, "claude")["MLFLOW_EXPERIMENT_ID"] == "111"
-        assert tracing.tracing_env(state, "opencode")["MLFLOW_EXPERIMENT_ID"] == "333"
+        assert tracing.tracing_env(state, "opencode")["MLFLOW_EXPERIMENT_ID"] == "111"
 
 
 class TestExperimentName:
-    def test_per_user_claude_slug(self):
-        assert (
-            tracing.experiment_name("claude", "me@example.com")
-            == "/Users/me@example.com/ucode-claude-code-traces"
-        )
-
-    def test_per_user_codex_slug(self):
-        assert (
-            tracing.experiment_name("codex", "me@example.com")
-            == "/Users/me@example.com/ucode-codex-traces"
-        )
-
-    def test_shared_fallback_when_no_user(self):
-        assert tracing.experiment_name("opencode", None) == "/Shared/ucode-opencode-traces"
+    def test_single_shared_path(self):
+        assert tracing.experiment_name() == "/Shared/ucode-traces"
 
 
 class TestGetOrCreateExperiment:
@@ -232,7 +216,7 @@ class TestApplyTracingEnv:
     def test_sets_keys_when_enabled(self):
         env: dict[str, str] = {}
         tracing.apply_tracing_env(env, _enabled_state(), "codex")
-        assert env == {"MLFLOW_TRACKING_URI": "databricks", "MLFLOW_EXPERIMENT_ID": "222"}
+        assert env == {"MLFLOW_TRACKING_URI": "databricks", "MLFLOW_EXPERIMENT_ID": "111"}
 
     def test_clears_stale_keys_when_disabled(self):
         env = {
@@ -249,7 +233,7 @@ class TestApplyTracingEnv:
         env = {"MLFLOW_TRACKING_URI": "databricks://stale", "MLFLOW_EXPERIMENT_ID": "9999"}
         tracing.apply_tracing_env(env, _enabled_state("p"), "opencode")
         assert env["MLFLOW_TRACKING_URI"] == "databricks://p"
-        assert env["MLFLOW_EXPERIMENT_ID"] == "333"
+        assert env["MLFLOW_EXPERIMENT_ID"] == "111"
 
 
 class TestClaudeTracingEnv:
@@ -483,6 +467,69 @@ class TestConfigureTracingPreservesCurrentWorkspace:
             rc = tracing.configure_tracing_command(disable=True)
         assert rc == 0
         assert captured["restored_to"] == "https://a.databricks.com"
+
+
+class TestEnableTracingForWorkspaces:
+    """``configure --tracing`` enables tracing for explicit workspaces without
+    prompting, and skips workspaces with no tracing-capable agent."""
+
+    def _full(self) -> dict:
+        return {
+            "current_workspace": "https://a.databricks.com",
+            "workspaces": {
+                "https://a.databricks.com": {"available_tools": ["claude"], "profile": "pa"},
+                # no tracing-capable agent → skipped, not an error
+                "https://b.databricks.com": {"available_tools": ["gemini"], "profile": "pb"},
+            },
+        }
+
+    def test_enables_without_prompting(self):
+        enabled: list[str] = []
+        with (
+            patch.object(tracing, "load_full_state", return_value=self._full()),
+            patch.object(tracing, "prompt_for_workspace") as prompt,
+            patch.object(tracing, "set_current_workspace"),
+            patch.object(
+                tracing,
+                "_enable_tracing_for_state",
+                side_effect=lambda s: enabled.append(s["workspace"]) or s,
+            ),
+        ):
+            rc = tracing.configure_tracing_command(workspaces=[("https://a.databricks.com", None)])
+        prompt.assert_not_called()
+        assert rc == 0
+        assert enabled == ["https://a.databricks.com"]
+
+    def test_skips_workspace_without_tracing_agent(self):
+        enabled: list[str] = []
+        with (
+            patch.object(tracing, "load_full_state", return_value=self._full()),
+            patch.object(tracing, "set_current_workspace"),
+            patch.object(
+                tracing,
+                "_enable_tracing_for_state",
+                side_effect=lambda s: enabled.append(s["workspace"]) or s,
+            ),
+        ):
+            rc = tracing.configure_tracing_command(workspaces=[("https://b.databricks.com", None)])
+        assert enabled == []
+        assert rc == 1
+
+
+class TestInstallAgentTracingDeps:
+    """Deps install only for agents configured on the workspace, even though the
+    shared experiment means ``agent_tracing`` would otherwise resolve for all."""
+
+    def test_only_configured_agents_get_deps(self):
+        # Codex is configured here; claude is not, so its runtime must be skipped.
+        state = {**_enabled_state(), "available_tools": ["codex"]}
+        with (
+            patch("ucode.agents.claude.ensure_tracing_runtime") as claude_dep,
+            patch("ucode.agents.codex.ensure_tracing_dependency") as codex_dep,
+        ):
+            tracing._install_agent_tracing_deps(state)
+        claude_dep.assert_not_called()
+        codex_dep.assert_called_once()
 
 
 class TestDisableTracing:
