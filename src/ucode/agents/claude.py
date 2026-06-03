@@ -7,6 +7,7 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
+from typing import cast
 
 from ucode.agent_updates import available_npm_package_update
 from ucode.config_io import (
@@ -261,6 +262,7 @@ def write_tool_config(state: dict, model: str) -> dict:
 def _is_tracing_stop_hook(hook: object) -> bool:
     if not isinstance(hook, dict):
         return False
+    hook = cast(dict, hook)
     if hook.get("type") != "command":
         return False
     command = hook.get("command")
