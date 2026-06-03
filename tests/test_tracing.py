@@ -245,6 +245,55 @@ class TestClaudeTracingEnv:
         hooks = settings["hooks"]["Stop"]
         assert hooks[0]["hooks"][0]["command"] == self.STOP_HOOK_CMD
 
+    def test_preserves_user_hooks_when_enabled(self, tmp_path, monkeypatch):
+        settings = tmp_path / "ucode-settings.json"
+        settings.write_text(
+            json.dumps(
+                {
+                    "hooks": {
+                        "Stop": [{"hooks": [{"type": "command", "command": "user-stop"}]}],
+                        "PreToolUse": [{"hooks": [{"type": "command", "command": "user-pre"}]}],
+                    }
+                }
+            )
+        )
+        state = {**_enabled_state(), "claude_models": {}}
+        doc = self._write(state, tmp_path, monkeypatch)
+
+        stop_commands = [
+            hook["command"] for entry in doc["hooks"]["Stop"] for hook in entry["hooks"]
+        ]
+        assert stop_commands == ["user-stop", self.STOP_HOOK_CMD]
+        assert doc["hooks"]["PreToolUse"][0]["hooks"][0]["command"] == "user-pre"
+
+    def test_updates_existing_tracing_hook_when_enabled(self, tmp_path, monkeypatch):
+        settings = tmp_path / "ucode-settings.json"
+        settings.write_text(
+            json.dumps(
+                {
+                    "hooks": {
+                        "Stop": [
+                            {
+                                "hooks": [
+                                    {
+                                        "type": "command",
+                                        "command": "/old/bin/mlflow autolog claude stop-hook",
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                }
+            )
+        )
+        state = {**_enabled_state(), "claude_models": {}}
+        doc = self._write(state, tmp_path, monkeypatch)
+
+        stop_commands = [
+            hook["command"] for entry in doc["hooks"]["Stop"] for hook in entry["hooks"]
+        ]
+        assert stop_commands == [self.STOP_HOOK_CMD]
+
     def test_no_mlflow_env_when_disabled(self, tmp_path, monkeypatch):
         state = {"workspace": WS, "claude_models": {}}
         settings = self._write(state, tmp_path, monkeypatch)
@@ -262,7 +311,20 @@ class TestClaudeTracingEnv:
                         "MLFLOW_EXPERIMENT_ID": "1",
                         "MLFLOW_TRACING_SQL_WAREHOUSE_ID": "old-wh",
                     },
-                    "hooks": {"Stop": [{"hooks": [{"type": "command", "command": "stale"}]}]},
+                    "hooks": {
+                        "Stop": [
+                            {
+                                "hooks": [
+                                    {"type": "command", "command": "user-stop"},
+                                    {
+                                        "type": "command",
+                                        "command": "/old/bin/mlflow autolog claude stop-hook",
+                                    },
+                                ]
+                            }
+                        ],
+                        "PreToolUse": [{"hooks": [{"type": "command", "command": "user-pre"}]}],
+                    },
                 }
             )
         )
@@ -277,7 +339,8 @@ class TestClaudeTracingEnv:
         assert "MLFLOW_EXPERIMENT_ID" not in env
         assert "MLFLOW_CLAUDE_TRACING_ENABLED" not in env
         assert "MLFLOW_TRACING_SQL_WAREHOUSE_ID" not in env
-        assert "hooks" not in doc
+        assert doc["hooks"]["Stop"][0]["hooks"][0]["command"] == "user-stop"
+        assert doc["hooks"]["PreToolUse"][0]["hooks"][0]["command"] == "user-pre"
 
 
 class TestSelectTracingWorkspace:

@@ -71,6 +71,7 @@ CLAUDE_TRACING_ENV_KEYS = (
     "MLFLOW_EXPERIMENT_ID",
     "MLFLOW_TRACING_SQL_WAREHOUSE_ID",
 )
+CLAUDE_TRACING_STOP_HOOK_SUFFIX = " autolog claude stop-hook"
 # Tracing is driven by an `mlflow autolog claude stop-hook` Stop hook, run by
 # the `mlflow` CLI on each session end. Pin to 3.11.x: 3.12 dropped the Unity
 # Catalog trace-write path, so traces silently land in the classic store
@@ -228,13 +229,7 @@ def write_tool_config(state: dict, model: str) -> dict:
         overlay["env"].update(tracing_env_vars)
         managed_keys = managed_keys + [["env", key] for key in CLAUDE_TRACING_ENV_KEYS]
         if stop_hook_command:
-            # The Stop hook runs `mlflow autolog claude stop-hook` when a session
-            # ends; it reads the MLFLOW_* env above to export the trace to the
-            # workspace experiment (and its UC table).
-            overlay["hooks"] = {
-                "Stop": [{"hooks": [{"type": "command", "command": stop_hook_command}]}]
-            }
-            managed_keys = managed_keys + [["hooks"]]
+            managed_keys = managed_keys + [["hooks", "Stop"]]
         else:
             print_warning(
                 "MLflow tracing env was written, but the `mlflow` CLI could not be located "
@@ -244,13 +239,15 @@ def write_tool_config(state: dict, model: str) -> dict:
 
     existing = read_json_safe(CLAUDE_SETTINGS_PATH)
     merged = deep_merge_dict(existing, overlay)
+    if tracing_env_vars and stop_hook_command:
+        _upsert_tracing_stop_hook(merged, stop_hook_command)
     if not tracing_env_vars:
         env_block = merged.get("env")
         if isinstance(env_block, dict):
             for key in CLAUDE_TRACING_ENV_KEYS:
                 env_block.pop(key, None)
-        # Strip the tracing Stop hook so a disabled run doesn't leave it behind.
-        merged.pop("hooks", None)
+        # Strip only ucode's tracing Stop hook so user hooks stay intact.
+        _remove_tracing_stop_hook(merged)
     write_json_file(CLAUDE_SETTINGS_PATH, merged)
 
     if web_search_model:
@@ -259,6 +256,59 @@ def write_tool_config(state: dict, model: str) -> dict:
     state = mark_tool_managed(state, "claude", managed_keys)
     save_state(state)
     return state
+
+
+def _is_tracing_stop_hook(hook: object) -> bool:
+    if not isinstance(hook, dict):
+        return False
+    if hook.get("type") != "command":
+        return False
+    command = hook.get("command")
+    return isinstance(command, str) and command.endswith(CLAUDE_TRACING_STOP_HOOK_SUFFIX)
+
+
+def _remove_tracing_stop_hook(settings: dict) -> None:
+    hooks = settings.get("hooks")
+    if not isinstance(hooks, dict):
+        return
+    stop_entries = hooks.get("Stop")
+    if not isinstance(stop_entries, list):
+        return
+
+    cleaned_entries = []
+    for entry in stop_entries:
+        if not isinstance(entry, dict):
+            cleaned_entries.append(entry)
+            continue
+        hook_list = entry.get("hooks")
+        if not isinstance(hook_list, list):
+            cleaned_entries.append(entry)
+            continue
+        cleaned_hooks = [hook for hook in hook_list if not _is_tracing_stop_hook(hook)]
+        if cleaned_hooks:
+            cleaned_entry = dict(entry)
+            cleaned_entry["hooks"] = cleaned_hooks
+            cleaned_entries.append(cleaned_entry)
+
+    if cleaned_entries:
+        hooks["Stop"] = cleaned_entries
+    else:
+        hooks.pop("Stop", None)
+    if not hooks:
+        settings.pop("hooks", None)
+
+
+def _upsert_tracing_stop_hook(settings: dict, command: str) -> None:
+    _remove_tracing_stop_hook(settings)
+    hooks = settings.get("hooks")
+    if not isinstance(hooks, dict):
+        hooks = {}
+        settings["hooks"] = hooks
+    stop_entries = hooks.get("Stop")
+    if not isinstance(stop_entries, list):
+        stop_entries = []
+        hooks["Stop"] = stop_entries
+    stop_entries.append({"hooks": [{"type": "command", "command": command}]})
 
 
 def ensure_tracing_runtime() -> bool:
