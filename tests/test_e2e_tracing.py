@@ -4,11 +4,12 @@ Run with:
     UCODE_TEST_WORKSPACE=https://your-workspace.databricks.com uv run pytest tests/test_e2e_tracing.py -v
 
 The flow mirrors `ucode configure tracing` + a real agent run:
-  1. Resolve (get-or-create) the per-agent MLflow experiment in the workspace.
-  2. Enable tracing in state and write the agent's config (env + plugin).
-  3. Install the agent's tracing runtime (Claude plugin + mlflow CLI).
-  4. Launch the agent headless with a trivial prompt so it emits a trace.
-  5. Poll the experiment via the MLflow SDK until a NEW trace id appears.
+  1. Find the shared, UC-backed `ucode-traces` experiment in the workspace.
+  2. Resolve a SQL warehouse (required to write traces to the UC table).
+  3. Enable tracing in state and write the agent's config (env + plugin).
+  4. Install the agent's tracing runtime (Claude plugin + mlflow CLI).
+  5. Launch the agent headless with a trivial prompt so it emits a trace.
+  6. Poll the experiment via the MLflow SDK until a NEW trace id appears.
 
 Skipped automatically unless UCODE_TEST_WORKSPACE is set, the `claude` binary
 is installed, `mlflow` is importable, and the tracing runtime can be set up.
@@ -26,7 +27,7 @@ import time
 import pytest
 
 from ucode import tracing
-from ucode.databricks import get_current_user_name, get_or_create_mlflow_experiment
+from ucode.databricks import find_uc_backed_experiment, resolve_sql_warehouse_id
 
 # How long to wait for an emitted trace to show up in the experiment. Trace
 # ingestion is asynchronous, so we poll.
@@ -91,13 +92,21 @@ class TestClaudeTracingE2E:
         monkeypatch.setattr(claude, "CLAUDE_SETTINGS_PATH", tmp_path / "ucode-settings.json")
         monkeypatch.setattr(claude, "CLAUDE_BACKUP_PATH", tmp_path / "claude-settings.backup.json")
 
-        # Resolve the real per-agent experiment for this user.
-        user_name = get_current_user_name(e2e_workspace, token)
-        experiment_name = tracing.experiment_name("claude", user_name)
-        experiment_id, reason = get_or_create_mlflow_experiment(
-            e2e_workspace, token, experiment_name
-        )
-        assert experiment_id, f"could not resolve experiment {experiment_name}: {reason}"
+        # Find the shared, UC-backed `ucode-traces` experiment. ucode no longer
+        # creates it, so this workspace must already have one provisioned.
+        leaf_name = tracing.experiment_name()
+        experiment, reason = find_uc_backed_experiment(e2e_workspace, token, leaf_name)
+        if not experiment:
+            pytest.skip(f"no UC-backed '{leaf_name}' experiment on this workspace: {reason}")
+        experiment_id = experiment["experiment_id"]
+        experiment_name = experiment["experiment_name"]
+
+        # A UC-backed experiment needs a SQL warehouse, or traces are silently
+        # dropped (and the verification client can't read them back).
+        warehouse_id, wh_reason = resolve_sql_warehouse_id(e2e_workspace, token)
+        if not warehouse_id:
+            pytest.skip(f"no SQL warehouse for UC trace storage: {wh_reason}")
+        monkeypatch.setenv("MLFLOW_TRACING_SQL_WAREHOUSE_ID", warehouse_id)
 
         state = {
             **e2e_state,
@@ -105,12 +114,10 @@ class TestClaudeTracingE2E:
             "tracing": {
                 "enabled": True,
                 "tracking_uri": tracing.tracking_uri_for_state({"workspace": e2e_workspace}),
-                "agents": {
-                    "claude": {
-                        "experiment_id": experiment_id,
-                        "experiment_name": experiment_name,
-                    }
-                },
+                "experiment_id": experiment_id,
+                "experiment_name": experiment_name,
+                "uc_destination": experiment["uc_destination"],
+                "sql_warehouse_id": warehouse_id,
             },
         }
 

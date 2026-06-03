@@ -23,14 +23,12 @@ from ucode.databricks import (
 )
 from ucode.state import mark_tool_managed, save_state
 from ucode.telemetry import agent_version, ucode_version
-from ucode.tracing import agent_tracing, apply_tracing_env
 
 OPENCODE_XDG_CONFIG_HOME = APP_DIR / "opencode-xdg"
 OPENCODE_CONFIG_DIR = OPENCODE_XDG_CONFIG_HOME / "opencode"
 OPENCODE_CONFIG_PATH = OPENCODE_CONFIG_DIR / "opencode.json"
 OPENCODE_BACKUP_PATH = APP_DIR / "opencode-config.backup.json"
 OPENCODE_MCP_AUTH_HEADER_VALUE = "Bearer {env:OAUTH_TOKEN}"
-OPENCODE_TRACING_PLUGIN = "@mlflow/opencode"
 
 SPEC: ToolSpec = {
     "binary": "opencode",
@@ -152,27 +150,10 @@ def write_tool_config(
         for stale in ("databricks-anthropic", "databricks-google", "databricks-openai"):
             providers.pop(stale, None)
     merged = deep_merge_dict(existing, overlay)
-    _apply_tracing_plugin(merged, state)
     write_json_file(OPENCODE_CONFIG_PATH, merged)
     state = mark_tool_managed(state, "opencode", managed_keys)
     save_state(state)
     return state, token
-
-
-def _apply_tracing_plugin(config: dict, state: dict) -> None:
-    """Add/remove the MLflow plugin in opencode.json's top-level ``plugin`` list
-    to match the current tracing state, leaving any user plugins untouched.
-    OpenCode auto-installs listed npm plugins at startup."""
-    plugins = config.get("plugin")
-    plugins = (
-        [p for p in plugins if p != OPENCODE_TRACING_PLUGIN] if isinstance(plugins, list) else []
-    )
-    if agent_tracing(state, "opencode") is not None:
-        plugins.append(OPENCODE_TRACING_PLUGIN)
-    if plugins:
-        config["plugin"] = plugins
-    else:
-        config.pop("plugin", None)
 
 
 def build_mcp_server_entry(url: str) -> dict:
@@ -239,10 +220,6 @@ def build_runtime_env(token: str, state: dict | None = None) -> dict[str, str]:
     env = os.environ.copy()
     env["OAUTH_TOKEN"] = token
     env["XDG_CONFIG_HOME"] = str(OPENCODE_XDG_CONFIG_HOME)
-    if state is not None:
-        # apply_tracing_env clears the MLflow vars when tracing is off, so a
-        # stale outer-shell value can't leak through.
-        apply_tracing_env(env, state, "opencode")
     return env
 
 

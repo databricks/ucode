@@ -7,6 +7,7 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
+from typing import cast
 
 from ucode.agent_updates import available_npm_package_update
 from ucode.config_io import (
@@ -63,19 +64,27 @@ def _resolve_web_search_model(state: dict) -> str | None:
 WEB_SEARCH_MCP_NAME = "web_search"
 _CLAUDE_MODEL_RE = re.compile(r"^databricks-claude-(opus|sonnet)-(\d+)-(\d+)(.*)$")
 
-# Env keys consumed by the MLflow Claude tracing plugin. Written into the
-# settings `env` block; the plugin runtime (installed separately) reads them.
+# Env keys the MLflow Stop hook reads to route traces. Written into the
+# settings `env` block alongside the hook itself.
 CLAUDE_TRACING_ENV_KEYS = (
     "MLFLOW_CLAUDE_TRACING_ENABLED",
     "MLFLOW_TRACKING_URI",
     "MLFLOW_EXPERIMENT_ID",
+    "MLFLOW_TRACING_SQL_WAREHOUSE_ID",
 )
-CLAUDE_TRACING_MARKETPLACE = "mlflow/mlflow"
-CLAUDE_TRACING_PLUGIN = "mlflow-tracing@mlflow-plugins"
-# The plugin runtime shells out to the `mlflow` CLI, so it must be on PATH at
-# this minimum version. ucode installs/upgrades it via `uv tool`.
-MLFLOW_CLI_SPEC = "mlflow[databricks]>=3.4"
-MINIMUM_MLFLOW_VERSION = (3, 4)
+CLAUDE_TRACING_STOP_HOOK_SUFFIX = " autolog claude stop-hook"
+# Tracing is driven by an `mlflow autolog claude stop-hook` Stop hook, run by
+# the `mlflow` CLI on each session end. Pin to 3.11.x: 3.12 dropped the Unity
+# Catalog trace-write path, so traces silently land in the classic store
+# instead of the experiment's UC table. ucode installs this via `uv tool` at
+# `configure tracing` time (where UV_INDEX_URL is set), then writes the hook
+# with the resolved absolute path — so the hook needs no uv or index at run
+# time, and can't be shadowed by a project venv's mlflow.
+MLFLOW_CLI_SPEC = "mlflow[databricks]>=3.11,<3.12"
+MINIMUM_MLFLOW_VERSION = (3, 11)
+# Upper bound (exclusive) — an installed mlflow at or above this is too new and
+# must be replaced, not just left alone.
+MAXIMUM_MLFLOW_VERSION = (3, 12)
 
 
 def _web_search_mcp_entry(workspace: str, search_model: str, profile: str | None = None) -> dict:
@@ -215,18 +224,31 @@ def write_tool_config(state: dict, model: str) -> dict:
         profile=state.get("profile"),
     )
     tracing_env_vars = tracing_env(state, "claude")
+    stop_hook_command = claude_tracing_stop_hook_command() if tracing_env_vars else None
     if tracing_env_vars:
         overlay["env"]["MLFLOW_CLAUDE_TRACING_ENABLED"] = "true"
         overlay["env"].update(tracing_env_vars)
         managed_keys = managed_keys + [["env", key] for key in CLAUDE_TRACING_ENV_KEYS]
+        if stop_hook_command:
+            managed_keys = managed_keys + [["hooks", "Stop"]]
+        else:
+            print_warning(
+                "MLflow tracing env was written, but the `mlflow` CLI could not be located "
+                "to install the Claude Stop hook — traces won't be emitted. Re-run "
+                "`ucode configure tracing`."
+            )
 
     existing = read_json_safe(CLAUDE_SETTINGS_PATH)
     merged = deep_merge_dict(existing, overlay)
+    if tracing_env_vars and stop_hook_command:
+        _upsert_tracing_stop_hook(merged, stop_hook_command)
     if not tracing_env_vars:
         env_block = merged.get("env")
         if isinstance(env_block, dict):
             for key in CLAUDE_TRACING_ENV_KEYS:
                 env_block.pop(key, None)
+        # Strip only ucode's tracing Stop hook so user hooks stay intact.
+        _remove_tracing_stop_hook(merged)
     write_json_file(CLAUDE_SETTINGS_PATH, merged)
 
     if web_search_model:
@@ -237,15 +259,67 @@ def write_tool_config(state: dict, model: str) -> dict:
     return state
 
 
-def ensure_tracing_runtime() -> bool:
-    """Ensure Claude's MLflow tracing runtime is ready: an `mlflow` CLI >= 3.4 on
-    PATH (the plugin shells out to it) and the MLflow Claude plugin installed.
-
-    Best-effort — warns and returns False if a piece can't be set up, so
-    `ucode configure tracing` can still finish for other agents."""
-    if not _ensure_mlflow_cli():
+def _is_tracing_stop_hook(hook: object) -> bool:
+    if not isinstance(hook, dict):
         return False
-    return _install_claude_tracing_plugin()
+    hook = cast(dict, hook)
+    if hook.get("type") != "command":
+        return False
+    command = hook.get("command")
+    return isinstance(command, str) and command.endswith(CLAUDE_TRACING_STOP_HOOK_SUFFIX)
+
+
+def _remove_tracing_stop_hook(settings: dict) -> None:
+    hooks = settings.get("hooks")
+    if not isinstance(hooks, dict):
+        return
+    stop_entries = hooks.get("Stop")
+    if not isinstance(stop_entries, list):
+        return
+
+    cleaned_entries = []
+    for entry in stop_entries:
+        if not isinstance(entry, dict):
+            cleaned_entries.append(entry)
+            continue
+        hook_list = entry.get("hooks")
+        if not isinstance(hook_list, list):
+            cleaned_entries.append(entry)
+            continue
+        cleaned_hooks = [hook for hook in hook_list if not _is_tracing_stop_hook(hook)]
+        if cleaned_hooks:
+            cleaned_entry = dict(entry)
+            cleaned_entry["hooks"] = cleaned_hooks
+            cleaned_entries.append(cleaned_entry)
+
+    if cleaned_entries:
+        hooks["Stop"] = cleaned_entries
+    else:
+        hooks.pop("Stop", None)
+    if not hooks:
+        settings.pop("hooks", None)
+
+
+def _upsert_tracing_stop_hook(settings: dict, command: str) -> None:
+    _remove_tracing_stop_hook(settings)
+    hooks = settings.get("hooks")
+    if not isinstance(hooks, dict):
+        hooks = {}
+        settings["hooks"] = hooks
+    stop_entries = hooks.get("Stop")
+    if not isinstance(stop_entries, list):
+        stop_entries = []
+        hooks["Stop"] = stop_entries
+    stop_entries.append({"hooks": [{"type": "command", "command": command}]})
+
+
+def ensure_tracing_runtime() -> bool:
+    """Ensure the MLflow tracing runtime is ready: a pinned `mlflow` CLI (3.11.x)
+    installed via `uv tool`, whose absolute path the Stop hook will call.
+
+    Best-effort — warns and returns False if it can't be set up, so
+    `ucode configure tracing` can still finish for other agents."""
+    return _ensure_mlflow_cli()
 
 
 def _parse_mlflow_version(text: str) -> tuple[int, int] | None:
@@ -255,37 +329,76 @@ def _parse_mlflow_version(text: str) -> tuple[int, int] | None:
     return int(match.group(1)), int(match.group(2))
 
 
-def _installed_mlflow_version() -> tuple[int, int] | None:
-    """The (major, minor) of the `mlflow` CLI on PATH, or None if absent."""
-    if not shutil.which("mlflow"):
+def _uv_tool_mlflow_path() -> str | None:
+    """Absolute path to the `mlflow` installed by `uv tool`, or None.
+
+    Resolved from `uv tool dir --bin` rather than ``shutil.which`` so a project
+    venv's (possibly wrong-versioned) mlflow can't shadow the one ucode pins —
+    the Stop hook must always run the uv-tool copy."""
+    if not shutil.which("uv"):
         return None
     try:
         result = subprocess.run(
-            ["mlflow", "--version"], check=False, capture_output=True, text=True, timeout=30
+            ["uv", "tool", "dir", "--bin"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    bin_dir = (result.stdout or "").strip()
+    if result.returncode != 0 or not bin_dir:
+        return None
+    candidate = Path(bin_dir) / "mlflow"
+    return str(candidate) if candidate.exists() else None
+
+
+def _installed_mlflow_version() -> tuple[int, int] | None:
+    """The (major, minor) of the uv-tool `mlflow`, or None if absent."""
+    path = _uv_tool_mlflow_path()
+    if not path:
+        return None
+    try:
+        result = subprocess.run(
+            [path, "--version"], check=False, capture_output=True, text=True, timeout=30
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
     return _parse_mlflow_version(result.stdout or result.stderr or "")
 
 
+def claude_tracing_stop_hook_command() -> str | None:
+    """The Stop hook command string: the absolute uv-tool `mlflow` invoking its
+    `autolog claude stop-hook` handler. None when mlflow isn't installed.
+
+    Using the absolute path means the hook needs neither `uv` nor a package
+    index at run time (the minimal env Claude runs hooks in lacks UV_INDEX_URL),
+    and can't be shadowed by another mlflow on PATH."""
+    path = _uv_tool_mlflow_path()
+    if not path:
+        return None
+    return f"{path} autolog claude stop-hook"
+
+
 def _ensure_mlflow_cli() -> bool:
-    """Ensure an `mlflow` CLI >= 3.4 is on PATH, installing or upgrading it via
-    `uv tool` when needed."""
+    """Ensure the pinned `mlflow` CLI (3.11.x) is installed via `uv tool`,
+    installing or replacing an out-of-range version when needed."""
     current = _installed_mlflow_version()
-    if current and current >= MINIMUM_MLFLOW_VERSION:
+    if current and MINIMUM_MLFLOW_VERSION <= current < MAXIMUM_MLFLOW_VERSION:
         return True
 
     if not shutil.which("uv"):
-        verb = "upgrade" if current else "install"
+        verb = "replace" if current else "install"
         print_warning(
-            f"Claude tracing needs the `mlflow` CLI >= 3.4 on PATH, but `uv` is not "
-            f'available to {verb} it. Run `uv tool install "{MLFLOW_CLI_SPEC}"` '
-            f'(or `pip install "{MLFLOW_CLI_SPEC}"`), then re-run `ucode configure tracing`.'
+            f"Claude tracing needs the `mlflow` CLI ({MLFLOW_CLI_SPEC}), but `uv` is not "
+            f'available to {verb} it. Run `uv tool install "{MLFLOW_CLI_SPEC}"`, then '
+            "re-run `ucode configure tracing`."
         )
         return False
 
-    print_note(f"{'Upgrading' if current else 'Installing'} the mlflow CLI ({MLFLOW_CLI_SPEC})...")
-    # --force replaces an existing (older) uv-managed mlflow tool in place.
+    print_note(f"{'Replacing' if current else 'Installing'} the mlflow CLI ({MLFLOW_CLI_SPEC})...")
+    # --force replaces an existing (out-of-range) uv-managed mlflow in place.
     cmd = ["uv", "tool", "install", MLFLOW_CLI_SPEC]
     if current:
         cmd.append("--force")
@@ -295,51 +408,13 @@ def _ensure_mlflow_cli() -> bool:
         print_warning(f"Could not install the mlflow CLI automatically: {exc}")
         return False
 
-    if not shutil.which("mlflow"):
+    if not _uv_tool_mlflow_path():
         print_warning(
-            "Installed mlflow, but `mlflow` is still not on PATH. Ensure your uv tool "
-            "bin directory (e.g. ~/.local/bin) is on PATH, then re-run `ucode configure tracing`."
+            "Installed mlflow via `uv tool`, but its binary could not be located. "
+            "Re-run `ucode configure tracing`."
         )
         return False
     print_success("mlflow CLI ready")
-    return True
-
-
-def _install_claude_tracing_plugin() -> bool:
-    binary = SPEC["binary"]
-    if not shutil.which(binary):
-        print_warning("`claude` is not installed; skipping MLflow tracing plugin install.")
-        return False
-    commands = [
-        [
-            binary,
-            "plugin",
-            "marketplace",
-            "add",
-            CLAUDE_TRACING_MARKETPLACE,
-            "--sparse",
-            ".claude-plugin",
-        ],
-        [binary, "plugin", "install", CLAUDE_TRACING_PLUGIN],
-    ]
-    for cmd in commands:
-        try:
-            result = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=120)
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            print_warning(f"Could not install the Claude MLflow plugin: {exc}")
-            return False
-        if result.returncode != 0:
-            output = (result.stderr or result.stdout or "").strip()
-            last = output.splitlines()[-1] if output else f"exit {result.returncode}"
-            # `marketplace add` / `install` are idempotent; treat "already
-            # added/installed" as success and keep going. Best-effort match
-            # against stderr — an upstream wording change would degrade this
-            # to a noisy warning on re-runs, but never corrupts state.
-            if "already" in last.lower():
-                continue
-            print_warning(f"Claude MLflow plugin step failed: {last}")
-            return False
-    print_success("Claude MLflow tracing plugin installed")
     return True
 
 
