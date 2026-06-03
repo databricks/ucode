@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime as _dt
 import json
 from typing import cast
 
@@ -13,6 +14,20 @@ STATE_VERSION = 3
 AUTH_COMMAND_TIMEOUT_MS = 5000
 AUTH_REFRESH_INTERVAL_MS = 900_000
 
+_KNOWN_POLICY_AGENTS: frozenset[str] = frozenset(
+    {"codex", "claude", "gemini", "opencode", "copilot", "pi"}
+)
+
+def _today_iso() -> str:
+    """Return today's date as ``YYYY-MM-DD``. Factored for monkeypatching."""
+    return _dt.date.today().isoformat()
+
+def _is_iso_date(value: str) -> bool:
+    try:
+        _dt.date.fromisoformat(value)
+    except ValueError:
+        return False
+    return True
 
 def load_full_state() -> dict:
     """Load the entire state file. Returns empty structure if missing or wrong version."""
@@ -73,42 +88,88 @@ def set_current_workspace(workspace: str | None) -> None:
         raise RuntimeError(f"Failed to write state file: {STATE_PATH}") from exc
 
 
+def _normalize_spending_limit(raw: object) -> dict | None:
+    """Validate one ``spending_limit`` block: ``{monthly_limit_usd, start_date}``."""
+    if not isinstance(raw, dict):
+        return None
+    raw_dict = cast("dict[str, object]", raw)
+    monthly = raw_dict.get("monthly_limit_usd")
+    if not isinstance(monthly, (int, float)) or isinstance(monthly, bool) or monthly <= 0:
+        return None
+    start_date = raw_dict.get("start_date")
+    if not (isinstance(start_date, str) and _is_iso_date(start_date)):
+        start_date = _today_iso()
+    return {
+        "monthly_limit_usd": float(monthly),
+        "start_date": start_date,
+    }
+
+
+def _normalize_tier(raw: object) -> dict | None:
+    """Validate one tier block: ``{usage_percent, model}``."""
+    if not isinstance(raw, dict):
+        return None
+    raw_dict = cast("dict[str, object]", raw)
+    pct = raw_dict.get("usage_percent")
+    model = raw_dict.get("model")
+    if (
+        not isinstance(pct, (int, float))
+        or isinstance(pct, bool)
+        or not (0 < pct <= 100)
+        or not isinstance(model, str)
+        or not model
+    ):
+        return None
+    return {"usage_percent": float(pct), "model": model}
+
+
+def _normalize_agent_policies(raw: object) -> dict | None:
+    """Validate one agent's policy block and drop empty results."""
+    if not isinstance(raw, dict):
+        return None
+    raw_dict = cast("dict[str, object]", raw)
+    normalized: dict = {}
+    spending = _normalize_spending_limit(raw_dict.get("spending_limit"))
+    if spending is not None:
+        normalized["spending_limit"] = spending
+    default_model = raw_dict.get("default_model")
+    if isinstance(default_model, str) and default_model:
+        normalized["default_model"] = default_model
+    tier_2 = _normalize_tier(raw_dict.get("tier_2"))
+    if tier_2 is not None:
+        normalized["tier_2"] = tier_2
+    tier_3 = _normalize_tier(raw_dict.get("tier_3"))
+    if tier_3 is not None:
+        normalized["tier_3"] = tier_3
+    return normalized or None
+
+
 def _normalize_policies(raw: object) -> dict:
-    """Return a well-formed ``policies`` block, dropping anything malformed.
-    Today the only supported policy is ``spending_limit``::
+    """Return a well-formed per-agent ``policies`` block, dropping anything malformed.
+    Schema (per agent — agent keys are codex/claude/gemini/opencode/copilot/pi)::
+
         {
-          "threshold_usd": <number>,           # required
-          "fallback_model": <model_id string>, # required — over-threshold model
-          "default_model":  <model_id string>, # optional — under-threshold model
+          "<agent>": {
+            "spending_limit": {                                          # optional
+              "monthly_limit_usd": <number>,
+              "start_date": "YYYY-MM-DD",        # auto-filled with today
+            },
+            "default_model": <model_id>,                                 # optional
+            "tier_2": {"usage_percent": 50, "model": <model_id>},        # optional
+            "tier_3": {"usage_percent": 90, "model": <model_id>},        # optional
+          }
         }
     """
     if not isinstance(raw, dict):
         return {}
-    # ty narrows `object` -> `dict[Never, Never]`, which breaks `.get(str)`.
-    # The runtime isinstance check above guarantees a dict; cast to give ty
-    # usable key/value types without weakening callers to `Any`.
     raw_dict = cast("dict[str, object]", raw)
     out: dict = {}
-    spending = raw_dict.get("spending_limit")
-    if not isinstance(spending, dict):
-        return out
-    spending_dict = cast("dict[str, object]", spending)
-    threshold = spending_dict.get("threshold_usd")
-    fallback = spending_dict.get("fallback_model")
-    if (
-        isinstance(threshold, (int, float))
-        and not isinstance(threshold, bool)
-        and isinstance(fallback, str)
-        and fallback
-    ):
-        normalized: dict = {
-            "threshold_usd": threshold,
-            "fallback_model": fallback,
-        }
-        default = spending_dict.get("default_model")
-        if isinstance(default, str) and default:
-            normalized["default_model"] = default
-        out["spending_limit"] = normalized
+    for agent, agent_raw in raw_dict.items():
+        if agent not in _KNOWN_POLICY_AGENTS:
+            continue
+        normalized = _normalize_agent_policies(agent_raw)
+        if normalized:
+            out[agent] = normalized
     return out
 
 
@@ -149,6 +210,7 @@ def hydrate_state(state: dict) -> dict:
 
 def select_model_for_policies(
     state: dict,
+    agent: str,
     requested_model: str,
     current_spend_usd: float,
 ) -> str:
@@ -160,28 +222,33 @@ def select_model_for_policies(
     policies = state.get("policies") or {}
     if not isinstance(policies, dict):
         return requested_model
-
-    spending_limit = policies.get("spending_limit")
-    if not isinstance(spending_limit, dict):
+    agent_policy = policies.get(agent)
+    if not isinstance(agent_policy, dict):
         return requested_model
 
-    threshold = spending_limit.get("threshold_usd")
-    fallback = spending_limit.get("fallback_model")
-    if (
-        not isinstance(threshold, (int, float))
-        or isinstance(threshold, bool)
-        or not isinstance(fallback, str)
-        or not fallback
-    ):
-        return requested_model
+    spending = agent_policy.get("spending_limit")
+    if isinstance(spending, dict):
+        monthly = spending.get("monthly_limit_usd")
+        if isinstance(monthly, (int, float)) and not isinstance(monthly, bool) and monthly > 0:
+            usage_pct = (current_spend_usd / monthly) * 100
+            for tier_key in ("tier_3", "tier_2"):
+                tier = agent_policy.get(tier_key)
+                if not isinstance(tier, dict):
+                    continue
+                threshold = tier.get("usage_percent")
+                model = tier.get("model")
+                if (
+                    isinstance(threshold, (int, float))
+                    and not isinstance(threshold, bool)
+                    and isinstance(model, str)
+                    and model
+                    and usage_pct >= threshold
+                ):
+                    return model
 
-    if current_spend_usd >= threshold:
-        return fallback
-
-    default = spending_limit.get("default_model")
+    default = agent_policy.get("default_model")
     if isinstance(default, str) and default:
         return default
-
     return requested_model
 
 

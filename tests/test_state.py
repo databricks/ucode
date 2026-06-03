@@ -218,77 +218,136 @@ class TestBuildAgentState:
 
 
 class TestPolicies:
-    """Schema preservation + pure policy evaluation."""
+    """Schema preservation + pure policy evaluation for the per-agent layout."""
 
-    _SPENDING_POLICY = {
+    _CLAUDE_POLICY = {
         "spending_limit": {
-            "threshold_usd": 50,
-            "fallback_model": "databricks-claude-haiku-3.5",
+            "monthly_limit_usd": 300.0,
+            "start_date": "2026-06-03",
         },
+        "default_model": "databricks-claude-sonnet-4-5",
+        "tier_2": {"usage_percent": 50.0, "model": "databricks-claude-sonnet-3-5"},
+        "tier_3": {"usage_percent": 90.0, "model": "databricks-claude-haiku-3-5"},
     }
 
     def test_policies_round_trip_through_save_and_load(self):
-        save_state({"workspace": FAKE_WS, "policies": self._SPENDING_POLICY})
+        save_state({"workspace": FAKE_WS, "policies": {"claude": self._CLAUDE_POLICY}})
         loaded = load_state()
-        assert loaded["policies"] == self._SPENDING_POLICY
+        assert loaded["policies"] == {"claude": self._CLAUDE_POLICY}
 
     def test_hydrate_defaults_policies_to_empty_dict(self):
         result = hydrate_state({"workspace": FAKE_WS})
         assert result["policies"] == {}
 
-    def test_hydrate_drops_malformed_spending_limit(self):
+    def test_hydrate_drops_unknown_agent_keys(self):
         result = hydrate_state(
             {
                 "workspace": FAKE_WS,
-                "policies": {
-                    "spending_limit": {
-                        "threshold_usd": "fifty",
-                        "fallback_model": "databricks-claude-haiku-3.5",
-                    },
-                },
+                "policies": {"not-an-agent": self._CLAUDE_POLICY},
             }
         )
         assert result["policies"] == {}
 
-    def test_select_model_returns_requested_when_under_threshold(self):
+    def test_hydrate_drops_malformed_spending_limit(self):
+        # Bad monthly_limit_usd → spending_limit dropped, but valid sibling
+        # fields on the same agent (default_model) survive.
+        result = hydrate_state(
+            {
+                "workspace": FAKE_WS,
+                "policies": {
+                    "claude": {
+                        "spending_limit": {"monthly_limit_usd": "lots"},
+                        "default_model": "databricks-claude-sonnet-4-5",
+                    }
+                },
+            }
+        )
+        assert result["policies"] == {"claude": {"default_model": "databricks-claude-sonnet-4-5"}}
+
+    def test_hydrate_autofills_missing_start_date_with_today(self, monkeypatch):
+        monkeypatch.setattr("ucode.state._today_iso", lambda: "2026-06-03")
+        result = hydrate_state(
+            {
+                "workspace": FAKE_WS,
+                "policies": {"codex": {"spending_limit": {"monthly_limit_usd": 200}}},
+            }
+        )
+        assert result["policies"]["codex"]["spending_limit"] == {
+            "monthly_limit_usd": 200.0,
+            "start_date": "2026-06-03",
+        }
+
+    def test_select_model_returns_requested_with_no_policies(self):
         assert (
             select_model_for_policies(
-                {"policies": self._SPENDING_POLICY},
-                "databricks-claude-opus-4",
-                current_spend_usd=49.99,
+                {}, "claude", "databricks-claude-opus-4", current_spend_usd=9999.0
             )
             == "databricks-claude-opus-4"
         )
 
-    def test_select_model_returns_fallback_when_at_or_over_threshold(self):
+    def test_select_model_returns_default_under_tier_2_threshold(self):
+        # spend = $50 of $300 → 16.7% < tier_2.usage_percent(50%), use default.
         assert (
             select_model_for_policies(
-                {"policies": self._SPENDING_POLICY},
+                {"policies": {"claude": self._CLAUDE_POLICY}},
+                "claude",
                 "databricks-claude-opus-4",
-                current_spend_usd=75.0,
+                current_spend_usd=50.0,
             )
-            == "databricks-claude-haiku-3.5"
+            == "databricks-claude-sonnet-4-5"
         )
 
-    def test_select_model_returns_requested_when_no_policy_configured(self):
+    def test_select_model_returns_tier_2_at_threshold(self):
+        # spend = $150 of $300 = 50% → tier_2.
         assert (
-            select_model_for_policies({}, "databricks-claude-opus-4", current_spend_usd=9999.0)
-            == "databricks-claude-opus-4"
+            select_model_for_policies(
+                {"policies": {"claude": self._CLAUDE_POLICY}},
+                "claude",
+                "databricks-claude-opus-4",
+                current_spend_usd=150.0,
+            )
+            == "databricks-claude-sonnet-3-5"
         )
 
-    def test_select_model_uses_default_model_when_under_threshold(self):
+    def test_select_model_returns_tier_3_at_threshold(self):
+        # spend = $270 of $300 = 90% → tier_3 wins over tier_2.
+        assert (
+            select_model_for_policies(
+                {"policies": {"claude": self._CLAUDE_POLICY}},
+                "claude",
+                "databricks-claude-opus-4",
+                current_spend_usd=270.0,
+            )
+            == "databricks-claude-haiku-3-5"
+        )
+
+    def test_select_model_is_per_agent(self):
+        # codex has no policy entry → unaffected by claude's spending limit.
+        state = {"policies": {"claude": self._CLAUDE_POLICY}}
+        assert (
+            select_model_for_policies(state, "codex", "gpt-5", current_spend_usd=10_000.0)
+            == "gpt-5"
+        )
+
+    def test_select_model_skips_tiers_without_spending_limit(self):
+        # tier_2 configured but no spending_limit → no denominator → fall back
+        # to default_model regardless of spend.
         state = {
             "policies": {
-                "spending_limit": {
-                    "threshold_usd": 50,
-                    "default_model": "databricks-claude-sonnet-4",
-                    "fallback_model": "databricks-claude-haiku-3.5",
-                },
-            },
+                "claude": {
+                    "default_model": "databricks-claude-sonnet-4-5",
+                    "tier_2": {
+                        "usage_percent": 50.0,
+                        "model": "databricks-claude-haiku-3-5",
+                    },
+                }
+            }
         }
         assert (
-            select_model_for_policies(state, "databricks-claude-opus-4", current_spend_usd=10.0)
-            == "databricks-claude-sonnet-4"
+            select_model_for_policies(
+                state, "claude", "databricks-claude-opus-4", current_spend_usd=10_000.0
+            )
+            == "databricks-claude-sonnet-4-5"
         )
 
 
