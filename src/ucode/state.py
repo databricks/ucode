@@ -301,16 +301,31 @@ def resolve_policy_model(state: dict, agent: str, requested_model: str) -> str:
     return select_model_for_policies(state, agent, requested_model, spend)
 
 
-def merge_managed_workspace(local_state: dict, remote_splice: dict) -> dict:
-    """Pull-and-replace: the admin's UC blob fully replaces the user's workspace block."""
+def merge_managed_workspace(
+    local_state: dict,
+    remote_splice: dict,
+    *,
+    profile: str | None = None,
+) -> dict:
+    """Pull-and-replace: the admin's UC blob fully replaces the workspace block.
+
+    The requested local workspace is authoritative. Older managed exports include
+    a ``workspace`` field; newer callers may pass a workspace-less blob read from
+    the current workspace's UC volume. If a remote workspace is present and
+    disagrees with the requested workspace, ignore it.
+    """
     workspace = local_state.get("workspace")
     if not isinstance(workspace, str) or not workspace:
         return local_state
     if not isinstance(remote_splice, dict):
         return local_state
-    if remote_splice.get("workspace") != workspace:
+    remote_workspace = remote_splice.get("workspace")
+    if isinstance(remote_workspace, str) and remote_workspace != workspace:
         return local_state
-    return {**remote_splice, "workspace": workspace}
+    merged = {**remote_splice, "workspace": workspace}
+    if profile:
+        merged["profile"] = profile
+    return merged
 
 
 def build_agent_state(state: dict) -> dict[str, dict]:

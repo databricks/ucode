@@ -665,6 +665,126 @@ class TestConfigureAgentFlag:
 
 
 class TestConfigureAgentsSelection:
+    def test_managed_available_tools_skip_picker(self, monkeypatch):
+        import ucode.cli as cli_mod
+
+        state = {
+            **MINIMAL_STATE,
+            "available_tools": ["claude", "codex"],
+            "_managed_config_pulled": True,
+        }
+        monkeypatch.setattr(
+            cli_mod,
+            "_prompt_for_configuration",
+            lambda tool=None: ("https://example.com", None),
+        )
+        monkeypatch.setattr(cli_mod, "configure_shared_state", lambda *args, **kwargs: state)
+        checked: list[str] = []
+        monkeypatch.setattr(
+            cli_mod,
+            "check_gateway_endpoint",
+            lambda state, tool: checked.append(tool) or tool in {"claude", "codex"},
+        )
+        monkeypatch.setattr(
+            cli_mod,
+            "prompt_for_tools",
+            lambda available: pytest.fail("prompt_for_tools should not be called"),
+        )
+        install_calls: list[str] = []
+        monkeypatch.setattr(
+            cli_mod,
+            "install_tool_binary",
+            lambda tool, strict=False, update_existing=False: install_calls.append(tool) or True,
+        )
+        configured: list[list[str]] = []
+        monkeypatch.setattr(
+            cli_mod,
+            "configure_selected_tools",
+            lambda state, tools: configured.append(tools) or {**state, "available_tools": tools},
+        )
+        monkeypatch.setattr(cli_mod, "validate_all_tools", lambda state: None)
+
+        assert cli_mod.configure_workspace_command() == 0
+        assert checked == ["claude", "codex"]
+        assert install_calls == ["claude", "codex"]
+        assert configured == [["claude", "codex"]]
+
+    def test_selected_tools_override_managed_available_tools(self, monkeypatch):
+        import ucode.cli as cli_mod
+
+        state = {
+            **MINIMAL_STATE,
+            "available_tools": ["claude"],
+            "_managed_config_pulled": True,
+        }
+        monkeypatch.setattr(
+            cli_mod,
+            "_prompt_for_configuration",
+            lambda tool=None: ("https://example.com", None),
+        )
+        monkeypatch.setattr(cli_mod, "configure_shared_state", lambda *args, **kwargs: state)
+        checked: list[str] = []
+        monkeypatch.setattr(
+            cli_mod,
+            "check_gateway_endpoint",
+            lambda state, tool: checked.append(tool) or tool == "codex",
+        )
+        monkeypatch.setattr(
+            cli_mod,
+            "prompt_for_tools",
+            lambda available: pytest.fail("prompt_for_tools should not be called"),
+        )
+        configured: list[list[str]] = []
+        monkeypatch.setattr(cli_mod, "install_tool_binary", lambda *args, **kwargs: True)
+        monkeypatch.setattr(
+            cli_mod,
+            "configure_selected_tools",
+            lambda state, tools: configured.append(tools) or {**state, "available_tools": tools},
+        )
+        monkeypatch.setattr(cli_mod, "validate_all_tools", lambda state: None)
+
+        assert cli_mod.configure_workspace_command(selected_tools=["codex"]) == 0
+        assert checked == ["codex"]
+        assert configured == [["codex"]]
+
+    def test_managed_available_tools_ignore_unknown_entries(self, monkeypatch):
+        import ucode.cli as cli_mod
+
+        state = {
+            **MINIMAL_STATE,
+            "available_tools": ["codex", "bogus", None, "codex"],
+            "_managed_config_pulled": True,
+        }
+        monkeypatch.setattr(
+            cli_mod,
+            "_prompt_for_configuration",
+            lambda tool=None: ("https://example.com", None),
+        )
+        monkeypatch.setattr(cli_mod, "configure_shared_state", lambda *args, **kwargs: state)
+        checked: list[str] = []
+        monkeypatch.setattr(
+            cli_mod,
+            "check_gateway_endpoint",
+            lambda state, tool: checked.append(tool) or tool == "codex",
+        )
+        monkeypatch.setattr(
+            cli_mod,
+            "prompt_for_tools",
+            lambda available: pytest.fail("prompt_for_tools should not be called"),
+        )
+        configured: list[list[str]] = []
+        monkeypatch.setattr(cli_mod, "install_tool_binary", lambda *args, **kwargs: True)
+        monkeypatch.setattr(
+            cli_mod,
+            "configure_selected_tools",
+            lambda state, tools: configured.append(tools) or {**state, "available_tools": tools},
+        )
+        monkeypatch.setattr(cli_mod, "validate_all_tools", lambda state: None)
+
+        assert cli_mod.configure_workspace_command() == 0
+        assert checked == ["codex"]
+        assert configured == [["codex"]]
+
     def test_selected_tools_skip_picker(self, monkeypatch):
         import ucode.cli as cli_mod
 
@@ -828,9 +948,8 @@ class TestConfigureSharedStateMcpCleanup:
 
 
 class TestConfigureSharedStatePullsManagedWorkspace:
-    """`configure_shared_state` pulls the UC ``state.json`` and pull-and-replaces
-    the workspace block (admin-managed fields from remote, per-machine
-    preserved, ``agents`` rebuilt). Failures (no admin export yet, no
+    """`configure_shared_state` pulls the UC ``state.json`` and replaces the
+    workspace block with it. Failures (no admin export yet, no
     permission, network down) must not block the user — ``download_managed_config``
     returns ``None`` and the local discovery path stands as-is."""
 
@@ -863,17 +982,56 @@ class TestConfigureSharedStatePullsManagedWorkspace:
                 "workspace": ws,
                 "claude_models": {"opus": "admin-pinned"},
                 "policies": {"claude": {"default_model": "admin-pinned"}},
+                "available_tools": ["claude"],
             },
         )
         saved: list[dict] = []
         monkeypatch.setattr(cli_mod, "save_state", lambda state: saved.append(state))
 
-        cli_mod.configure_shared_state(ws)
+        state = cli_mod.configure_shared_state(ws)
 
         assert len(saved) == 1
         # Both admin-managed fields land on the saved state.
         assert saved[0]["claude_models"] == {"opus": "admin-pinned"}
         assert saved[0]["policies"] == {"claude": {"default_model": "admin-pinned"}}
+        assert saved[0]["available_tools"] == ["claude"]
+        assert "_managed_config_pulled" not in saved[0]
+        assert state["_managed_config_pulled"] is True
+
+    def test_pulled_workspace_state_overwrites_local_stale_tools(self, monkeypatch):
+        import ucode.cli as cli_mod
+
+        ws = "https://example.databricks.com"
+        self._stub_external_deps(monkeypatch)
+        monkeypatch.setattr(
+            cli_mod,
+            "load_state",
+            lambda: {
+                "workspace": ws,
+                "available_tools": ["codex", "pi", "gemini", "opencode", "copilot", "claude"],
+                "gemini_models": ["local-stale"],
+            },
+        )
+        monkeypatch.setattr(
+            cli_mod,
+            "download_managed_config",
+            lambda w, p: {
+                "available_tools": ["claude", "codex"],
+                "claude_models": {"opus": "admin-pinned"},
+            },
+        )
+        saved: list[dict] = []
+        monkeypatch.setattr(cli_mod, "save_state", lambda state: saved.append(state))
+
+        state = cli_mod.configure_shared_state(ws)
+
+        assert len(saved) == 1
+        assert saved[0]["workspace"] == ws
+        assert saved[0]["available_tools"] == ["claude", "codex"]
+        assert saved[0]["claude_models"] == {"opus": "admin-pinned"}
+        assert "gemini_models" not in saved[0]
+        assert "_managed_config_pulled" not in saved[0]
+        assert state["_managed_config_pulled"] is True
 
     def test_silent_when_download_returns_none(self, monkeypatch):
         # First-time / no admin export yet — local state must save cleanly with

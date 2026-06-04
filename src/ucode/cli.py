@@ -126,6 +126,35 @@ def _parse_agents_option(agents: str) -> list[str]:
     return tools
 
 
+def _managed_available_tools(state: dict) -> list[str] | None:
+    if not state.get("_managed_config_pulled"):
+        return None
+
+    raw_tools = state.get("available_tools")
+    if not isinstance(raw_tools, list):
+        raw_tools = []
+
+    tools: list[str] = []
+    for raw_tool in raw_tools:
+        if not isinstance(raw_tool, str):
+            continue
+        try:
+            tool = normalize_tool(raw_tool)
+        except RuntimeError:
+            continue
+        if tool not in tools:
+            tools.append(tool)
+    return tools
+
+
+def _persistable_state(state: dict) -> dict:
+    return {
+        key: value
+        for key, value in state.items()
+        if key not in {"_managed_config_pulled", "_discovery_reasons"}
+    }
+
+
 def _parse_workspaces_option(workspaces: str) -> list[tuple[str, str | None]]:
     """Parse `--workspaces` into [(url, profile_name | None), ...].
 
@@ -228,16 +257,16 @@ def configure_shared_state(
         state["codex_models"] = codex_models
     if fetch_all or "opencode" in tools:
         state["opencode_models"] = opencode_models
-    # Pull-and-replace: the UC blob is authoritative for admin-managed fields
-    # (models, base_urls, mcp_servers, tracing, policies, ...). Per-machine
-    # fields (profile, managed_configs, ...) are preserved, and `agents` is
-    # rebuilt so auth_command uses the user's profile. See
-    # `merge_managed_workspace` for the full contract.
+    # Pull-and-replace: when the workspace publishes a UC state.json, that blob
+    # is the authoritative workspace block. Local discovery above is only the
+    # fallback for workspaces without a managed config.
     remote = download_managed_config(workspace, profile)
     if remote is not None:
-        state = merge_managed_workspace(state, remote)
+        state = merge_managed_workspace(state, remote, profile=profile)
 
     save_state(state)
+    if remote is not None:
+        state = {**state, "_managed_config_pulled": True}
     # Scrub MCP entries that ucode wrote for the previous workspace so the new
     # workspace's agent configs aren't stale.
     if previous_workspace and previous_workspace != workspace:
@@ -308,10 +337,21 @@ def configure_workspace_command(
 
     states = _configure_shared_workspace_states(workspace_entries, selected_tools, force_login=True)
     state = states[0]
-    save_state(state)
+    save_state(_persistable_state(state))
 
+    managed_tools = _managed_available_tools(state) if selected_tools is None else None
     available_on_workspace: list[str] = []
-    tools_to_check = selected_tools or list(TOOL_SPECS)
+    if selected_tools is not None:
+        tools_to_check = selected_tools
+    elif managed_tools is not None:
+        tools_to_check = managed_tools
+    else:
+        tools_to_check = list(TOOL_SPECS)
+
+    if managed_tools == []:
+        print_note("No coding agents selected — nothing to configure.")
+        return 0
+
     for tool_name in tools_to_check:
         with spinner(f"Checking {TOOL_SPECS[tool_name]['display']} availability..."):
             if check_gateway_endpoint(state, tool_name):
@@ -322,7 +362,18 @@ def configure_workspace_command(
         _print_discovery_diagnostics(state)
         return 1
 
-    if selected_tools is None:
+    if managed_tools is not None:
+        unavailable_tools = [
+            tool_name for tool_name in managed_tools if tool_name not in available_on_workspace
+        ]
+        if unavailable_tools:
+            _print_discovery_diagnostics(state)
+            displays = ", ".join(
+                TOOL_SPECS[tool_name]["display"] for tool_name in unavailable_tools
+            )
+            raise RuntimeError(f"Managed agent(s) not available on this workspace: {displays}.")
+        picked = managed_tools
+    elif selected_tools is None:
         picked = prompt_for_tools([(t, TOOL_SPECS[t]["display"]) for t in available_on_workspace])
     else:
         unavailable_tools = [
@@ -343,7 +394,7 @@ def configure_workspace_command(
     for tool_name in picked:
         install_tool_binary(tool_name, strict=False, update_existing=True)
 
-    state = configure_selected_tools(state, picked)
+    state = configure_selected_tools(_persistable_state(state), picked)
 
     summary_lines = [f"[bold]Workspace:[/bold] [cyan]{state['workspace']}[/cyan]"]
     for tool_name in picked:

@@ -472,6 +472,36 @@ class TestMergeManagedWorkspace:
         # Every field in remote replaces local — even per-machine ones.
         assert merged == {**remote, "workspace": FAKE_WS}
 
+    def test_accepts_workspace_less_remote_blob(self):
+        local = {"workspace": FAKE_WS, "profile": "user-local-profile"}
+        remote = {
+            "claude_models": {"opus": "admin-pinned"},
+            "available_tools": ["claude"],
+        }
+
+        merged = merge_managed_workspace(local, remote)
+
+        assert merged == {
+            **remote,
+            "workspace": FAKE_WS,
+        }
+
+    def test_profile_override_uses_resolved_local_profile(self):
+        local = {"workspace": FAKE_WS, "profile": "stale-local-profile"}
+        remote = {
+            "workspace": FAKE_WS,
+            "profile": "admin-profile",
+            "claude_models": {"opus": "admin-pinned"},
+        }
+
+        merged = merge_managed_workspace(local, remote, profile="user-local-profile")
+
+        assert merged == {
+            **remote,
+            "workspace": FAKE_WS,
+            "profile": "user-local-profile",
+        }
+
     def test_no_op_when_workspaces_dont_match(self):
         local = {"workspace": FAKE_WS, "claude_models": {"opus": "local"}}
         remote = {
@@ -488,7 +518,6 @@ class TestMergeManagedWorkspace:
     def test_no_op_when_remote_blob_malformed(self):
         local = {"workspace": FAKE_WS}
         assert merge_managed_workspace(local, "not-a-dict") == local  # type: ignore[arg-type]
-        assert merge_managed_workspace(local, {}) == local
 
 
 class TestMarkToolManaged:
