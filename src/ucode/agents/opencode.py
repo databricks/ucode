@@ -200,6 +200,19 @@ def default_model(state: dict) -> str | None:
     return gemini[0] if gemini else None
 
 
+def _configured_model(state: dict) -> str | None:
+    """The model already selected in opencode.json, if any.
+
+    The launch path writes the chosen model here (e.g. the cheaper Haiku model
+    picked from the budget-warn selector), so the token-refresh loop must reuse
+    it rather than resetting to the default and clobbering the selection. The
+    stored value is already a selector (``provider/model``), which
+    ``_resolve_model_selector`` passes through unchanged."""
+    existing = read_json_safe(OPENCODE_CONFIG_PATH)
+    model = existing.get("model")
+    return model if isinstance(model, str) and model else None
+
+
 def _policy_resolved_default(state: dict) -> str | None:
     """Default model with admin policies applied. ``None`` if no model is configured."""
     base = default_model(state)
@@ -209,7 +222,9 @@ def _policy_resolved_default(state: dict) -> str | None:
 
 
 def _refresh_token_once(state: dict, *, force_refresh: bool = False) -> str:
-    model = _policy_resolved_default(state)
+    # Prefer the model already configured so a token refresh never overrides a
+    # deliberately-selected model; fall back to the policy default on first run.
+    model = _configured_model(state) or _policy_resolved_default(state)
     if not model:
         raise RuntimeError("No OpenCode model is configured.")
     _, token = write_tool_config(state, model, force_refresh=force_refresh)

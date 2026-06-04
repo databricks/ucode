@@ -322,6 +322,33 @@ def prompt_for_default_agent(available: list[tuple[str, str]]) -> str:
             )
 
 
+def prompt_budget_warn_choice(*, default_agent_display: str) -> str | None:
+    """Selector shown when the global daily budget is nearing its limit.
+
+    Returns ``"default"`` (continue with the agent being launched) or
+    ``"opencode"`` (switch to the untracked OpenCode harness), or ``None`` if the
+    user aborts (Ctrl-C / ESC). Stays state-agnostic: the caller passes the
+    default agent's display name to label the first option."""
+    style = questionary.Style(
+        [
+            ("highlighted", "fg:cyan bold"),
+            ("pointer", "fg:cyan bold"),
+            ("answer", "fg:cyan"),
+        ]
+    )
+    choices = [
+        questionary.Choice(title=f"Continue with {default_agent_display}", value="default"),
+        questionary.Choice(title="Switch to OpenCode", value="opencode"),
+    ]
+    return questionary.select(
+        "Daily budget is nearing its limit — how would you like to continue?",
+        choices=choices,
+        style=style,
+        pointer="›",
+        qmark="",
+    ).ask()
+
+
 def prompt_for_choice(prompt: str, options: list[tuple[str, str]]) -> str:
     console.print()
     for index, (_, option_label) in enumerate(options, start=1):

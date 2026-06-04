@@ -51,10 +51,14 @@ MINIMAL_STATE = {
         "gemini": "https://example.databricks.com/ai-gateway/gemini",
         "opencode": "https://example.databricks.com/ai-gateway/opencode",
     },
-    "claude_models": {"sonnet": "databricks-claude-sonnet-4"},
+    "claude_models": {
+        "opus": "databricks-claude-opus-4-8",
+        "sonnet": "databricks-claude-sonnet-4",
+        "haiku": "databricks-claude-haiku-4-5",
+    },
     "gemini_models": ["gemini-2.0-flash"],
     "codex_models": ["codex-mini"],
-    "opencode_models": {"anthropic": ["databricks-claude-sonnet-4"]},
+    "opencode_models": {"anthropic": ["databricks-claude-sonnet-4", "databricks-claude-haiku-4-5"]},
     "managed_configs": {},
     "available_tools": TOOLS,
 }
@@ -263,22 +267,23 @@ class TestDefaultLaunch:
         mock_launch.assert_called_once()
         assert mock_launch.call_args[0][0] == "claude"
 
-    def test_falls_back_when_default_over_budget(self):
+    def test_bare_launch_blocks_when_budget_exceeded(self):
+        """The global budget is one pool, so bare `ucode` hard-stops when it's
+        exhausted rather than falling back to another agent."""
         from contextlib import ExitStack
 
         state = {**MINIMAL_STATE, "default_agent": "codex", "available_tools": ["codex", "claude"]}
 
-        def budget(tool=None):
-            return {"state": "exceeded" if tool == "codex" else "ok", "tool": tool}
-
         with ExitStack() as stack:
             mock_launch = self._launch_patches(stack)
             stack.enter_context(patch("ucode.cli.load_state", return_value=state))
-            stack.enter_context(patch("ucode.cli.local_budget_status", side_effect=budget))
+            stack.enter_context(
+                patch("ucode.cli.local_budget_status", return_value={"state": "exceeded"})
+            )
             result = runner.invoke(app, [])
-        assert result.exit_code == 0, result.output
-        assert mock_launch.call_args[0][0] == "claude"
-        assert "reached its daily budget" in result.output
+        assert result.exit_code == 1, result.output
+        mock_launch.assert_not_called()
+        assert "exhausted" in result.output
 
     def test_auto_configures_when_no_workspace(self):
         """Bare `ucode` with no workspace runs configure first, then launches."""
@@ -313,6 +318,128 @@ class TestDefaultLaunch:
         assert configured == [True]
         mock_launch.assert_called_once()
         assert mock_launch.call_args[0][0] == "codex"
+
+
+class TestBudgetGate:
+    """Budget gate at the launch boundary: exceeded hard-stops every agent,
+    warn offers an interactive harness/model selector."""
+
+    def _launch_patches(self, stack):
+        """Stub the launch pipeline (same shape as TestDefaultLaunch), returning
+        the (launch_agent, configure_tool) mocks for assertions."""
+        stack.enter_context(patch("ucode.cli.install_databricks_cli"))
+        stack.enter_context(patch("ucode.cli.ensure_bootstrap_dependencies"))
+        stack.enter_context(patch("ucode.cli.ensure_provider_state", return_value=MINIMAL_STATE))
+        stack.enter_context(patch("ucode.cli.configure_shared_state", return_value=MINIMAL_STATE))
+        stack.enter_context(patch("ucode.cli._auto_configure_tool"))
+
+        def resolve(tool, state, explicit_model):
+            return state, (explicit_model or "databricks-claude-sonnet-4")
+
+        stack.enter_context(patch("ucode.cli.resolve_launch_model", side_effect=resolve))
+        configure_tool = stack.enter_context(
+            patch("ucode.cli.configure_tool", return_value=MINIMAL_STATE)
+        )
+        launch_agent = stack.enter_context(patch("ucode.cli.launch_agent"))
+        return launch_agent, configure_tool
+
+    def _run(self, stack, args, *, budget_state, choice="__unset__", state=None):
+        state = state or {**MINIMAL_STATE, "default_agent": "claude"}
+        launch_agent, configure_tool = self._launch_patches(stack)
+        stack.enter_context(patch("ucode.cli.load_state", return_value=state))
+        stack.enter_context(
+            patch("ucode.cli.local_budget_status", return_value={"state": budget_state})
+        )
+        choice_mock = stack.enter_context(patch("ucode.cli.prompt_budget_warn_choice"))
+        if choice != "__unset__":
+            choice_mock.return_value = choice
+        result = runner.invoke(app, args)
+        return result, launch_agent, configure_tool, choice_mock
+
+    def test_exceeded_blocks_tracked_agent(self):
+        from contextlib import ExitStack
+
+        with ExitStack() as stack:
+            result, launch_agent, _, _ = self._run(stack, ["claude"], budget_state="exceeded")
+        assert result.exit_code == 1, result.output
+        launch_agent.assert_not_called()
+        assert "exhausted" in result.output
+
+    def test_exceeded_blocks_untracked_agent(self):
+        """The exceeded hard stop applies to untracked agents too (closes the
+        loophole where `ucode opencode` launched past the global cap)."""
+        from contextlib import ExitStack
+
+        with ExitStack() as stack:
+            result, launch_agent, _, _ = self._run(stack, ["opencode"], budget_state="exceeded")
+        assert result.exit_code == 1, result.output
+        launch_agent.assert_not_called()
+
+    def test_warn_selector_continue_default(self):
+        from contextlib import ExitStack
+
+        with ExitStack() as stack:
+            result, launch_agent, _, _ = self._run(
+                stack, ["claude"], budget_state="warn", choice="default"
+            )
+        assert result.exit_code == 0, result.output
+        assert launch_agent.call_args[0][0] == "claude"
+
+    def test_warn_selector_switch_opencode(self):
+        from contextlib import ExitStack
+
+        with ExitStack() as stack:
+            result, launch_agent, configure_tool, _ = self._run(
+                stack, ["claude"], budget_state="warn", choice="opencode"
+            )
+        assert result.exit_code == 0, result.output
+        assert launch_agent.call_args[0][0] == "opencode"
+        # OpenCode defaults to the cheaper Haiku endpoint (present in MINIMAL_STATE).
+        assert configure_tool.call_args[0][2] == "databricks-claude-haiku-4-5"
+
+    def test_warn_selector_abort_none(self):
+        from contextlib import ExitStack
+
+        with ExitStack() as stack:
+            result, launch_agent, _, _ = self._run(
+                stack, ["claude"], budget_state="warn", choice=None
+            )
+        assert result.exit_code == 0, result.output
+        launch_agent.assert_not_called()
+
+    def test_warn_untracked_explicit_skips_selector(self):
+        """`ucode opencode` in warn-state launches normally without prompting —
+        the selector only makes sense for budget-tracked agents."""
+        from contextlib import ExitStack
+
+        with ExitStack() as stack:
+            result, launch_agent, _, choice_mock = self._run(
+                stack, ["opencode"], budget_state="warn"
+            )
+        assert result.exit_code == 0, result.output
+        choice_mock.assert_not_called()
+        assert launch_agent.call_args[0][0] == "opencode"
+
+    def test_prompt_budget_warn_choice_options(self):
+        """The ui helper offers exactly the default-agent and OpenCode options,
+        labeling the first with the passed display name."""
+        from ucode.ui import prompt_budget_warn_choice
+
+        captured = {}
+
+        class FakeSelect:
+            def ask(self):
+                return "default"
+
+        def fake_select(_message, *, choices, **_kwargs):
+            captured["values"] = [c.value for c in choices]
+            captured["titles"] = [c.title for c in choices]
+            return FakeSelect()
+
+        with patch("ucode.ui.questionary.select", side_effect=fake_select):
+            prompt_budget_warn_choice(default_agent_display="Claude Code")
+        assert captured["values"] == ["default", "opencode"]
+        assert captured["titles"][0] == "Continue with Claude Code"
 
 
 class TestMcpSubcommands:

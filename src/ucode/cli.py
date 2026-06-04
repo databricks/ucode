@@ -73,6 +73,7 @@ from ucode.ui import (
     print_section,
     print_success,
     print_warning,
+    prompt_budget_warn_choice,
     prompt_for_default_agent,
     prompt_for_tools,
     prompt_for_usd_amount,
@@ -104,6 +105,21 @@ _DISCOVERY_CONSUMERS: dict[str, tuple[str, ...]] = {
 
 # Agents that record local spend and therefore have a daily budget to report.
 BUDGET_TRACKED_AGENTS: tuple[str, ...] = ("claude", "codex")
+
+# When the daily budget is nearing its limit, the warn selector offers a switch
+# to OpenCode. OpenCode is untracked (no usage hooks), so it keeps working past
+# the shared cap; default it to the cheaper Haiku endpoint when available.
+OPENCODE_HAIKU_MODEL = "databricks-claude-haiku-4-5"
+
+
+def _opencode_warn_model(state: dict) -> str | None:
+    """Model to launch OpenCode on from the budget-warn selector.
+
+    Prefers the cheaper Haiku endpoint; falls back to OpenCode's default when
+    Haiku isn't among the discovered endpoints (``None`` lets the normal launch
+    path resolve the default)."""
+    anthropic = (state.get("opencode_models") or {}).get("anthropic") or []
+    return OPENCODE_HAIKU_MODEL if OPENCODE_HAIKU_MODEL in anthropic else None
 
 
 def _print_discovery_diagnostics(state: dict) -> None:
@@ -637,43 +653,53 @@ def _auto_configure_tool(tool: str) -> None:
         raise RuntimeError(f"{spec['display']} validation failed — config reverted.")
 
 
-def _agent_budget_exceeded(tool: str) -> bool:
-    """True when ``tool`` has a local daily budget and it's already exceeded.
-
-    Only claude/codex record local spend, so other agents report ``ok`` and are
-    always considered launchable."""
-    try:
-        return local_budget_status(tool).get("state") == "exceeded"
-    except RuntimeError:
-        return False
-
-
 def _resolve_default_launch_tool(state: dict) -> str:
     """Pick which agent bare ``ucode`` should launch.
 
-    Starts with ``default_agent`` (falling back to the first configured agent
-    when it's unset or no longer available), then skips any agent whose daily
-    budget is exhausted. If every agent is over budget we return the default so
-    ``_launch_tool`` surfaces its budget panel and exits."""
+    Returns ``default_agent`` (falling back to the first configured agent when
+    it's unset or no longer available). The daily budget is a single global pool,
+    so budget gating lives entirely in ``_apply_budget_gate`` at launch time
+    rather than in per-agent selection here."""
     available = state.get("available_tools") or []
     if not available:
         raise RuntimeError("No coding agents are configured. Run `ucode configure` to set one up.")
     default_agent = state.get("default_agent")
     if default_agent not in available:
         default_agent = available[0]
-    ordered = [default_agent] + [tool for tool in available if tool != default_agent]
-    for tool in ordered:
-        if not _agent_budget_exceeded(tool):
-            if tool != default_agent:
-                print_note(
-                    f"{TOOL_SPECS[default_agent]['display']} has reached its daily budget; "
-                    f"launching {TOOL_SPECS[tool]['display']} instead."
-                )
-            return tool
     return default_agent
 
 
-def _launch_tool(tool_name: str, ctx: typer.Context) -> None:
+def _apply_budget_gate(tool: str, *, offer_warn_selector: bool) -> str:
+    """Gate launch on the global daily budget, returning a decision string.
+
+    The budget is a single global pool shared across every coding tool:
+    - ``exceeded`` is a hard stop for *all* agents (including untracked ones like
+      OpenCode) — print the exhausted panel and exit.
+    - ``warn`` offers an interactive selector (when ``offer_warn_selector``) to
+      continue with the agent being launched or switch to OpenCode — the only
+      option that survives past the cap, since OpenCode is untracked.
+    - ``ok`` passes through.
+
+    Returns ``"default"`` (launch the agent as dispatched) or ``"opencode"``
+    (switch harnesses). Raises ``typer.Exit`` on the exceeded hard stop and on
+    quit/abort from the selector."""
+    status = local_budget_status()
+    budget_state = status.get("state")
+    if budget_state == "exceeded":
+        console.print(render_local_budget_panel(status, title="Daily budget exhausted"))
+        print_err("Daily budget exhausted — no agents can be launched until it resets.")
+        raise typer.Exit(1)
+    if budget_state == "warn" and offer_warn_selector:
+        choice = prompt_budget_warn_choice(default_agent_display=TOOL_SPECS[tool]["display"])
+        if choice is None:
+            print_note("Cancelled.")
+            raise typer.Exit(0)
+        if choice == "opencode":
+            return "opencode"
+    return "default"
+
+
+def _launch_tool(tool_name: str, ctx: typer.Context, *, explicit_model: str | None = None) -> None:
     try:
         tool = normalize_tool(tool_name)
         existing = load_state()
@@ -691,24 +717,31 @@ def _launch_tool(tool_name: str, ctx: typer.Context) -> None:
         state = configure_shared_state(
             state["workspace"], profile=state.get("profile"), tools=[tool]
         )
-        state, resolved_model = resolve_launch_model(tool, state, None)
+        # Gate on the global daily budget before configuring/launching. An
+        # exceeded state hard-stops every agent; a warn state offers the selector
+        # (tracked agents only) to continue or switch to OpenCode. Switching
+        # re-dispatches through `_launch_tool`, which auto-configures OpenCode if
+        # it isn't set up yet and skips the selector on the second pass.
+        decision = _apply_budget_gate(
+            tool, offer_warn_selector=tool in BUDGET_TRACKED_AGENTS and explicit_model is None
+        )
+        if decision == "opencode" and tool != "opencode":
+            return _launch_tool("opencode", ctx, explicit_model=_opencode_warn_model(state))
+        state, resolved_model = resolve_launch_model(tool, state, explicit_model)
         state = configure_tool(tool, state, resolved_model)
         display = TOOL_SPECS[tool]["display"]
         if tool in BUDGET_TRACKED_AGENTS:
             # The daily budget is a single global pool shared across all tools,
             # so render it tool-agnostically (no per-tool label in the callout).
-            # The panel title still names the tool being launched.
-            budget_status = local_budget_status()
+            # The panel title still names the tool being launched. The exceeded
+            # state is already handled by `_apply_budget_gate` above, so this
+            # panel only reports ok/warn spend here.
             console.print(
                 render_local_budget_panel(
-                    budget_status,
+                    local_budget_status(),
                     title=f"ucode with {display}",
                 )
             )
-            # The panel above already shows the exceeded/warn state with the
-            # full spend breakdown, so avoid re-printing the same numbers.
-            if budget_status.get("state") == "exceeded":
-                raise typer.Exit(1)
         else:
             print_section(f"ucode with {display}")
             if resolved_model:
@@ -720,6 +753,12 @@ def _launch_tool(tool_name: str, ctx: typer.Context) -> None:
             )
         print_success(f"Starting {display}")
         launch_agent(tool, state, ctx.args)
+    except typer.Exit:
+        # `_apply_budget_gate` raises typer.Exit for the budget hard stop and the
+        # quit/abort selector path. typer.Exit subclasses RuntimeError, so let it
+        # propagate with its intended exit code instead of the generic handler
+        # below reporting it as an error.
+        raise
     except RuntimeError as exc:
         print_err(str(exc))
         raise typer.Exit(1) from None

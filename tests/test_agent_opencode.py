@@ -273,6 +273,53 @@ class TestOpencodeDefaultModel:
         assert opencode.default_model({"opencode_models": {}}) is None
 
 
+class TestRefreshPreservesConfiguredModel:
+    """The token-refresh loop must reuse the model already written to
+    opencode.json (e.g. the cheaper model chosen at launch) instead of resetting
+    it to the default — otherwise a refresh would clobber the selection."""
+
+    def _setup(self, tmp_path, monkeypatch, configured_model):
+        import ucode.agents.opencode as oc_mod
+        import ucode.config_io as config_io_mod
+
+        monkeypatch.setattr(config_io_mod, "APP_DIR", tmp_path)
+        config_file = tmp_path / "opencode.json"
+        monkeypatch.setattr(oc_mod, "OPENCODE_CONFIG_PATH", config_file)
+        monkeypatch.setattr(oc_mod, "OPENCODE_BACKUP_PATH", tmp_path / "opencode-backup.json")
+        if configured_model is not None:
+            config_file.write_text(json.dumps({"model": configured_model}), encoding="utf-8")
+        return oc_mod, config_file
+
+    def test_refresh_keeps_configured_model_over_default(self, tmp_path, monkeypatch):
+        # Default would be opus (anthropic[0]); the config already selects haiku.
+        oc_mod, config_file = self._setup(
+            tmp_path, monkeypatch, "databricks-anthropic/databricks-claude-haiku-4-5"
+        )
+        state = {
+            "workspace": WS,
+            "opencode_models": {
+                "anthropic": ["databricks-claude-opus-4-8", "databricks-claude-haiku-4-5"]
+            },
+        }
+        monkeypatch.setattr(oc_mod, "get_databricks_token", lambda *a, **k: "tok")
+        oc_mod._refresh_token_once(state)
+        written = json.loads(config_file.read_text())
+        assert written["model"] == "databricks-anthropic/databricks-claude-haiku-4-5"
+
+    def test_refresh_uses_default_when_no_config(self, tmp_path, monkeypatch):
+        oc_mod, config_file = self._setup(tmp_path, monkeypatch, None)
+        state = {
+            "workspace": WS,
+            "opencode_models": {
+                "anthropic": ["databricks-claude-opus-4-8", "databricks-claude-haiku-4-5"]
+            },
+        }
+        monkeypatch.setattr(oc_mod, "get_databricks_token", lambda *a, **k: "tok")
+        oc_mod._refresh_token_once(state)
+        written = json.loads(config_file.read_text())
+        assert written["model"] == "databricks-anthropic/databricks-claude-opus-4-8"
+
+
 class TestOpencodeValidateCmd:
     def test_starts_with_binary(self):
         cmd = opencode.validate_cmd("opencode")
