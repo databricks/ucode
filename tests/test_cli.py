@@ -814,18 +814,25 @@ class TestExport:
             "mcp_servers": [],
         }
 
+    @staticmethod
+    def _admin_patches(stack, *, admin: bool | None = True):
+        stack.enter_context(patch("ucode.cli.get_databricks_token", return_value="tok"))
+        stack.enter_context(patch("ucode.cli.is_workspace_admin", return_value=admin))
+
     def test_uploads_state_to_uc_volume(self):
         state = {**MINIMAL_STATE, "profile": "my-profile"}
-        with (
-            patch("ucode.cli.install_databricks_cli"),
-            patch("ucode.cli.load_state", return_value=state),
-            patch("ucode.cli.load_full_state", return_value=self._full_state_with(state)),
-            patch("ucode.cli.ensure_databricks_auth") as mock_auth,
-            patch("ucode.cli.upload_managed_config") as mock_upload,
-            patch("ucode.cli.policy_cache_path") as mock_policy_path,
-        ):
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch("ucode.cli.install_databricks_cli"))
+            stack.enter_context(patch("ucode.cli.load_state", return_value=state))
+            stack.enter_context(
+                patch("ucode.cli.load_full_state", return_value=self._full_state_with(state))
+            )
+            mock_auth = stack.enter_context(patch("ucode.cli.ensure_databricks_auth"))
+            self._admin_patches(stack)
+            mock_upload = stack.enter_context(patch("ucode.cli.upload_managed_config"))
+            mock_policy_path = stack.enter_context(patch("ucode.cli.policy_cache_path"))
             mock_policy_path.return_value.is_file.return_value = False
-            result = runner.invoke(app, ["export"])
+            result = runner.invoke(app, ["export"], input="y\n")
 
         assert result.exit_code == 0, result.output
         mock_auth.assert_called_once_with("https://example.databricks.com", "my-profile")
@@ -849,43 +856,44 @@ class TestExport:
         def fake_upload(workspace, profile, path):
             captured.update(_json.loads(path.read_text(encoding="utf-8")))
 
-        with (
-            patch("ucode.cli.install_databricks_cli"),
-            patch("ucode.cli.load_state", return_value=state),
-            patch("ucode.cli.load_full_state", return_value=self._full_state_with(state)),
-            patch("ucode.cli.ensure_databricks_auth"),
-            patch("ucode.cli.upload_managed_config", side_effect=fake_upload),
-            patch("ucode.cli.policy_cache_path") as mock_policy_path,
-        ):
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch("ucode.cli.install_databricks_cli"))
+            stack.enter_context(patch("ucode.cli.load_state", return_value=state))
+            stack.enter_context(
+                patch("ucode.cli.load_full_state", return_value=self._full_state_with(state))
+            )
+            stack.enter_context(patch("ucode.cli.ensure_databricks_auth"))
+            self._admin_patches(stack)
+            stack.enter_context(patch("ucode.cli.upload_managed_config", side_effect=fake_upload))
+            mock_policy_path = stack.enter_context(patch("ucode.cli.policy_cache_path"))
             mock_policy_path.return_value.is_file.return_value = False
-            result = runner.invoke(app, ["export"])
+            result = runner.invoke(app, ["export"], input="y\n")
 
         assert result.exit_code == 0, result.output
-        # Flat shape: no wrapper.
         assert "workspaces" not in captured
         assert "current_workspace" not in captured
-        # Per-machine fields dropped.
         assert "mcp_servers" not in captured
         # Workspace is present, policy is uploaded separately.
         assert captured["workspace"] == "https://example.databricks.com"
         assert "policies" not in captured
         assert captured["state_version"] == 3
-        # Other workspaces never appear in the values.
         assert "should-not-be-uploaded" not in _json.dumps(captured)
 
     def test_uploads_policy_yaml_when_present(self):
         state = {**MINIMAL_STATE, "profile": "my-profile"}
-        with (
-            patch("ucode.cli.install_databricks_cli"),
-            patch("ucode.cli.load_state", return_value=state),
-            patch("ucode.cli.load_full_state", return_value=self._full_state_with(state)),
-            patch("ucode.cli.ensure_databricks_auth"),
-            patch("ucode.cli.upload_managed_config") as mock_config_upload,
-            patch("ucode.cli.upload_managed_policies") as mock_policy_upload,
-            patch("ucode.cli.policy_cache_path") as mock_policy_path,
-        ):
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch("ucode.cli.install_databricks_cli"))
+            stack.enter_context(patch("ucode.cli.load_state", return_value=state))
+            stack.enter_context(
+                patch("ucode.cli.load_full_state", return_value=self._full_state_with(state))
+            )
+            stack.enter_context(patch("ucode.cli.ensure_databricks_auth"))
+            self._admin_patches(stack)
+            mock_config_upload = stack.enter_context(patch("ucode.cli.upload_managed_config"))
+            mock_policy_upload = stack.enter_context(patch("ucode.cli.upload_managed_policies"))
+            mock_policy_path = stack.enter_context(patch("ucode.cli.policy_cache_path"))
             mock_policy_path.return_value.is_file.return_value = True
-            result = runner.invoke(app, ["export"])
+            result = runner.invoke(app, ["export"], input="y\n")
 
         assert result.exit_code == 0, result.output
         mock_config_upload.assert_called_once()
@@ -900,14 +908,16 @@ class TestExport:
 
     def test_uploads_without_profile(self):
         state = {k: v for k, v in MINIMAL_STATE.items() if k != "profile"}
-        with (
-            patch("ucode.cli.install_databricks_cli"),
-            patch("ucode.cli.load_state", return_value=state),
-            patch("ucode.cli.load_full_state", return_value=self._full_state_with(state)),
-            patch("ucode.cli.ensure_databricks_auth"),
-            patch("ucode.cli.upload_managed_config") as mock_upload,
-        ):
-            result = runner.invoke(app, ["export"])
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch("ucode.cli.install_databricks_cli"))
+            stack.enter_context(patch("ucode.cli.load_state", return_value=state))
+            stack.enter_context(
+                patch("ucode.cli.load_full_state", return_value=self._full_state_with(state))
+            )
+            stack.enter_context(patch("ucode.cli.ensure_databricks_auth"))
+            self._admin_patches(stack)
+            mock_upload = stack.enter_context(patch("ucode.cli.upload_managed_config"))
+            result = runner.invoke(app, ["export"], input="y\n")
 
         assert result.exit_code == 0, result.output
         assert mock_upload.call_args[0][1] is None
@@ -924,24 +934,67 @@ class TestExport:
         assert "No workspace is configured" in result.output
         mock_upload.assert_not_called()
 
-    def test_surfaces_upload_failure_as_error(self):
-        with (
-            patch("ucode.cli.install_databricks_cli"),
-            patch("ucode.cli.load_state", return_value=MINIMAL_STATE),
-            patch(
-                "ucode.cli.load_full_state",
-                return_value=self._full_state_with(MINIMAL_STATE),
-            ),
-            patch("ucode.cli.ensure_databricks_auth"),
-            patch(
-                "ucode.cli.upload_managed_config",
-                side_effect=RuntimeError("PERMISSION_DENIED: not an admin"),
-            ),
-        ):
+    def test_blocks_non_admin(self):
+        """`ucode export` must refuse to publish when SCIM Me reports non-admin
+        — otherwise a developer could overwrite the whole org's managed config."""
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch("ucode.cli.install_databricks_cli"))
+            stack.enter_context(patch("ucode.cli.load_state", return_value=MINIMAL_STATE))
+            stack.enter_context(
+                patch(
+                    "ucode.cli.load_full_state", return_value=self._full_state_with(MINIMAL_STATE)
+                )
+            )
+            stack.enter_context(patch("ucode.cli.ensure_databricks_auth"))
+            self._admin_patches(stack, admin=False)
+            mock_upload = stack.enter_context(patch("ucode.cli.upload_managed_config"))
             result = runner.invoke(app, ["export"])
+
+        assert result.exit_code == 1, result.output
+        assert "admin permissions" in result.output
+        mock_upload.assert_not_called()
+
+    def test_surfaces_upload_failure_as_error(self):
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch("ucode.cli.install_databricks_cli"))
+            stack.enter_context(patch("ucode.cli.load_state", return_value=MINIMAL_STATE))
+            stack.enter_context(
+                patch(
+                    "ucode.cli.load_full_state",
+                    return_value=self._full_state_with(MINIMAL_STATE),
+                )
+            )
+            stack.enter_context(patch("ucode.cli.ensure_databricks_auth"))
+            self._admin_patches(stack)
+            stack.enter_context(
+                patch(
+                    "ucode.cli.upload_managed_config",
+                    side_effect=RuntimeError("PERMISSION_DENIED: not an admin"),
+                )
+            )
+            result = runner.invoke(app, ["export"], input="y\n")
 
         assert result.exit_code == 1
         assert "PERMISSION_DENIED" in result.output
+
+    def test_cancel_at_confirmation_prompt(self):
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch("ucode.cli.install_databricks_cli"))
+            stack.enter_context(patch("ucode.cli.load_state", return_value=MINIMAL_STATE))
+            stack.enter_context(
+                patch(
+                    "ucode.cli.load_full_state",
+                    return_value=self._full_state_with(MINIMAL_STATE),
+                )
+            )
+            stack.enter_context(patch("ucode.cli.ensure_databricks_auth"))
+            self._admin_patches(stack)
+            mock_upload = stack.enter_context(patch("ucode.cli.upload_managed_config"))
+            result = runner.invoke(app, ["export"], input="n\n")
+
+        assert result.exit_code == 0, result.output
+        assert "Export cancelled" in result.output
+        mock_upload.assert_not_called()
 
 
 class TestAutoConfigureOnFirstRun:

@@ -89,7 +89,6 @@ from ucode.ui import (
     print_warning,
     prompt_budget_warn_choice,
     prompt_for_choice,
-    prompt_for_default_agent,
     prompt_for_tools,
     prompt_for_workspace,
     prompt_yes_no,
@@ -371,6 +370,8 @@ def configure_workspace_command(
     *,
     update_existing: bool = True,
     validate: bool = True,
+    panel_title: str | None = "Configuration Complete",
+    pre_pulled_state: dict | None = None,
 ) -> int:
     """Configure one or more coding agents for the current/selected workspace."""
     if tool is not None and selected_tools is not None:
@@ -379,11 +380,15 @@ def configure_workspace_command(
     workspace_entries = workspaces or [_prompt_for_configuration(tool)]
 
     if tool is not None:
-        states = _configure_shared_workspace_states(workspace_entries, [tool], force_login=True)
+        if pre_pulled_state is not None:
+            states = [pre_pulled_state]
+        else:
+            states = _configure_shared_workspace_states(workspace_entries, [tool], force_login=True)
         state = states[0]
         state = configure_single_tool(tool, state)
         spec = TOOL_SPECS[tool]
-        _render_configuration_panel(state, configured_tools=[tool])
+        if panel_title is not None:
+            _render_configuration_panel(state, configured_tools=[tool], title=panel_title)
         if not validate:
             return 0
         with spinner(f"Validating {spec['display']}..."):
@@ -400,7 +405,12 @@ def configure_workspace_command(
             raise RuntimeError(f"{spec['display']} validation failed — config reverted.")
         return 0
 
-    states = _configure_shared_workspace_states(workspace_entries, selected_tools, force_login=True)
+    if pre_pulled_state is not None:
+        states = [pre_pulled_state]
+    else:
+        states = _configure_shared_workspace_states(
+            workspace_entries, selected_tools, force_login=True
+        )
     state = states[0]
     save_state(_persistable_state(state))
 
@@ -461,7 +471,8 @@ def configure_workspace_command(
 
     state = configure_selected_tools(_persistable_state(state), picked)
 
-    _render_configuration_panel(state, configured_tools=picked)
+    if panel_title is not None:
+        _render_configuration_panel(state, configured_tools=picked, title=panel_title)
 
     if validate:
         # Limit validation to just-configured tools so we don't re-validate
@@ -471,8 +482,88 @@ def configure_workspace_command(
     return 0
 
 
-def _render_configuration_panel(state: dict, configured_tools: list[str] | None = None) -> None:
-    """Render the "Configuration Complete" summary panel."""
+def _harness_display(harness: str) -> str:
+    spec = TOOL_SPECS.get(harness)
+    if isinstance(spec, dict):
+        display = spec.get("display")
+        if isinstance(display, str) and display:
+            return display
+    return harness
+
+
+def _render_policy_summary_lines(
+    workspace: str | None,
+    *,
+    policy_override: dict | None = None,
+) -> list[str]:
+    if policy_override is not None:
+        policy = policy_override
+    else:
+        policy = load_workspace_policy(workspace) if isinstance(workspace, str) else None
+    root = policy.get("policy") if isinstance(policy, dict) else None
+    if not isinstance(root, dict):
+        return []
+
+    name = str(root.get("name") or DEFAULT_POLICY_NAME)
+    daily = root.get("daily_budget_usd")
+    daily_display = (
+        f"${float(daily):.2f}/day"
+        if isinstance(daily, (int, float)) and not isinstance(daily, bool)
+        else "no daily cap"
+    )
+    on_exhausted = root.get("on_budget_exhausted")
+    if not isinstance(on_exhausted, str) or on_exhausted not in VALID_ON_BUDGET_EXHAUSTED:
+        on_exhausted = "block"
+
+    lines = [
+        f"[bold]Policy:[/bold] [cyan]{name}[/cyan]  "
+        f"[dim]({daily_display}, {on_exhausted} on exhaust)[/dim]"
+    ]
+    tiers = root.get("tiers") if isinstance(root, dict) else None
+    if isinstance(tiers, list):
+        for tier in tiers:
+            if not isinstance(tier, dict):
+                continue
+            tier_name = str(tier.get("name") or "?")
+            pct_raw = tier.get("activates_at_pct")
+            pct = (
+                f"{float(pct_raw):.0f}%"
+                if isinstance(pct_raw, (int, float)) and not isinstance(pct_raw, bool)
+                else "?"
+            )
+            harness = str(tier.get("harness") or "?")
+            model = str(tier.get("model") or "?")
+            lines.append(
+                f"  [dim]·[/dim] [bold]{tier_name}[/bold] [dim]({pct})[/dim] "
+                f"→ {_harness_display(harness)} · [magenta]{model}[/magenta]"
+            )
+    return lines
+
+
+def _resolve_default_agent(workspace: str | None, configured_tools: list[str]) -> tuple[str, str]:
+    """Pick the workspace's default coding agent as the harness named by policy
+    tier 1, or if no policies, the first entry in ``available_tools``."""
+    if not configured_tools:
+        raise RuntimeError("Cannot pick a default agent — no tools configured.")
+    policy = load_workspace_policy(workspace) if isinstance(workspace, str) else None
+    root = policy.get("policy") if isinstance(policy, dict) else None
+    tiers = root.get("tiers") if isinstance(root, dict) else None
+    if isinstance(tiers, list) and tiers:
+        first_tier = tiers[0] if isinstance(tiers[0], dict) else None
+        harness = first_tier.get("harness") if isinstance(first_tier, dict) else None
+        if isinstance(harness, str) and harness in configured_tools:
+            return harness, "from policy tier 1"
+    return configured_tools[0], "first configured agent"
+
+
+def _render_configuration_panel(
+    state: dict,
+    configured_tools: list[str] | None = None,
+    *,
+    title: str = "Configuration Complete",
+    policy_override: dict | None = None,
+) -> None:
+    """Render the configuration summary panel."""
     tools_to_show = configured_tools or list(state.get("available_tools") or [])
 
     summary_lines = [f"[bold]Workspace:[/bold] [cyan]{state.get('workspace', '?')}[/cyan]"]
@@ -493,16 +584,39 @@ def _render_configuration_panel(state: dict, configured_tools: list[str] | None 
         f"[bold]MCPs:[/bold] {', '.join(mcp_names) if mcp_names else '[dim]none[/dim]'}"
     )
 
+    tracing = state.get("tracing") or {}
+    tracing_enabled = bool(tracing.get("enabled")) if isinstance(tracing, dict) else False
+    summary_lines.append(
+        f"[bold]MLflow tracing:[/bold] "
+        f"{'[green]enabled[/green]' if tracing_enabled else '[dim]disabled[/dim]'}"
+    )
+
+    # When a managed policies.yaml exists, surface it (name + daily budget +
+    # tiers + on-exhausted). Falls back to the legacy state.policies daily
+    # limit row when no YAML is published.
+    policy_lines = _render_policy_summary_lines(
+        state.get("workspace"), policy_override=policy_override
+    )
+    if policy_lines:
+        summary_lines.extend(policy_lines)
+    else:
+        policies = state.get("policies") or {}
+        daily_limit = policies.get("daily_limit_usd") if isinstance(policies, dict) else None
+        if isinstance(daily_limit, (int, float)) and not isinstance(daily_limit, bool):
+            summary_lines.append(f"[bold]Daily budget:[/bold] ${float(daily_limit):.2f}")
+        else:
+            summary_lines.append("[bold]Policy:[/bold] [dim]not set[/dim]")
+
     allowlist = state.get("allowlist")
     if isinstance(allowlist, list) and allowlist:
         allowlist_display = ", ".join(str(item) for item in allowlist)
         managed_suffix = "  [dim](managed)[/dim]" if state.get("_managed_config_pulled") else ""
-        summary_lines.append(f"[bold]Allowlist:[/bold]    {allowlist_display}{managed_suffix}")
+        summary_lines.append(f"[bold]Allowlist:[/bold] {allowlist_display}{managed_suffix}")
 
     console.print(
         Panel(
             "\n".join(summary_lines),
-            title="Configuration Complete",
+            title=title,
             style="green",
             expand=False,
         )
@@ -570,6 +684,53 @@ def status() -> int:
             print_kv("SQL warehouse", str(sql_warehouse_id))
     else:
         print_kv("MLflow tracing", "disabled")
+
+    print_heading("Policy")
+    workspace_str = workspace if isinstance(workspace, str) else None
+    policy = load_workspace_policy(workspace_str) if workspace_str else None
+    policy_root = policy.get("policy") if isinstance(policy, dict) else None
+    if isinstance(policy_root, dict) and workspace_str:
+        print_kv("Name", str(policy_root.get("name") or DEFAULT_POLICY_NAME))
+        daily = policy_root.get("daily_budget_usd")
+        print_kv(
+            "Daily budget",
+            f"${float(daily):.2f}"
+            if isinstance(daily, (int, float)) and not isinstance(daily, bool)
+            else "not set",
+        )
+        on_exhausted = policy_root.get("on_budget_exhausted")
+        print_kv(
+            "On budget exhausted",
+            on_exhausted if isinstance(on_exhausted, str) else "block",
+        )
+        tiers = policy_root.get("tiers")
+        if isinstance(tiers, list) and tiers:
+            for tier in tiers:
+                if not isinstance(tier, dict):
+                    continue
+                tier_name = str(tier.get("name") or "?")
+                pct_raw = tier.get("activates_at_pct")
+                pct = (
+                    f"{float(pct_raw):.0f}%"
+                    if isinstance(pct_raw, (int, float)) and not isinstance(pct_raw, bool)
+                    else "?"
+                )
+                harness = str(tier.get("harness") or "?")
+                model = str(tier.get("model") or "?")
+                print_kv(
+                    f"Tier · {tier_name} ({pct})",
+                    f"{_harness_display(harness)} → {model}",
+                )
+        else:
+            print_kv("Tiers", "none")
+        print_kv("Policy file", str(policy_cache_path(workspace_str)))
+    else:
+        print_kv("Policy", "not set")
+        if workspace_str:
+            print_note(
+                "Run `ucode setup budget` (admin) to author a policy, "
+                "or `ucode configure` to pull the published one."
+            )
 
     print_heading("State")
     print_kv("State file", str(STATE_PATH) if STATE_PATH.exists() else "missing")
@@ -1394,22 +1555,41 @@ def setup_cmd(ctx: typer.Context) -> None:
         else:
             print_success("Admin permissions verified")
 
+        pre_pulled = configure_shared_state(
+            workspace, profile=profile, tools=None, force_login=True
+        )
+        workspace = pre_pulled.get("workspace") or workspace
+        profile = pre_pulled.get("profile") or profile
+        _render_configuration_panel(pre_pulled, title="Current Configuration")
+
+        uc_available_tools = [
+            t
+            for t in (pre_pulled.get("available_tools") or [])
+            if isinstance(t, str) and t in TOOL_SPECS
+        ]
+        uc_tracing_enabled = bool(
+            (pre_pulled.get("tracing") or {}).get("enabled")
+            if isinstance(pre_pulled.get("tracing"), dict)
+            else False
+        )
+        uc_mcps_present = bool(pre_pulled.get("mcp_servers"))
+        uc_has_policy = load_workspace_policy(workspace) is not None
+
         picked_tools = prompt_for_tools(
-            [(tool, TOOL_SPECS[tool]["display"]) for tool in TOOL_SPECS]
+            [(tool, TOOL_SPECS[tool]["display"]) for tool in TOOL_SPECS],
+            preselected=uc_available_tools or None,
         )
         if not picked_tools:
             print_note("No coding agents selected — nothing to configure.")
             return
 
-        # Admin config-authoring: skip the optional "update X to vY?" prompts
-        # and the post-configure end-to-end validation. Required minimum-version
-        # upgrades will still trigger the next time the admin actually launches
-        # the agent via `ucode <agent>`.
         configure_rc = configure_workspace_command(
             workspaces=[(workspace, profile)],
             selected_tools=picked_tools,
             update_existing=False,
             validate=False,
+            panel_title=None,
+            pre_pulled_state=pre_pulled,
         )
         if configure_rc != 0:
             raise typer.Exit(configure_rc)
@@ -1421,20 +1601,23 @@ def setup_cmd(ctx: typer.Context) -> None:
             if isinstance(tool, str) and tool in TOOL_SPECS
         ]
         if configured_tools:
-            default_agent = prompt_for_default_agent(
-                [(tool, TOOL_SPECS[tool]["display"]) for tool in configured_tools]
-            )
+            # Default agent comes from the policy's tier-1 harness when one is
+            # both published and configured. Otherwise fall back to the first
+            # configured tool (mirrors `available_tools` ordering in UC).
+            default_agent, default_reason = _resolve_default_agent(workspace, configured_tools)
             post_configure_state["default_agent"] = default_agent
             save_state(post_configure_state)
-            print_success(f"Default agent set to {TOOL_SPECS[default_agent]['display']}")
+            print_success(
+                f"Default agent set to {TOOL_SPECS[default_agent]['display']} ({default_reason})"
+            )
 
-        if prompt_yes_no("Set up MLflow tracing for this workspace?"):
+        if prompt_yes_no("Set up MLflow tracing for this workspace?", default=uc_tracing_enabled):
             configure_tracing_command()
 
-        if prompt_yes_no("Set up managed MCP servers for this workspace?"):
+        if prompt_yes_no("Set up managed MCP servers for this workspace?", default=uc_mcps_present):
             configure_mcp_command()
 
-        if prompt_yes_no("Set up budget policies for this workspace?"):
+        if prompt_yes_no("Set up budget policies for this workspace?", default=uc_has_policy):
             _run_budget_setup(workspace)
         else:
             print_note("Skipping budget setup — run `ucode setup budget` anytime to set one.")
@@ -1486,6 +1669,33 @@ def export_cmd() -> None:
         profile = state.get("profile")
         ensure_databricks_auth(workspace, profile)
 
+        with spinner("Checking workspace admin permissions..."):
+            token = get_databricks_token(workspace, profile)
+            admin = is_workspace_admin(workspace, token)
+        if admin is False:
+            raise RuntimeError(
+                f"You do not have admin permissions to publish a managed config "
+                f"for {workspace}. `ucode export` is restricted to workspace admins."
+            )
+        if admin is None:
+            print_warning(
+                "Could not verify workspace admin permissions (SCIM `Me` call failed). "
+                "Proceeding optimistically — the final UC write will fail if you "
+                "lack the required role."
+            )
+        else:
+            print_success("Admin permissions verified")
+
+        # Preview what's about to be published before touching UC.
+        print_section("Export")
+        print_kv("Workspace", workspace)
+        print_kv("Destination", MANAGED_CONFIG_VOLUME_PATH)
+        _render_configuration_panel(state)
+
+        if not prompt_yes_no("Proceed with upload to Unity Catalog?"):
+            print_note("Export cancelled — no changes written.")
+            return
+
         sliced = slice_state_for_export(load_full_state(), workspace)
         tmp = tempfile.NamedTemporaryFile(
             mode="w",
@@ -1499,9 +1709,6 @@ def export_cmd() -> None:
             json.dump(sliced, tmp, indent=2)
             tmp.close()
 
-            print_section("Export")
-            print_kv("Workspace", workspace)
-            print_kv("Destination", MANAGED_CONFIG_VOLUME_PATH)
             with spinner("Uploading state.json to Unity Catalog..."):
                 upload_managed_config(workspace, profile, tmp_path)
             print_success(f"state.json uploaded to {MANAGED_CONFIG_VOLUME_PATH}")

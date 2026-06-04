@@ -234,12 +234,17 @@ def prompt_for_workspace(
             print_err(str(exc))
 
 
-def prompt_for_tools(available: list[tuple[str, str]]) -> list[str]:
+def prompt_for_tools(
+    available: list[tuple[str, str]],
+    preselected: list[str] | set[str] | None = None,
+) -> list[str]:
     """Multi-select picker for coding agents.
 
     `available` is [(tool_id, display_name), ...]. Returns the chosen tool_ids.
-    All options are checked by default so hitting Enter selects everything.
-    Returns [] if the user submits an empty selection.
+    When ``preselected`` is ``None`` every option is checked by default (so
+    hitting Enter selects everything). When ``preselected`` is provided only
+    those tool ids are pre-checked. Returns [] if the user submits an empty
+    selection.
     """
     style = questionary.Style(
         [
@@ -253,8 +258,15 @@ def prompt_for_tools(available: list[tuple[str, str]]) -> list[str]:
             ("answer", "fg:cyan"),
         ]
     )
+    preselected_set: set[str] | None = (
+        {str(item) for item in preselected} if preselected is not None else None
+    )
     choices = [
-        questionary.Choice(title=display, value=tool_id, checked=True)
+        questionary.Choice(
+            title=display,
+            value=tool_id,
+            checked=(preselected_set is None or tool_id in preselected_set),
+        )
         for tool_id, display in available
     ]
     answer = questionary.checkbox(
@@ -270,9 +282,23 @@ def prompt_for_tools(available: list[tuple[str, str]]) -> list[str]:
     return list(answer)
 
 
-def prompt_yes_no(prompt: str) -> bool:
+def prompt_yes_no(prompt: str, default: bool | None = None) -> bool:
+    """Prompt for a yes/no answer.
+
+    When ``default`` is ``True`` or ``False``, hitting Enter on empty input
+    returns the default. The hint reflects the default by capitalising the
+    chosen letter (``(Y/n)`` for ``True``, ``(y/N)`` for ``False``).
+    """
+    if default is True:
+        hint = "(Y/n)"
+    elif default is False:
+        hint = "(y/N)"
+    else:
+        hint = "(y/n)"
     while True:
-        response = console.input(f"{label(prompt)} {muted('(y/n)')} {muted('›')} ").strip().lower()
+        response = console.input(f"{label(prompt)} {muted(hint)} {muted('›')} ").strip().lower()
+        if not response and default is not None:
+            return default
         if response in {"y", "yes"}:
             return True
         if response in {"n", "no"}:
