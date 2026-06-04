@@ -80,6 +80,11 @@ class TestHelp:
         assert "comma-separated list of agents" in output
         assert "--workspaces" in output
 
+    def test_setup_help_lists_budget_command(self):
+        result = runner.invoke(app, ["setup", "--help"])
+        assert result.exit_code == 0
+        assert "budget" in _strip_ansi(result.output)
+
 
 def _patch_launch(tool: str):
     """Return a context-manager stack that makes _launch_tool a no-op.
@@ -164,6 +169,47 @@ class TestSubcommandRouting:
         """--agent flag must no longer exist."""
         result = runner.invoke(app, ["--agent", "claude"])
         assert result.exit_code != 0
+
+
+class TestSetupBudgetCommand:
+    def test_sets_daily_budget_for_current_workspace(self):
+        state = {
+            "workspace": "https://example.databricks.com",
+            "policies": {"claude": {"default_model": "databricks-claude-sonnet-4"}},
+        }
+        with patch("ucode.cli.load_state", return_value=state), patch(
+            "ucode.cli.save_state"
+        ) as mock_save:
+            result = runner.invoke(app, ["setup", "budget"], input="250\n")
+
+        assert result.exit_code == 0, result.output
+        saved = mock_save.call_args[0][0]
+        assert saved["workspace"] == state["workspace"]
+        assert saved["policies"]["daily_limit_usd"] == 250.0
+        assert saved["policies"]["claude"] == state["policies"]["claude"]
+        assert "Daily budget updated" in result.output
+
+    def test_overrides_existing_daily_budget(self):
+        state = {
+            "workspace": "https://example.databricks.com",
+            "policies": {"daily_limit_usd": 125.0, "claude": {"default_model": "old"}},
+        }
+        with patch("ucode.cli.load_state", return_value=state), patch(
+            "ucode.cli.save_state"
+        ) as mock_save:
+            result = runner.invoke(app, ["setup", "budget"], input="500\n")
+
+        assert result.exit_code == 0, result.output
+        saved = mock_save.call_args[0][0]
+        assert saved["policies"]["daily_limit_usd"] == 500.0
+        assert saved["policies"]["claude"] == {"default_model": "old"}
+
+    def test_errors_when_workspace_missing(self):
+        with patch("ucode.cli.load_state", return_value={}):
+            result = runner.invoke(app, ["setup", "budget"])
+
+        assert result.exit_code == 1
+        assert "No workspace is configured" in result.output
 
 
 class TestDefaultLaunch:

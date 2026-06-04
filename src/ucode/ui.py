@@ -306,3 +306,18 @@ def prompt_for_client_secret() -> str:
         if client_secret:
             return client_secret
         print_err("Client secret cannot be empty.")
+
+
+def prompt_for_usd_amount(prompt: str, *, minimum: float = 0.01) -> float:
+    """Prompt for a positive USD amount and return it as a float."""
+    while True:
+        raw_value = console.input(f"{label(prompt)} {muted('›')} ").strip()
+        cleaned = raw_value.replace("$", "").replace(",", "")
+        try:
+            amount = float(cleaned)
+        except ValueError:
+            print_err("Please enter a valid number.")
+            continue
+        if amount >= minimum:
+            return amount
+        print_err(f"Please enter at least ${minimum:.2f}.")

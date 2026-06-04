@@ -72,6 +72,7 @@ from ucode.ui import (
     print_section,
     print_success,
     prompt_for_tools,
+    prompt_for_usd_amount,
     prompt_for_workspace,
     spinner,
     status_badge,
@@ -554,6 +555,8 @@ app = typer.Typer(
 )
 configure_app = typer.Typer(add_completion=False, no_args_is_help=False)
 app.add_typer(configure_app, name="configure", help="Configure workspace and tool settings.")
+setup_app = typer.Typer(add_completion=False, no_args_is_help=True)
+app.add_typer(setup_app, name="setup", help="Configure workspace policy settings.")
 mcp_app = typer.Typer(add_completion=False, no_args_is_help=True)
 app.add_typer(mcp_app, name="mcp", help="MCP servers exposed by ucode.")
 usage_app = typer.Typer(add_completion=False, no_args_is_help=False)
@@ -863,6 +866,38 @@ def configure_tracing(
     try:
         install_databricks_cli()
         configure_tracing_command(disable=disable)
+    except RuntimeError as exc:
+        print_err(str(exc))
+        raise typer.Exit(1) from None
+    except KeyboardInterrupt:
+        print_err("Interrupted.")
+        raise typer.Exit(130) from None
+
+
+@setup_app.command("budget")
+def setup_budget_cmd() -> None:
+    """Set the shared daily spend budget for the current workspace."""
+    try:
+        state = load_state()
+        workspace = state.get("workspace")
+        if not isinstance(workspace, str) or not workspace:
+            raise RuntimeError("No workspace is configured. Run `ucode configure` first.")
+
+        policies = dict(state.get("policies") or {})
+        current_limit = policies.get("daily_limit_usd")
+
+        print_section("Budget")
+        print_kv("Workspace", workspace)
+        if isinstance(current_limit, (int, float)) and not isinstance(current_limit, bool):
+            print_note(f"Current daily limit: ${float(current_limit):.2f}")
+
+        daily_limit = prompt_for_usd_amount("Daily budget in USD")
+        policies["daily_limit_usd"] = daily_limit
+        state["policies"] = policies
+        save_state(state)
+
+        print_kv("Daily limit", f"${daily_limit:.2f}")
+        print_success("Daily budget updated")
     except RuntimeError as exc:
         print_err(str(exc))
         raise typer.Exit(1) from None
