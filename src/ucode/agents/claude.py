@@ -30,10 +30,31 @@ from ucode.ui import print_note, print_success, print_warning
 
 CLAUDE_CONFIG_DIR = Path.home() / ".claude"
 CLAUDE_SETTINGS_PATH = CLAUDE_CONFIG_DIR / "ucode-settings.json"
+CLAUDE_DEFAULT_SETTINGS_PATH = CLAUDE_CONFIG_DIR / "settings.json"
 CLAUDE_BACKUP_PATH = APP_DIR / "claude-ucode-settings.backup.json"
+CLAUDE_DEFAULT_BACKUP_PATH = APP_DIR / "claude-settings.backup.json"
+
+# On Windows, subprocess can fail to locate 'claude' via PATH because npm
+# wrappers are .cmd files that Python's subprocess doesn't resolve the same
+# way as cmd.exe. Resolve the actual .exe inside the npm package tree so
+# the subprocess call is unambiguous on all platforms.
+_claude_wrapper = shutil.which("claude.cmd") or shutil.which("claude") or shutil.which("claude.bat")
+if _claude_wrapper:
+    _claude_root = Path(_claude_wrapper).parent
+    _claude_exe = (
+        _claude_root
+        / "node_modules"
+        / "@anthropic-ai"
+        / "claude-code"
+        / "bin"
+        / "claude.exe"
+    )
+    CLAUDE_BINARY = str(_claude_exe) if _claude_exe.exists() else _claude_wrapper
+else:
+    CLAUDE_BINARY = "claude"
 
 SPEC: ToolSpec = {
-    "binary": "claude",
+    "binary": CLAUDE_BINARY,
     "package": "@anthropic-ai/claude-code",
     "display": "Claude Code",
     "config_path": CLAUDE_SETTINGS_PATH,
@@ -215,6 +236,7 @@ def _unregister_web_search_mcp() -> None:
 
 def write_tool_config(state: dict, model: str) -> dict:
     backup_existing_file(CLAUDE_SETTINGS_PATH, CLAUDE_BACKUP_PATH)
+    backup_existing_file(CLAUDE_DEFAULT_SETTINGS_PATH, CLAUDE_DEFAULT_BACKUP_PATH)
     web_search_model = _resolve_web_search_model(state)
     overlay, managed_keys = render_overlay(
         state["workspace"],
@@ -250,6 +272,14 @@ def write_tool_config(state: dict, model: str) -> dict:
         # Strip only ucode's tracing Stop hook so user hooks stay intact.
         _remove_tracing_stop_hook(merged)
     write_json_file(CLAUDE_SETTINGS_PATH, merged)
+
+    # Mirror the auth/env overlay into ~/.claude/settings.json so Claude Code
+    # finds the apiKeyHelper and ANTHROPIC_* env vars regardless of whether it
+    # is launched via `ucode claude` (which passes --settings) or directly from
+    # the Claude desktop app / IDE extension (which reads settings.json by default).
+    existing_default = read_json_safe(CLAUDE_DEFAULT_SETTINGS_PATH)
+    merged_default = deep_merge_dict(existing_default, overlay)
+    write_json_file(CLAUDE_DEFAULT_SETTINGS_PATH, merged_default)
 
     if web_search_model:
         _register_web_search_mcp(state["workspace"], web_search_model, state.get("profile"))
