@@ -657,7 +657,7 @@ class TestLocalUsageLedger:
         monkeypatch.setattr(
             usage_mod,
             "load_state",
-            lambda: {"policies": {"codex": {"spending_limit": {"daily_limit_usd": 20}}}},
+            lambda: {"policies": {"daily_limit_usd": 20}},
         )
         record_local_usage_delta(
             session_id="s1",
@@ -700,12 +700,42 @@ class TestLocalUsageLedger:
         monkeypatch.setattr(usage_mod, "load_state", lambda: {})
         assert local_daily_agent_budget_usd("codex") == 500.0
 
+    def test_budget_aggregates_spend_across_all_tools(self, tmp_path, monkeypatch):
+        # The daily limit is a single pool: claude + codex spend combine and the
+        # status is identical regardless of which tool label is requested.
+        db_path = tmp_path / "usage.sqlite"
+        monkeypatch.setattr(
+            usage_mod,
+            "load_state",
+            lambda: {"policies": {"daily_limit_usd": 20}},
+        )
+        record_local_usage_delta(
+            session_id="s1",
+            tool="codex",
+            model="databricks-gpt-5",
+            total_tokens=10_000_000,
+            db_path=db_path,
+        )
+        record_local_usage_delta(
+            session_id="s2",
+            tool="claude",
+            model="databricks-gpt-5",
+            total_tokens=8_000_000,
+            db_path=db_path,
+        )
+
+        codex_status = local_budget_status("codex", db_path)
+        claude_status = local_budget_status("claude", db_path)
+        # 18M tokens * $1.25/1M = $22.50 across both tools, over the $20 cap.
+        assert codex_status["spend_usd"] == claude_status["spend_usd"] == 22.5
+        assert codex_status["state"] == claude_status["state"] == "exceeded"
+
     def test_budget_status_exceeded(self, tmp_path, monkeypatch):
         db_path = tmp_path / "usage.sqlite"
         monkeypatch.setattr(
             usage_mod,
             "load_state",
-            lambda: {"policies": {"codex": {"spending_limit": {"daily_limit_usd": 20}}}},
+            lambda: {"policies": {"daily_limit_usd": 20}},
         )
         record_local_usage_delta(
             session_id="s1",

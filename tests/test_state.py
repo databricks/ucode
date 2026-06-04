@@ -251,6 +251,25 @@ class TestPolicies:
         )
         assert result["policies"] == {}
 
+    def test_hydrate_keeps_global_daily_limit(self):
+        result = hydrate_state(
+            {
+                "workspace": FAKE_WS,
+                "policies": {"daily_limit_usd": 500, "claude": self._CLAUDE_POLICY},
+            }
+        )
+        assert result["policies"]["daily_limit_usd"] == 500.0
+        assert result["policies"]["claude"] == self._CLAUDE_POLICY
+
+    def test_hydrate_drops_invalid_global_daily_limit(self):
+        result = hydrate_state(
+            {
+                "workspace": FAKE_WS,
+                "policies": {"daily_limit_usd": "lots"},
+            }
+        )
+        assert result["policies"] == {}
+
     def test_hydrate_drops_malformed_spending_limit(self):
         # Bad monthly_limit_usd → spending_limit dropped, but valid sibling
         # fields on the same agent (default_model) survive.

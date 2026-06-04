@@ -337,36 +337,37 @@ def _env_float(name: str, default: float, *, minimum: float | None = None) -> fl
     return value
 
 
-def _state_daily_limit_usd(tool: str) -> float | None:
-    """Read ``policies.<tool>.spending_limit.daily_limit_usd`` from state.
+def _state_daily_limit_usd() -> float | None:
+    """Read the global ``policies.daily_limit_usd`` from state.
 
-    Returns ``None`` (and warns) when the workspace state has no spending
-    policy configured for ``tool`` so callers can fall back to a default.
+    This is a single budget shared across every coding tool. Returns ``None``
+    when the workspace state has no daily limit configured so callers can fall
+    back to a default.
     """
     try:
         state = load_state()
     except Exception:
         state = {}
     policies = state.get("policies")
-    policy = policies.get(tool) if isinstance(policies, dict) else None
-    limit = policy.get("spending_limit") if isinstance(policy, dict) else None
-    raw = limit.get("daily_limit_usd") if isinstance(limit, dict) else None
-    if isinstance(raw, (int, float)) and raw > 0:
+    raw = policies.get("daily_limit_usd") if isinstance(policies, dict) else None
+    if isinstance(raw, (int, float)) and not isinstance(raw, bool) and raw > 0:
         return float(raw)
     return None
 
 
 def local_daily_agent_budget_usd(tool: str | None = None) -> float:
-    """Daily spend cap for ``tool``.
+    """Daily spend cap shared across all coding tools.
 
     Resolution order: the ``UCODE_USAGE_DAILY_BUDGET_USD`` env override, then
-    ``daily_limit_usd`` from the workspace state, then a ``$500/day`` default
-    when no policy is configured.
+    the global ``daily_limit_usd`` from the workspace state, then a ``$500/day``
+    default when no policy is configured. ``tool`` is accepted for call-site
+    compatibility but ignored — the limit is global.
     """
+    del tool
     env_override = os.environ.get(ENV_DAILY_BUDGET_USD)
     if env_override is not None and env_override.strip():
         return _env_float(ENV_DAILY_BUDGET_USD, DEFAULT_DAILY_BUDGET_USD, minimum=0.01)
-    daily_limit = _state_daily_limit_usd(tool) if tool else None
+    daily_limit = _state_daily_limit_usd()
     if daily_limit is not None:
         return daily_limit
     return DEFAULT_DAILY_BUDGET_USD
@@ -715,9 +716,16 @@ def query_local_usage_totals(
 def query_local_budget_totals(
     *,
     days: int = 1,
-    tool: str,
+    tool: str | None = None,
     db_path: Path = LOCAL_USAGE_DB_PATH,
 ) -> dict[str, object]:
+    """Sum local spend over the trailing window.
+
+    Spend is aggregated across every coding tool — the daily budget is a single
+    pool shared by all of them. ``tool`` is accepted for backwards
+    compatibility but ignored.
+    """
+    del tool
     ensure_local_usage_schema(db_path)
     with _connect_local_usage_db(db_path) as conn:
         rows = conn.execute(
@@ -733,9 +741,8 @@ def query_local_budget_totals(
               cost_usd
             FROM usage_events
             WHERE created_at >= datetime('now', ?)
-              AND tool = ?
             """,
-            (f"-{days} days", tool),
+            (f"-{days} days",),
         ).fetchall()
 
     sessions: set[str] = set()
@@ -783,14 +790,18 @@ def query_local_budget_totals(
 
 
 def local_budget_status(
-    tool: str,
+    tool: str | None = None,
     db_path: Path = LOCAL_USAGE_DB_PATH,
     *,
     days: int = 1,
 ) -> dict[str, object]:
-    limit_usd = local_daily_agent_budget_usd(tool)
+    """Budget status for the single daily limit shared across all tools.
+
+    ``tool`` only labels the returned status (e.g. for a launch panel); spend
+    and the limit are aggregated globally across every coding tool."""
+    limit_usd = local_daily_agent_budget_usd()
     warn_at = LOCAL_BUDGET_WARN_AT
-    totals = query_local_budget_totals(days=days, tool=tool, db_path=db_path)
+    totals = query_local_budget_totals(days=days, db_path=db_path)
     spend_usd = _coerce_cost(totals.get("cost_usd"))
     warn_usd = limit_usd * warn_at
     if spend_usd >= limit_usd:

@@ -190,10 +190,14 @@ def _normalize_agent_policies(raw: object) -> dict | None:
 
 
 def _normalize_policies(raw: object) -> dict:
-    """Return a well-formed per-agent ``policies`` block, dropping anything malformed.
-    Schema (per agent — agent keys are codex/claude/gemini/opencode/copilot/pi)::
+    """Return a well-formed ``policies`` block, dropping anything malformed.
+
+    ``daily_limit_usd`` is a single global spend cap shared across every coding
+    tool. The remaining keys are per-agent (codex/claude/gemini/opencode/
+    copilot/pi)::
 
         {
+          "daily_limit_usd": <number>,                                   # optional, global
           "<agent>": {
             "spending_limit": {                                          # optional
               "monthly_limit_usd": <number>,
@@ -209,6 +213,13 @@ def _normalize_policies(raw: object) -> dict:
         return {}
     raw_dict = cast("dict[str, object]", raw)
     out: dict = {}
+    daily_limit = raw_dict.get("daily_limit_usd")
+    if (
+        isinstance(daily_limit, (int, float))
+        and not isinstance(daily_limit, bool)
+        and daily_limit > 0
+    ):
+        out["daily_limit_usd"] = float(daily_limit)
     for agent, agent_raw in raw_dict.items():
         if agent not in _KNOWN_POLICY_AGENTS:
             continue
