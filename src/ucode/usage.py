@@ -43,8 +43,6 @@ USAGE_SUMMARY_DAYS = 30
 LOCAL_USAGE_DB_PATH = APP_DIR / "usage.sqlite"
 # Daily cap used when no per-tool spending policy is configured in state.json.
 DEFAULT_DAILY_BUDGET_USD = 500.0
-# Spending limits in state.json are monthly; divide to derive a daily cap.
-BUDGET_MONTHLY_TO_DAILY_DIVISOR = 30
 LOCAL_BUDGET_WARN_AT = 0.8
 ENV_DAILY_BUDGET_USD = "UCODE_USAGE_DAILY_BUDGET_USD"
 ENV_PRICE_MULTIPLIER = "UCODE_USAGE_PRICE_MULTIPLIER"
@@ -299,8 +297,8 @@ def _env_float(name: str, default: float, *, minimum: float | None = None) -> fl
     return value
 
 
-def _state_monthly_limit_usd(tool: str) -> float | None:
-    """Read ``policies.<tool>.spending_limit.monthly_limit_usd`` from state.
+def _state_daily_limit_usd(tool: str) -> float | None:
+    """Read ``policies.<tool>.spending_limit.daily_limit_usd`` from state.
 
     Returns ``None`` (and warns) when the workspace state has no spending
     policy configured for ``tool`` so callers can fall back to a default.
@@ -312,25 +310,25 @@ def _state_monthly_limit_usd(tool: str) -> float | None:
     policies = state.get("policies")
     policy = policies.get(tool) if isinstance(policies, dict) else None
     limit = policy.get("spending_limit") if isinstance(policy, dict) else None
-    raw = limit.get("monthly_limit_usd") if isinstance(limit, dict) else None
+    raw = limit.get("daily_limit_usd") if isinstance(limit, dict) else None
     if isinstance(raw, (int, float)) and raw > 0:
         return float(raw)
     return None
 
 
 def local_daily_agent_budget_usd(tool: str | None = None) -> float:
-    """Daily spend cap for ``tool``, derived from its monthly policy limit.
+    """Daily spend cap for ``tool``.
 
     Resolution order: the ``UCODE_USAGE_DAILY_BUDGET_USD`` env override, then
-    ``monthly_limit_usd / 30`` from the workspace state, then a
-    ``$500/day`` default (with a warning) when no policy is configured.
+    ``daily_limit_usd`` from the workspace state, then a ``$500/day`` default
+    (with a warning) when no policy is configured.
     """
     env_override = os.environ.get(ENV_DAILY_BUDGET_USD)
     if env_override is not None and env_override.strip():
         return _env_float(ENV_DAILY_BUDGET_USD, DEFAULT_DAILY_BUDGET_USD, minimum=0.01)
-    monthly_limit = _state_monthly_limit_usd(tool) if tool else None
-    if monthly_limit is not None:
-        return monthly_limit / BUDGET_MONTHLY_TO_DAILY_DIVISOR
+    daily_limit = _state_daily_limit_usd(tool) if tool else None
+    if daily_limit is not None:
+        return daily_limit
     if tool:
         err_console.print(
             f"[bold yellow]![/bold yellow] No spending limit configured for '{tool}' in "

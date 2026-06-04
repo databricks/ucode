@@ -551,11 +551,10 @@ class TestLocalUsageLedger:
 
     def test_reports_state_budget_warning_status(self, tmp_path, monkeypatch):
         db_path = tmp_path / "usage.sqlite"
-        # monthly_limit_usd / 30 -> $20.00 daily cap.
         monkeypatch.setattr(
             usage_mod,
             "load_state",
-            lambda: {"policies": {"codex": {"spending_limit": {"monthly_limit_usd": 600}}}},
+            lambda: {"policies": {"codex": {"spending_limit": {"daily_limit_usd": 20}}}},
         )
         record_local_usage_delta(
             session_id="s1",
@@ -600,11 +599,10 @@ class TestLocalUsageLedger:
 
     def test_budget_status_exceeded(self, tmp_path, monkeypatch):
         db_path = tmp_path / "usage.sqlite"
-        # monthly_limit_usd / 30 -> $20.00 daily cap.
         monkeypatch.setattr(
             usage_mod,
             "load_state",
-            lambda: {"policies": {"codex": {"spending_limit": {"monthly_limit_usd": 600}}}},
+            lambda: {"policies": {"codex": {"spending_limit": {"daily_limit_usd": 20}}}},
         )
         record_local_usage_delta(
             session_id="s1",
