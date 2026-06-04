@@ -256,14 +256,11 @@ class TestRevert:
 
 
 class TestExport:
-    """`ucode export` must upload a **flat single-workspace blob** to UC —
+    """`ucode export` must upload a flat single-workspace splice to UC —
     no multi-workspace wrapper, no other workspaces, no per-machine fields."""
 
     @staticmethod
     def _full_state_with(workspace_block: dict) -> dict:
-        """Wrap a single-workspace block as the multi-workspace top-level shape
-        (what `load_full_state` returns from the local file). Includes an
-        unrelated workspace so we can prove the slice drops it."""
         ws = workspace_block.get("workspace", "https://example.databricks.com")
         return {
             "state_version": 3,
@@ -854,8 +851,6 @@ class TestConfigureSharedStatePullsManagedPolicies:
         monkeypatch.setattr(cli_mod, "purge_cross_workspace_mcp_residue", lambda *a, **k: None)
 
     def test_overlays_policies_from_uc_into_saved_state(self, monkeypatch):
-        # The UC blob is a FLAT single-workspace shape now — `workspace` at
-        # the top level, no `workspaces` wrapper.
         import ucode.cli as cli_mod
 
         ws = "https://example.databricks.com"
