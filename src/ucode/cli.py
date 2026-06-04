@@ -695,12 +695,10 @@ def _launch_tool(tool_name: str, ctx: typer.Context) -> None:
                     title=f"ucode with {display}",
                 )
             )
-            budget_message = format_local_budget_status(budget_status)
+            # The panel above already shows the exceeded/warn state with the
+            # full spend breakdown, so avoid re-printing the same numbers.
             if budget_status.get("state") == "exceeded":
-                print_err_panel(budget_message)
                 raise typer.Exit(1)
-            if budget_status.get("state") == "warn":
-                print_note(budget_message)
         else:
             print_section(f"ucode with {display}")
             if resolved_model:
