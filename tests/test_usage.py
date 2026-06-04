@@ -514,11 +514,113 @@ class TestLocalUsageLedger:
     def test_estimates_total_only_cost_with_input_rate(self):
         assert estimate_cost_usd("databricks-gpt-5", 0, 0, total_tokens=1_000_000) == 1.25
 
+    def test_estimates_gpt_version_rates(self):
+        assert (
+            estimate_cost_usd(
+                "gpt-5.5",
+                1_000_000,
+                1_000_000,
+                cache_read_input_tokens=1_000_000,
+            )
+            == 35.5
+        )
+        assert (
+            estimate_cost_usd(
+                "databricks-gpt-5-4",
+                1_000_000,
+                1_000_000,
+                cache_read_input_tokens=1_000_000,
+            )
+            == 17.75
+        )
+        assert (
+            estimate_cost_usd(
+                "gpt-5.4-mini",
+                1_000_000,
+                1_000_000,
+                cache_read_input_tokens=1_000_000,
+            )
+            == 5.325
+        )
+        assert (
+            estimate_cost_usd(
+                "databricks-gpt-5-4-nano",
+                1_000_000,
+                1_000_000,
+                cache_read_input_tokens=1_000_000,
+            )
+            == 1.47
+        )
+        assert (
+            estimate_cost_usd(
+                "gpt-5.2",
+                1_000_000,
+                1_000_000,
+                cache_read_input_tokens=1_000_000,
+            )
+            == 15.925
+        )
+
+    def test_estimates_gpt_pro_without_cached_input_discount(self):
+        assert (
+            estimate_cost_usd(
+                "databricks-gpt-5-5-pro",
+                1_000_000,
+                1_000_000,
+                cache_read_input_tokens=1_000_000,
+            )
+            == 210.0
+        )
+
     def test_estimates_new_claude_opus_variant(self):
-        assert estimate_cost_usd("databricks-claude-opus-4-8", 1_000_000, 1_000_000) == 90.0
+        assert estimate_cost_usd("databricks-claude-opus-4-8", 1_000_000, 1_000_000) == 30.0
 
     def test_estimates_one_m_suffix(self):
-        assert estimate_cost_usd("databricks-claude-opus-4-8[1m]", 1_000_000, 1_000_000) == 90.0
+        assert estimate_cost_usd("databricks-claude-opus-4-8[1m]", 1_000_000, 1_000_000) == 30.0
+
+    def test_estimates_claude_cache_rates(self):
+        assert (
+            estimate_cost_usd(
+                "claude-opus-4-8-latest",
+                1_000_000,
+                1_000_000,
+                cache_read_input_tokens=1_000_000,
+                cache_creation_input_tokens=1_000_000,
+            )
+            == 36.75
+        )
+        assert (
+            estimate_cost_usd(
+                "claude-sonnet-4-6",
+                1_000_000,
+                1_000_000,
+                cache_read_input_tokens=1_000_000,
+                cache_creation_input_tokens=1_000_000,
+            )
+            == 22.05
+        )
+        assert (
+            estimate_cost_usd(
+                "claude-haiku-4-5-20260101",
+                1_000_000,
+                1_000_000,
+                cache_read_input_tokens=1_000_000,
+                cache_creation_input_tokens=1_000_000,
+            )
+            == 7.35
+        )
+
+    def test_estimates_claude_opus_4_1_legacy_rate(self):
+        assert (
+            estimate_cost_usd(
+                "databricks-claude-opus-4-1-20250805",
+                1_000_000,
+                1_000_000,
+                cache_read_input_tokens=1_000_000,
+                cache_creation_input_tokens=1_000_000,
+            )
+            == 110.25
+        )
 
     def test_price_multiplier_env_inflates_cost(self, monkeypatch):
         monkeypatch.setenv("UCODE_USAGE_PRICE_MULTIPLIER", "10")
@@ -636,7 +738,7 @@ class TestLocalUsageLedger:
             )
 
         totals = query_local_budget_totals(tool="claude", db_path=db_path)
-        assert totals["cost_usd"] == 22.5
+        assert totals["cost_usd"] == 7.5
 
 
 class TestUsageCommand:

@@ -47,6 +47,9 @@ LOCAL_BUDGET_WARN_AT = 0.8
 ENV_DAILY_BUDGET_USD = "UCODE_USAGE_DAILY_BUDGET_USD"
 ENV_PRICE_MULTIPLIER = "UCODE_USAGE_PRICE_MULTIPLIER"
 _CLAUDE_FAMILY_RE = re.compile(r"^(?:databricks-)?claude-(opus|sonnet|haiku)-4(?:[-.].*)?$")
+_CLAUDE_VERSION_RE = re.compile(
+    r"^(?:databricks-)?claude-(opus|sonnet|haiku)-4(?:[-.](\d+))?(?:[-.].*)?$"
+)
 
 
 @dataclass(frozen=True)
@@ -63,16 +66,51 @@ class ModelPrice:
 # tracked for tokens, but spend is reported as $0 until a price is added here.
 MODEL_PRICES_USD_PER_1M: dict[str, ModelPrice] = {
     "gpt-5": ModelPrice(input=1.25, output=10.0),
-    "gpt-5.5": ModelPrice(input=1.25, output=10.0),
+    "gpt-5.2": ModelPrice(input=1.75, output=14.0, cache_read_input=0.175),
+    "gpt-5.4": ModelPrice(input=2.5, output=15.0, cache_read_input=0.25),
+    "gpt-5.4-mini": ModelPrice(input=0.75, output=4.5, cache_read_input=0.075),
+    "gpt-5.4-nano": ModelPrice(input=0.2, output=1.25, cache_read_input=0.02),
+    "gpt-5.5": ModelPrice(input=5.0, output=30.0, cache_read_input=0.5),
     "gpt-5.5-mini": ModelPrice(input=0.25, output=2.0),
+    "gpt-5.5-pro": ModelPrice(input=30.0, output=180.0),
     "databricks-gpt-5": ModelPrice(input=1.25, output=10.0),
-    "databricks-gpt-5-5": ModelPrice(input=1.25, output=10.0),
+    "databricks-gpt-5-2": ModelPrice(input=1.75, output=14.0, cache_read_input=0.175),
+    "databricks-gpt-5-4": ModelPrice(input=2.5, output=15.0, cache_read_input=0.25),
+    "databricks-gpt-5-4-mini": ModelPrice(input=0.75, output=4.5, cache_read_input=0.075),
+    "databricks-gpt-5-4-nano": ModelPrice(input=0.2, output=1.25, cache_read_input=0.02),
+    "databricks-gpt-5-5": ModelPrice(input=5.0, output=30.0, cache_read_input=0.5),
     "databricks-gpt-5-5-mini": ModelPrice(input=0.25, output=2.0),
-    "databricks-claude-sonnet-4": ModelPrice(input=3.0, output=15.0),
-    "databricks-claude-sonnet-4-5": ModelPrice(input=3.0, output=15.0),
-    "databricks-claude-opus-4": ModelPrice(input=15.0, output=75.0),
-    "databricks-claude-opus-4-5": ModelPrice(input=15.0, output=75.0),
-    "databricks-claude-haiku-4-5": ModelPrice(input=0.8, output=4.0),
+    "databricks-gpt-5-5-pro": ModelPrice(input=30.0, output=180.0),
+    "databricks-claude-opus-4": ModelPrice(
+        input=5.0, output=25.0, cache_creation_input=6.25, cache_read_input=0.5
+    ),
+    "databricks-claude-sonnet-4": ModelPrice(
+        input=3.0, output=15.0, cache_creation_input=3.75, cache_read_input=0.3
+    ),
+    "databricks-claude-haiku-4": ModelPrice(
+        input=1.0, output=5.0, cache_creation_input=1.25, cache_read_input=0.1
+    ),
+    "databricks-claude-opus-4-1": ModelPrice(
+        input=15.0, output=75.0, cache_creation_input=18.75, cache_read_input=1.5
+    ),
+    "databricks-claude-opus-4-5": ModelPrice(
+        input=5.0, output=25.0, cache_creation_input=6.25, cache_read_input=0.5
+    ),
+    "databricks-claude-opus-4-6": ModelPrice(
+        input=5.0, output=25.0, cache_creation_input=6.25, cache_read_input=0.5
+    ),
+    "databricks-claude-opus-4-8": ModelPrice(
+        input=5.0, output=25.0, cache_creation_input=6.25, cache_read_input=0.5
+    ),
+    "databricks-claude-sonnet-4-5": ModelPrice(
+        input=3.0, output=15.0, cache_creation_input=3.75, cache_read_input=0.3
+    ),
+    "databricks-claude-sonnet-4-6": ModelPrice(
+        input=3.0, output=15.0, cache_creation_input=3.75, cache_read_input=0.3
+    ),
+    "databricks-claude-haiku-4-5": ModelPrice(
+        input=1.0, output=5.0, cache_creation_input=1.25, cache_read_input=0.1
+    ),
 }
 
 
@@ -345,6 +383,15 @@ def _model_price(model: str) -> ModelPrice | None:
     normalized = model.split("/")[-1].removesuffix("[1m]")
     if normalized in MODEL_PRICES_USD_PER_1M:
         return MODEL_PRICES_USD_PER_1M[normalized]
+    version_match = _CLAUDE_VERSION_RE.match(normalized)
+    if version_match:
+        family = version_match.group(1)
+        minor = version_match.group(2)
+        version_key = f"databricks-claude-{family}-4"
+        if minor:
+            version_key = f"{version_key}-{minor}"
+        if version_key in MODEL_PRICES_USD_PER_1M:
+            return MODEL_PRICES_USD_PER_1M[version_key]
     match = _CLAUDE_FAMILY_RE.match(normalized)
     if match:
         family = match.group(1)
