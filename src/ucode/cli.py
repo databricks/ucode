@@ -1157,7 +1157,11 @@ def setup_cmd(ctx: typer.Context) -> None:
             Panel(
                 f"[bold]Workspace:[/bold] [cyan]{workspace}[/cyan]\n"
                 f"[bold]Default agent:[/bold] [cyan]{default_display}[/cyan]\n"
-                "Run [bold]ucode export[/bold] to publish this config to Unity Catalog.",
+                "\n"
+                "[bold]Next steps[/bold]\n"
+                "  • Update MCP servers:        [bold]ucode setup mcp[/bold]\n"
+                "  • Update budget policy:      [bold]ucode setup budget[/bold]\n"
+                "  • Publish to Unity Catalog:  [bold]ucode export[/bold]",
                 title="Setup Complete",
                 style="green",
                 expand=False,
