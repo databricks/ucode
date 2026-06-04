@@ -893,12 +893,20 @@ def _budget_bar_markup(percent: int, color: str, *, width: int = 28) -> str:
     return f"[{color}]{'█' * filled}[/{color}][dim]{'░' * (width - filled)}[/dim]"
 
 
-def _budget_header_line(state: str, display_tool: str) -> str | None:
-    """The status callout shown above the bar for non-ok states."""
+def _budget_header_line(state: str, display_tool: str | None) -> str | None:
+    """The status callout shown above the bar for non-ok states.
+
+    ``display_tool`` is ``None`` for the global, all-tools budget view."""
     if state == "exceeded":
-        return f"[bold red]⛔ {display_tool} daily budget exceeded[/bold red]"
+        subject = f"{display_tool} daily budget" if display_tool else "Daily budget"
+        return f"[bold red]⛔ {subject} exceeded[/bold red]"
     if state == "warn":
-        return f"[bold yellow]⚠️  {display_tool} is nearing its daily budget[/bold yellow]"
+        nearing = (
+            f"{display_tool} is nearing its daily budget"
+            if display_tool
+            else "Nearing daily budget"
+        )
+        return f"[bold yellow]⚠️  {nearing}[/bold yellow]"
     return None
 
 
@@ -913,8 +921,9 @@ def render_local_budget_panel(
     Pass ``title`` to override the default ``"<Tool> · Daily Budget"`` panel
     title."""
     state = str(status.get("state") or "ok")
-    tool = str(status.get("tool") or "agent")
-    display_tool = tool[:1].upper() + tool[1:] if tool else "Agent"
+    raw_tool = status.get("tool")
+    tool = str(raw_tool) if raw_tool else ""
+    display_tool = tool[:1].upper() + tool[1:] if tool else None
     spend_usd = _coerce_cost(status.get("spend_usd"))
     limit_usd = _coerce_cost(status.get("limit_usd"))
     remaining_usd = _coerce_cost(status.get("remaining_usd"))
@@ -939,7 +948,7 @@ def render_local_budget_panel(
 
     return Panel(
         Text.from_markup("\n".join(lines)),
-        title=Text(title or f"{display_tool} · Daily Budget", style=f"bold {color}"),
+        title=Text(title or f"{display_tool or 'Agent'} · Daily Budget", style=f"bold {color}"),
         border_style=color,
         expand=False,
         padding=(1, 2, 0, 2),

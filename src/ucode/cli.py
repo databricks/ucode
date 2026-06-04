@@ -1041,16 +1041,14 @@ def usage_record_cmd(
 
 
 @usage_app.command("budget-status")
-def usage_budget_status_cmd(
-    agent: Annotated[
-        str | None,
-        typer.Option("--agent", help="Agent name, e.g. claude or codex. Omit to show all."),
-    ] = None,
-) -> None:
-    """Show the current local spend budget state."""
-    agents = [agent] if agent else list(BUDGET_TRACKED_AGENTS)
-    for tool in agents:
-        console.print(render_local_budget_panel(local_budget_status(tool)))
+def usage_budget_status_cmd() -> None:
+    """Show the current local spend budget state.
+
+    The daily budget is a single pool shared across all coding tools, so this
+    renders one combined view."""
+    console.print(
+        render_local_budget_panel(local_budget_status(), title="Daily Budget · All Tools")
+    )
 
 
 @usage_app.command("budget-check")
