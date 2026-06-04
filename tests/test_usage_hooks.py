@@ -119,6 +119,34 @@ def test_claude_prompt_submit_blocks_when_budget_exceeded(monkeypatch):
     assert "Window:" not in response["reason"]
 
 
+def test_claude_prompt_submit_warns_when_budget_exceeded_policy_warn(monkeypatch):
+    monkeypatch.setattr(
+        usage_hooks,
+        "local_budget_status",
+        lambda tool: {
+            "configured": True,
+            "state": "exceeded",
+            "tool": tool,
+            "spend_usd": 21.0,
+            "limit_usd": 20.0,
+            "days": 1,
+            "remaining_usd": 0.0,
+            "total_tokens": 120,
+            "on_budget_exhausted": "warn",
+        },
+    )
+
+    response = usage_hooks.claude_usage_hook(
+        model="databricks-claude-sonnet-4",
+        event="prompt-submit",
+        payload={"session_id": "s1"},
+    )
+
+    assert "decision" not in response
+    assert response["systemMessage"].startswith("⚠️ Daily budget — limit exceeded")
+    assert "continuing because policy is warn" in response["systemMessage"]
+
+
 def test_claude_prompt_submit_warns_visibly_when_nearing_budget(monkeypatch):
     # Claude renders `systemMessage` visibly to the user but injects
     # `additionalContext` silently, so the warn path must use systemMessage to
@@ -269,6 +297,69 @@ def test_codex_prompt_submit_blocks_with_valid_prompt_json(monkeypatch):
     assert "further tool use blocked today" in response["reason"]
     assert "Tokens used today" not in response["reason"]
     assert "Window:" not in response["reason"]
+
+
+def test_codex_prompt_submit_warns_when_budget_exceeded_policy_warn(monkeypatch):
+    monkeypatch.setattr(usage_hooks, "sync_codex_usage_from_state", lambda **kwargs: 0)
+    monkeypatch.setattr(
+        usage_hooks,
+        "local_budget_status",
+        lambda tool: {
+            "configured": True,
+            "state": "exceeded",
+            "tool": tool,
+            "spend_usd": 2.0,
+            "limit_usd": 1.0,
+            "days": 1,
+            "remaining_usd": 0.0,
+            "total_tokens": 120,
+            "on_budget_exhausted": "warn",
+        },
+    )
+
+    response = usage_hooks.codex_usage_hook(
+        model="gpt-5.5",
+        event="prompt-submit",
+        payload={"session_id": "s2"},
+    )
+
+    assert response == {
+        "hookSpecificOutput": {
+            "hookEventName": "UserPromptSubmit",
+            "additionalContext": (
+                "⚠️ Daily budget — limit exceeded\n"
+                "$2.00 / $1.00 (200%)  ▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰  "
+                "continuing because policy is warn"
+            ),
+        }
+    }
+
+
+def test_codex_prompt_submit_allows_when_budget_exceeded_policy_allow(monkeypatch):
+    monkeypatch.setattr(usage_hooks, "sync_codex_usage_from_state", lambda **kwargs: 0)
+    monkeypatch.setattr(
+        usage_hooks,
+        "local_budget_status",
+        lambda tool: {
+            "configured": True,
+            "state": "exceeded",
+            "tool": tool,
+            "spend_usd": 2.0,
+            "limit_usd": 1.0,
+            "days": 1,
+            "remaining_usd": 0.0,
+            "total_tokens": 120,
+            "on_budget_exhausted": "allow",
+        },
+    )
+
+    response = usage_hooks.codex_usage_hook(
+        model="gpt-5.5",
+        event="prompt-submit",
+        payload={"session_id": "s2"},
+    )
+
+    assert response == {}
 
 
 def test_codex_prompt_submit_returns_warning_additional_context(monkeypatch):

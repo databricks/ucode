@@ -24,7 +24,8 @@ from ucode.databricks import (
     build_tool_base_url,
     get_databricks_token,
 )
-from ucode.state import mark_tool_managed, resolve_policy_model, save_state
+from ucode.policies import resolve_policy_default_model
+from ucode.state import mark_tool_managed, save_state
 from ucode.telemetry import agent_version, ucode_version
 
 GEMINI_CONFIG_DIR = Path.home() / ".gemini"
@@ -122,7 +123,7 @@ def _policy_resolved_default(state: dict) -> str | None:
     base = default_model(state)
     if not base:
         return None
-    return resolve_policy_model(state, "gemini", base)
+    return resolve_policy_default_model(state, "gemini", base)
 
 
 def _refresh_token_once(state: dict, *, force_refresh: bool = False) -> str:

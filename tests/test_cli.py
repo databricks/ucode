@@ -10,7 +10,7 @@ import pytest
 from typer.testing import CliRunner
 
 from ucode.cli import app
-from ucode.databricks import MANAGED_CONFIG_VOLUME_PATH
+from ucode.databricks import MANAGED_CONFIG_VOLUME_PATH, MANAGED_POLICIES_VOLUME_PATH
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
@@ -192,36 +192,73 @@ class TestSetupBudgetCommand:
     def test_sets_daily_budget_for_current_workspace(self):
         state = {
             "workspace": "https://example.databricks.com",
-            "policies": {"claude": {"default_model": "databricks-claude-sonnet-4"}},
+            "available_tools": ["claude"],
+            "claude_models": {"sonnet": "databricks-claude-sonnet-4"},
+            "default_agent": "claude",
         }
         with contextlib.ExitStack() as stack:
             self._admin_patches(stack)
             stack.enter_context(patch("ucode.cli.load_state", return_value=state))
-            mock_save = stack.enter_context(patch("ucode.cli.save_state"))
-            result = runner.invoke(app, ["setup", "budget"], input="250\n")
+            stack.enter_context(patch("ucode.cli.load_workspace_policy", return_value=None))
+            choice = stack.enter_context(patch("ucode.cli.prompt_for_choice"))
+            choice.side_effect = ["block", "claude"]
+            mock_save_policy = stack.enter_context(patch("ucode.cli.save_workspace_policy"))
+            result = runner.invoke(app, ["setup", "budget"], input="250\n1\nadmin-model\n")
 
         assert result.exit_code == 0, result.output
-        saved = mock_save.call_args[0][0]
-        assert saved["workspace"] == state["workspace"]
-        assert saved["policies"]["daily_limit_usd"] == 250.0
-        assert saved["policies"]["claude"] == state["policies"]["claude"]
-        assert "Daily budget updated" in result.output
+        workspace, policy = mock_save_policy.call_args[0]
+        assert workspace == state["workspace"]
+        assert policy["policy"]["name"] == "coding-agents-default"
+        assert policy["policy"]["daily_budget_usd"] == 250.0
+        assert policy["policy"]["on_budget_exhausted"] == "block"
+        assert policy["policy"]["tiers"] == [
+            {
+                "name": "tier 1",
+                "activates_at_pct": 0.0,
+                "harness": "claude",
+                "model": "admin-model",
+            }
+        ]
+        assert "Budget policy updated" in result.output
 
     def test_overrides_existing_daily_budget(self):
         state = {
             "workspace": "https://example.databricks.com",
-            "policies": {"daily_limit_usd": 125.0, "claude": {"default_model": "old"}},
+            "available_tools": ["claude"],
+            "claude_models": {"sonnet": "databricks-claude-sonnet-4"},
+            "default_agent": "claude",
+        }
+        existing = {
+            "policy": {
+                "name": "existing",
+                "daily_budget_usd": 125.0,
+                "on_budget_exhausted": "warn",
+                "tiers": [
+                    {
+                        "name": "premium",
+                        "activates_at_pct": 0.0,
+                        "harness": "claude",
+                        "model": "old",
+                    }
+                ],
+            }
         }
         with contextlib.ExitStack() as stack:
             self._admin_patches(stack)
             stack.enter_context(patch("ucode.cli.load_state", return_value=state))
-            mock_save = stack.enter_context(patch("ucode.cli.save_state"))
-            result = runner.invoke(app, ["setup", "budget"], input="500\n")
+            stack.enter_context(patch("ucode.cli.load_workspace_policy", return_value=existing))
+            choice = stack.enter_context(patch("ucode.cli.prompt_for_choice"))
+            choice.side_effect = ["warn", "claude"]
+            mock_save_policy = stack.enter_context(patch("ucode.cli.save_workspace_policy"))
+            result = runner.invoke(app, ["setup", "budget"], input="500\n1\n\n")
 
         assert result.exit_code == 0, result.output
-        saved = mock_save.call_args[0][0]
-        assert saved["policies"]["daily_limit_usd"] == 500.0
-        assert saved["policies"]["claude"] == {"default_model": "old"}
+        policy = mock_save_policy.call_args[0][1]
+        assert policy["policy"]["name"] == "coding-agents-default"
+        assert policy["policy"]["daily_budget_usd"] == 500.0
+        assert policy["policy"]["on_budget_exhausted"] == "warn"
+        assert policy["policy"]["tiers"][0]["name"] == "tier 1"
+        assert policy["policy"]["tiers"][0]["model"] == "old"
 
     def test_errors_when_workspace_missing(self):
         with patch("ucode.cli.load_state", return_value={}):
@@ -343,13 +380,12 @@ class TestBudgetGate:
         launch_agent = stack.enter_context(patch("ucode.cli.launch_agent"))
         return launch_agent, configure_tool
 
-    def _run(self, stack, args, *, budget_state, choice="__unset__", state=None):
+    def _run(self, stack, args, *, budget_state, choice="__unset__", state=None, status=None):
         state = state or {**MINIMAL_STATE, "default_agent": "claude"}
         launch_agent, configure_tool = self._launch_patches(stack)
         stack.enter_context(patch("ucode.cli.load_state", return_value=state))
-        stack.enter_context(
-            patch("ucode.cli.local_budget_status", return_value={"state": budget_state})
-        )
+        status = status or {"state": budget_state}
+        stack.enter_context(patch("ucode.cli.local_budget_status", return_value=status))
         choice_mock = stack.enter_context(patch("ucode.cli.prompt_budget_warn_choice"))
         if choice != "__unset__":
             choice_mock.return_value = choice
@@ -385,24 +421,45 @@ class TestBudgetGate:
         assert result.exit_code == 0, result.output
         assert launch_agent.call_args[0][0] == "claude"
 
-    def test_warn_selector_switch_opencode(self):
+    def test_warn_selector_switches_to_policy_tier(self):
         from contextlib import ExitStack
 
         with ExitStack() as stack:
             result, launch_agent, configure_tool, _ = self._run(
-                stack, ["claude"], budget_state="warn", choice="opencode"
+                stack,
+                ["claude"],
+                budget_state="warn",
+                choice="switch",
+                status={
+                    "state": "warn",
+                    "active_tier": {
+                        "name": "economy",
+                        "harness": "opencode",
+                        "model": "kimi-k2",
+                    },
+                },
             )
         assert result.exit_code == 0, result.output
         assert launch_agent.call_args[0][0] == "opencode"
-        # OpenCode defaults to the cheaper Haiku endpoint (present in MINIMAL_STATE).
-        assert configure_tool.call_args[0][2] == "databricks-claude-haiku-4-5"
+        assert configure_tool.call_args[0][2] == "kimi-k2"
 
     def test_warn_selector_abort_none(self):
         from contextlib import ExitStack
 
         with ExitStack() as stack:
             result, launch_agent, _, _ = self._run(
-                stack, ["claude"], budget_state="warn", choice=None
+                stack,
+                ["claude"],
+                budget_state="warn",
+                choice=None,
+                status={
+                    "state": "warn",
+                    "active_tier": {
+                        "name": "economy",
+                        "harness": "opencode",
+                        "model": "kimi-k2",
+                    },
+                },
             )
         assert result.exit_code == 0, result.output
         launch_agent.assert_not_called()
@@ -421,7 +478,7 @@ class TestBudgetGate:
         assert launch_agent.call_args[0][0] == "opencode"
 
     def test_prompt_budget_warn_choice_options(self):
-        """The ui helper offers exactly the default-agent and OpenCode options,
+        """The ui helper offers the default-agent and policy-switch options,
         labeling the first with the passed display name."""
         from ucode.ui import prompt_budget_warn_choice
 
@@ -437,9 +494,13 @@ class TestBudgetGate:
             return FakeSelect()
 
         with patch("ucode.ui.questionary.select", side_effect=fake_select):
-            prompt_budget_warn_choice(default_agent_display="Claude Code")
-        assert captured["values"] == ["default", "opencode"]
+            prompt_budget_warn_choice(
+                default_agent_display="Claude Code",
+                switch_display="economy (OpenCode / kimi-k2)",
+            )
+        assert captured["values"] == ["default", "switch"]
         assert captured["titles"][0] == "Continue with Claude Code"
+        assert captured["titles"][1] == "Switch to economy (OpenCode / kimi-k2)"
 
 
 class TestMcpSubcommands:
@@ -692,7 +753,9 @@ class TestExport:
             patch("ucode.cli.load_full_state", return_value=self._full_state_with(state)),
             patch("ucode.cli.ensure_databricks_auth") as mock_auth,
             patch("ucode.cli.upload_managed_config") as mock_upload,
+            patch("ucode.cli.policy_cache_path") as mock_policy_path,
         ):
+            mock_policy_path.return_value.is_file.return_value = False
             result = runner.invoke(app, ["export"])
 
         assert result.exit_code == 0, result.output
@@ -701,7 +764,9 @@ class TestExport:
         upload_args = mock_upload.call_args[0]
         assert upload_args[0] == "https://example.databricks.com"
         assert upload_args[1] == "my-profile"
-        assert f"Config uploaded to {MANAGED_CONFIG_VOLUME_PATH}" in result.output
+        assert "state.json uploaded" in result.output
+        assert MANAGED_CONFIG_VOLUME_PATH in result.output
+        assert "No local policies.yaml found" in result.output
 
     def test_uploads_flat_single_workspace_blob(self):
         """The temp file handed to `upload_managed_config` must be the FLAT
@@ -721,7 +786,9 @@ class TestExport:
             patch("ucode.cli.load_full_state", return_value=self._full_state_with(state)),
             patch("ucode.cli.ensure_databricks_auth"),
             patch("ucode.cli.upload_managed_config", side_effect=fake_upload),
+            patch("ucode.cli.policy_cache_path") as mock_policy_path,
         ):
+            mock_policy_path.return_value.is_file.return_value = False
             result = runner.invoke(app, ["export"])
 
         assert result.exit_code == 0, result.output
@@ -730,12 +797,37 @@ class TestExport:
         assert "current_workspace" not in captured
         # Per-machine fields dropped.
         assert "mcp_servers" not in captured
-        # Workspace + policy round-trip.
+        # Workspace is present, policy is uploaded separately.
         assert captured["workspace"] == "https://example.databricks.com"
-        assert captured["policies"] == {"claude": {"default_model": "admin"}}
+        assert "policies" not in captured
         assert captured["state_version"] == 3
         # Other workspaces never appear in the values.
         assert "should-not-be-uploaded" not in _json.dumps(captured)
+
+    def test_uploads_policy_yaml_when_present(self):
+        state = {**MINIMAL_STATE, "profile": "my-profile"}
+        with (
+            patch("ucode.cli.install_databricks_cli"),
+            patch("ucode.cli.load_state", return_value=state),
+            patch("ucode.cli.load_full_state", return_value=self._full_state_with(state)),
+            patch("ucode.cli.ensure_databricks_auth"),
+            patch("ucode.cli.upload_managed_config") as mock_config_upload,
+            patch("ucode.cli.upload_managed_policies") as mock_policy_upload,
+            patch("ucode.cli.policy_cache_path") as mock_policy_path,
+        ):
+            mock_policy_path.return_value.is_file.return_value = True
+            result = runner.invoke(app, ["export"])
+
+        assert result.exit_code == 0, result.output
+        mock_config_upload.assert_called_once()
+        mock_policy_upload.assert_called_once()
+        assert mock_policy_upload.call_args[0][0] == "https://example.databricks.com"
+        assert mock_policy_upload.call_args[0][1] == "my-profile"
+        assert mock_policy_upload.call_args[0][2] == mock_policy_path.return_value
+        assert MANAGED_CONFIG_VOLUME_PATH in result.output
+        assert MANAGED_POLICIES_VOLUME_PATH in result.output
+        assert "state.json uploaded" in result.output
+        assert "policies.yaml uploaded" in result.output
 
     def test_uploads_without_profile(self):
         state = {k: v for k, v in MINIMAL_STATE.items() if k != "profile"}
@@ -1316,6 +1408,8 @@ class TestConfigureSharedStateMcpCleanup:
         monkeypatch.setattr(cli_mod, "discover_codex_models", lambda w, t: ([], None))
         monkeypatch.setattr(cli_mod, "build_shared_base_urls", lambda w: {})
         monkeypatch.setattr(cli_mod, "download_managed_config", lambda w, p: None)
+        monkeypatch.setattr(cli_mod, "download_managed_policies", lambda w, p: None)
+        monkeypatch.setattr(cli_mod, "delete_workspace_policy", lambda w: None)
 
     def test_purges_residue_when_workspace_changes(self, monkeypatch):
         import ucode.cli as cli_mod
@@ -1390,22 +1484,63 @@ class TestConfigureSharedStatePullsManagedWorkspace:
             lambda w, p: {
                 "workspace": ws,
                 "claude_models": {"opus": "admin-pinned"},
-                "policies": {"claude": {"default_model": "admin-pinned"}},
                 "available_tools": ["claude"],
             },
         )
+        saved_policy: list[dict] = []
+        monkeypatch.setattr(cli_mod, "save_workspace_policy", lambda w, p: saved_policy.append(p))
         saved: list[dict] = []
         monkeypatch.setattr(cli_mod, "save_state", lambda state: saved.append(state))
 
         state = cli_mod.configure_shared_state(ws)
 
         assert len(saved) == 1
-        # Both admin-managed fields land on the saved state.
         assert saved[0]["claude_models"] == {"opus": "admin-pinned"}
-        assert saved[0]["policies"] == {"claude": {"default_model": "admin-pinned"}}
+        assert "policies" not in saved[0]
+        assert saved_policy == []
         assert saved[0]["available_tools"] == ["claude"]
         assert "_managed_config_pulled" not in saved[0]
         assert state["_managed_config_pulled"] is True
+
+    def test_pulls_and_caches_managed_policy_yaml(self, monkeypatch):
+        import ucode.cli as cli_mod
+
+        ws = "https://example.databricks.com"
+        self._stub_external_deps(monkeypatch)
+        monkeypatch.setattr(
+            cli_mod,
+            "download_managed_config",
+            lambda w, p: {"workspace": ws, "available_tools": ["claude"]},
+        )
+        monkeypatch.setattr(
+            cli_mod,
+            "download_managed_policies",
+            lambda w, p: (
+                """
+policy:
+  name: coding-agents-default
+  daily_budget_usd: 50
+  tiers:
+    - name: premium
+      activates_at_pct: 0
+      harness: claude
+      model: opus
+  on_budget_exhausted: block
+"""
+            ),
+        )
+        saved_policy: list[tuple[str, dict]] = []
+        monkeypatch.setattr(
+            cli_mod,
+            "save_workspace_policy",
+            lambda workspace, policy: saved_policy.append((workspace, policy)),
+        )
+        monkeypatch.setattr(cli_mod, "save_state", lambda state: None)
+
+        cli_mod.configure_shared_state(ws)
+
+        assert saved_policy[0][0] == ws
+        assert saved_policy[0][1]["policy"]["daily_budget_usd"] == 50.0
 
     def test_pulled_workspace_state_overwrites_local_stale_tools(self, monkeypatch):
         import ucode.cli as cli_mod
@@ -1443,8 +1578,8 @@ class TestConfigureSharedStatePullsManagedWorkspace:
         assert state["_managed_config_pulled"] is True
 
     def test_silent_when_download_returns_none(self, monkeypatch):
-        # First-time / no admin export yet — local state must save cleanly with
-        # an empty policies block (added by hydrate_state, not by the pull).
+        # First-time / no admin export yet — local state must save cleanly
+        # without a policy block.
         import ucode.cli as cli_mod
 
         self._stub_external_deps(monkeypatch)
@@ -1455,8 +1590,6 @@ class TestConfigureSharedStatePullsManagedWorkspace:
         cli_mod.configure_shared_state("https://example.databricks.com")
 
         assert len(saved) == 1
-        # The saved state dict passed to save_state should NOT contain a
-        # policies key from the pull (hydrate_state adds an empty one later).
         assert "policies" not in saved[0]
 
     def test_installs_tracing_runtime_when_pulled_config_enables_it(self, monkeypatch):

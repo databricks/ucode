@@ -2931,6 +2931,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "databricks-sql-connector" },
+    { name = "pyyaml" },
     { name = "questionary" },
     { name = "tomlkit" },
     { name = "typer" },
@@ -2952,6 +2953,7 @@ dev = [
 requires-dist = [
     { name = "databricks-sql-connector", specifier = ">=3.6.0" },
     { name = "mlflow", extras = ["databricks"], marker = "extra == 'tracing'", specifier = ">=3.4" },
+    { name = "pyyaml", specifier = ">=6.0.0" },
     { name = "questionary", specifier = ">=2.0.0" },
     { name = "tomlkit", specifier = ">=0.13.0" },
     { name = "typer", specifier = ">=0.12.0" },

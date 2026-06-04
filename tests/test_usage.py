@@ -652,12 +652,25 @@ class TestLocalUsageLedger:
         assert "100 tokens" in result
         assert "databricks-gpt-5" in result
 
-    def test_reports_state_budget_warning_status(self, tmp_path, monkeypatch):
+    def test_reports_policy_budget_warning_status(self, tmp_path, monkeypatch):
         db_path = tmp_path / "usage.sqlite"
         monkeypatch.setattr(
             usage_mod,
-            "load_state",
-            lambda: {"policies": {"daily_limit_usd": 20}},
+            "_workspace_policy",
+            lambda: {
+                "policy": {
+                    "daily_budget_usd": 20,
+                    "tiers": [
+                        {
+                            "name": "premium",
+                            "activates_at_pct": 0,
+                            "harness": "codex",
+                            "model": "gpt-5",
+                        }
+                    ],
+                    "on_budget_exhausted": "block",
+                }
+            },
         )
         record_local_usage_delta(
             session_id="s1",
@@ -697,7 +710,7 @@ class TestLocalUsageLedger:
         assert status["state"] == "exceeded"
 
     def test_budget_falls_back_to_default_without_policy(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(usage_mod, "load_state", lambda: {})
+        monkeypatch.setattr(usage_mod, "_workspace_policy", lambda: None)
         assert local_daily_agent_budget_usd("codex") == 500.0
 
     def test_budget_aggregates_spend_across_all_tools(self, tmp_path, monkeypatch):
@@ -706,8 +719,21 @@ class TestLocalUsageLedger:
         db_path = tmp_path / "usage.sqlite"
         monkeypatch.setattr(
             usage_mod,
-            "load_state",
-            lambda: {"policies": {"daily_limit_usd": 20}},
+            "_workspace_policy",
+            lambda: {
+                "policy": {
+                    "daily_budget_usd": 20,
+                    "tiers": [
+                        {
+                            "name": "premium",
+                            "activates_at_pct": 0,
+                            "harness": "codex",
+                            "model": "gpt-5",
+                        }
+                    ],
+                    "on_budget_exhausted": "block",
+                }
+            },
         )
         record_local_usage_delta(
             session_id="s1",
@@ -748,8 +774,21 @@ class TestLocalUsageLedger:
         db_path = tmp_path / "usage.sqlite"
         monkeypatch.setattr(
             usage_mod,
-            "load_state",
-            lambda: {"policies": {"daily_limit_usd": 20}},
+            "_workspace_policy",
+            lambda: {
+                "policy": {
+                    "daily_budget_usd": 20,
+                    "tiers": [
+                        {
+                            "name": "premium",
+                            "activates_at_pct": 0,
+                            "harness": "codex",
+                            "model": "gpt-5",
+                        }
+                    ],
+                    "on_budget_exhausted": "block",
+                }
+            },
         )
         record_local_usage_delta(
             session_id="s1",

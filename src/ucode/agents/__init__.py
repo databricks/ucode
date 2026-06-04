@@ -20,7 +20,8 @@ from ucode.config_io import ToolSpec
 from ucode.databricks import (
     install_databricks_cli,
 )
-from ucode.state import load_state, resolve_policy_model, save_state
+from ucode.policies import resolve_policy_default_model
+from ucode.state import load_state, save_state
 from ucode.telemetry import agent_version
 from ucode.ui import (
     console,
@@ -200,12 +201,14 @@ def resolve_launch_model(
     state: dict,
     explicit_model: str | None,
 ) -> tuple[dict, str | None]:
+    explicit = explicit_model is not None
     model = explicit_model or default_model_for_tool(tool, state)
     if not model:
         raise RuntimeError(
             f"No models available for {tool}. Run `ucode configure` to set up your workspace."
         )
-    model = resolve_policy_model(state, tool, model)
+    if not explicit:
+        model = resolve_policy_default_model(state, tool, model)
     return state, model
 
 

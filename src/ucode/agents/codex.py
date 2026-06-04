@@ -26,7 +26,8 @@ from ucode.databricks import (
     build_tool_base_url,
     get_databricks_token,
 )
-from ucode.state import mark_tool_managed, resolve_policy_model, save_state
+from ucode.policies import resolve_policy_default_model
+from ucode.state import mark_tool_managed, save_state
 from ucode.telemetry import agent_version, ucode_version
 from ucode.ui import print_warning
 
@@ -237,8 +238,8 @@ def _parse_gpt(model: str | None) -> tuple[int, int | None, int | None, str] | N
 def write_tool_config(state: dict, model: str | None = None) -> dict:
     workspace = state["workspace"]
     base_model = model or default_model(state)
-    if base_model:
-        base_model = resolve_policy_model(state, "codex", base_model)
+    if model is None and base_model:
+        base_model = resolve_policy_default_model(state, "codex", base_model)
     chosen_model = _codex_model_id(base_model)
     databricks_profile = state.get("profile")
 

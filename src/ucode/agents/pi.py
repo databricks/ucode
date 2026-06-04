@@ -46,7 +46,8 @@ from ucode.databricks import (
     build_pi_base_urls,
     get_databricks_token,
 )
-from ucode.state import mark_tool_managed, resolve_policy_model, save_state
+from ucode.policies import resolve_policy_default_model
+from ucode.state import mark_tool_managed, save_state
 from ucode.telemetry import agent_version, ucode_version
 
 PI_UCODE_HOME = APP_DIR / "pi-home"
@@ -223,7 +224,7 @@ def _policy_resolved_default(state: dict) -> str | None:
     base = default_model(state)
     if not base:
         return None
-    return resolve_policy_model(state, "pi", base)
+    return resolve_policy_default_model(state, "pi", base)
 
 
 def _refresh_token_once(state: dict, *, force_refresh: bool = False) -> str:

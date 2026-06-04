@@ -35,7 +35,8 @@ from ucode.databricks import (
     build_copilot_base_url,
     get_databricks_token,
 )
-from ucode.state import mark_tool_managed, resolve_policy_model, save_state
+from ucode.policies import resolve_policy_default_model
+from ucode.state import mark_tool_managed, save_state
 
 COPILOT_CONFIG_DIR = Path.home() / ".copilot"
 COPILOT_ENV_PATH = COPILOT_CONFIG_DIR / "ucode.env"
@@ -162,7 +163,7 @@ def _policy_resolved_default(state: dict) -> str | None:
     base = default_model(state)
     if not base:
         return None
-    return resolve_policy_model(state, "copilot", base)
+    return resolve_policy_default_model(state, "copilot", base)
 
 
 def _refresh_token_once(state: dict, *, force_refresh: bool = False) -> tuple[str, str]:

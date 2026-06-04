@@ -26,6 +26,12 @@ from ucode.databricks import (
     get_databricks_token,
     run_usage_query,
 )
+from ucode.policies import (
+    active_tier,
+    daily_budget_usd,
+    load_workspace_policy,
+    on_budget_exhausted,
+)
 from ucode.state import load_state
 from ucode.ui import (
     console,
@@ -43,7 +49,7 @@ from ucode.ui import (
 USAGE_BREAKDOWN_DAYS = 7
 USAGE_SUMMARY_DAYS = 30
 LOCAL_USAGE_DB_PATH = APP_DIR / "usage.sqlite"
-# Daily cap used when no per-tool spending policy is configured in state.json.
+# Daily cap used when no workspace policy is configured.
 DEFAULT_DAILY_BUDGET_USD = 500.0
 LOCAL_BUDGET_WARN_AT = 0.8
 ENV_DAILY_BUDGET_USD = "UCODE_USAGE_DAILY_BUDGET_USD"
@@ -337,37 +343,38 @@ def _env_float(name: str, default: float, *, minimum: float | None = None) -> fl
     return value
 
 
-def _state_daily_limit_usd() -> float | None:
-    """Read the global ``policies.daily_limit_usd`` from state.
-
-    This is a single budget shared across every coding tool. Returns ``None``
-    when the workspace state has no daily limit configured so callers can fall
-    back to a default.
-    """
+def _workspace_policy() -> dict | None:
     try:
         state = load_state()
     except Exception:
-        state = {}
-    policies = state.get("policies")
-    raw = policies.get("daily_limit_usd") if isinstance(policies, dict) else None
-    if isinstance(raw, (int, float)) and not isinstance(raw, bool) and raw > 0:
-        return float(raw)
-    return None
+        return None
+    workspace = state.get("workspace")
+    return load_workspace_policy(workspace if isinstance(workspace, str) else None)
+
+
+def _policy_daily_limit_usd() -> float | None:
+    """Read the daily budget from the current workspace policy YAML.
+
+    This is a single budget shared across every coding tool. Returns ``None``
+    when the workspace has no policy configured so callers can fall
+    back to a default.
+    """
+    return daily_budget_usd(_workspace_policy())
 
 
 def local_daily_agent_budget_usd(tool: str | None = None) -> float:
     """Daily spend cap shared across all coding tools.
 
     Resolution order: the ``UCODE_USAGE_DAILY_BUDGET_USD`` env override, then
-    the global ``daily_limit_usd`` from the workspace state, then a ``$500/day``
-    default when no policy is configured. ``tool`` is accepted for call-site
-    compatibility but ignored — the limit is global.
+    ``policy.daily_budget_usd`` from the workspace policy YAML, then a
+    ``$500/day`` default when no policy is configured. ``tool`` is accepted for
+    call-site compatibility but ignored — the limit is global.
     """
     del tool
     env_override = os.environ.get(ENV_DAILY_BUDGET_USD)
     if env_override is not None and env_override.strip():
         return _env_float(ENV_DAILY_BUDGET_USD, DEFAULT_DAILY_BUDGET_USD, minimum=0.01)
-    daily_limit = _state_daily_limit_usd()
+    daily_limit = _policy_daily_limit_usd()
     if daily_limit is not None:
         return daily_limit
     return DEFAULT_DAILY_BUDGET_USD
@@ -802,6 +809,7 @@ def local_budget_status(
     ``tool`` scopes the displayed session/token totals for launch panels, while
     spend and the limit remain aggregated globally across every coding tool."""
     limit_usd = local_daily_agent_budget_usd()
+    policy = _workspace_policy()
     warn_at = LOCAL_BUDGET_WARN_AT
     totals = query_local_budget_totals(days=days, db_path=db_path)
     display_totals = (
@@ -827,6 +835,8 @@ def local_budget_status(
         "remaining_usd": max(limit_usd - spend_usd, 0.0),
         "total_tokens": _coerce_token_count(display_totals.get("total_tokens")),
         "sessions": _coerce_token_count(display_totals.get("sessions")),
+        "on_budget_exhausted": on_budget_exhausted(policy),
+        "active_tier": active_tier(policy, spend_usd),
     }
 
 
@@ -980,11 +990,15 @@ def format_local_budget_hook_status(status: dict[str, object]) -> str:
     percent = _budget_usage_percent(spend_usd, limit_usd)
     bar = _budget_progress_bar(percent)
     if state == "exceeded":
+        behavior = str(status.get("on_budget_exhausted") or "block")
         headline = "⛔ Daily budget — limit exceeded"
-        detail = (
-            f"${spend_usd:.2f} / ${limit_usd:.2f} ({percent}%)  {bar}  "
-            "further tool use blocked today"
-        )
+        action = "further tool use blocked today"
+        if behavior == "warn":
+            headline = "⚠️ Daily budget — limit exceeded"
+            action = "continuing because policy is warn"
+        elif behavior == "allow":
+            action = "continuing because policy is allow"
+        detail = f"${spend_usd:.2f} / ${limit_usd:.2f} ({percent}%)  {bar}  {action}"
     elif state == "warn":
         headline = "⚠️ Daily budget — nearing limit"
         detail = (

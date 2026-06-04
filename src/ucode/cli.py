@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import json
-from typing import Annotated
+from typing import Annotated, cast
 
 import typer
 from rich.panel import Panel
@@ -15,6 +15,7 @@ from ucode.agents import (
     configure_selected_tools,
     configure_single_tool,
     configure_tool,
+    default_model_for_tool,
     ensure_bootstrap_dependencies,
     ensure_provider_state,
     install_tool_binary,
@@ -30,11 +31,13 @@ from ucode.agents.pi import PI_SETTINGS_BACKUP_PATH, PI_SETTINGS_PATH
 from ucode.config_io import restore_file, set_dry_run
 from ucode.databricks import (
     MANAGED_CONFIG_VOLUME_PATH,
+    MANAGED_POLICIES_VOLUME_PATH,
     build_shared_base_urls,
     discover_claude_models,
     discover_codex_models,
     discover_gemini_models,
     download_managed_config,
+    download_managed_policies,
     ensure_ai_gateway_v2,
     ensure_databricks_auth,
     find_profile_name_for_host,
@@ -45,12 +48,23 @@ from ucode.databricks import (
     normalize_workspace_url,
     run_databricks_login,
     upload_managed_config,
+    upload_managed_policies,
 )
 from ucode.mcp import (
     MCP_CLIENTS,
     configure_mcp_command,
     purge_cross_workspace_mcp_residue,
     revert_mcp_configs,
+)
+from ucode.policies import (
+    DEFAULT_POLICY_NAME,
+    VALID_ON_BUDGET_EXHAUSTED,
+    delete_workspace_policy,
+    load_workspace_policy,
+    normalize_policy,
+    parse_policy_yaml,
+    policy_cache_path,
+    save_workspace_policy,
 )
 from ucode.state import (
     STATE_PATH,
@@ -74,9 +88,9 @@ from ucode.ui import (
     print_success,
     print_warning,
     prompt_budget_warn_choice,
+    prompt_for_choice,
     prompt_for_default_agent,
     prompt_for_tools,
-    prompt_for_usd_amount,
     prompt_for_workspace,
     prompt_yes_no,
     spinner,
@@ -106,20 +120,13 @@ _DISCOVERY_CONSUMERS: dict[str, tuple[str, ...]] = {
 # Agents that record local spend and therefore have a daily budget to report.
 BUDGET_TRACKED_AGENTS: tuple[str, ...] = ("claude", "codex")
 
-# When the daily budget is nearing its limit, the warn selector offers a switch
-# to OpenCode. OpenCode is untracked (no usage hooks), so it keeps working past
-# the shared cap; default it to the cheaper Haiku endpoint when available.
-OPENCODE_HAIKU_MODEL = "databricks-claude-haiku-4-5"
 
-
-def _opencode_warn_model(state: dict) -> str | None:
-    """Model to launch OpenCode on from the budget-warn selector.
-
-    Prefers the cheaper Haiku endpoint; falls back to OpenCode's default when
-    Haiku isn't among the discovered endpoints (``None`` lets the normal launch
-    path resolve the default)."""
-    anthropic = (state.get("opencode_models") or {}).get("anthropic") or []
-    return OPENCODE_HAIKU_MODEL if OPENCODE_HAIKU_MODEL in anthropic else None
+def _tier_display(tier: dict) -> str:
+    name = str(tier.get("name") or "policy tier")
+    harness = str(tier.get("harness") or "agent")
+    model = str(tier.get("model") or "model")
+    display = TOOL_SPECS.get(harness, {}).get("display", harness)
+    return f"{name} ({display} / {model})"
 
 
 def _print_discovery_diagnostics(state: dict) -> None:
@@ -301,11 +308,23 @@ def configure_shared_state(
     # fallback for workspaces without a managed config.
     with spinner("Pulling managed config from your org..."):
         remote = download_managed_config(workspace, profile)
+        remote_policy_yaml = download_managed_policies(workspace, profile)
     if remote is not None:
         state = merge_managed_workspace(state, remote, profile=profile)
         print_success("Managed config applied (set by your account admin)")
     else:
         print_note("No managed config published for this workspace — using local defaults.")
+
+    if remote_policy_yaml is not None:
+        remote_policy = parse_policy_yaml(remote_policy_yaml)
+        if remote_policy is not None:
+            save_workspace_policy(workspace, remote_policy)
+            print_success("Managed policy applied (set by your account admin)")
+        else:
+            delete_workspace_policy(workspace)
+            print_warning("Managed policies.yaml is malformed — ignoring budget policy.")
+    elif remote is not None:
+        delete_workspace_policy(workspace)
 
     save_state(state)
     if remote is not None:
@@ -691,34 +710,69 @@ def _resolve_default_launch_tool(state: dict) -> str:
     return default_agent
 
 
-def _apply_budget_gate(tool: str, *, offer_warn_selector: bool) -> str:
+def _budget_switch_target(tool: str, status: dict[str, object]) -> tuple[str, str] | None:
+    tier = status.get("active_tier")
+    if not isinstance(tier, dict):
+        return None
+    tier = cast("dict[str, object]", tier)
+    harness = tier.get("harness")
+    model = tier.get("model")
+    if (
+        not isinstance(harness, str)
+        or harness not in TOOL_SPECS
+        or harness == tool
+        or not isinstance(model, str)
+        or not model
+    ):
+        return None
+    return harness, model
+
+
+def _apply_budget_gate(
+    tool: str,
+    *,
+    offer_warn_selector: bool,
+) -> tuple[str, str | None, str | None]:
     """Gate launch on the global daily budget, returning a decision string.
 
     The budget is a single global pool shared across every coding tool:
-    - ``exceeded`` is a hard stop for *all* agents (including untracked ones like
-      OpenCode) — print the exhausted panel and exit.
+    - ``exceeded`` follows ``policy.on_budget_exhausted``: block, warn, or allow.
     - ``warn`` offers an interactive selector (when ``offer_warn_selector``) to
-      continue with the agent being launched or switch to OpenCode — the only
-      option that survives past the cap, since OpenCode is untracked.
+      continue with the agent being launched or switch to the active policy tier.
     - ``ok`` passes through.
 
-    Returns ``"default"`` (launch the agent as dispatched) or ``"opencode"``
-    (switch harnesses). Raises ``typer.Exit`` on the exceeded hard stop and on
-    quit/abort from the selector."""
+    Returns ``("default", None, None)`` or ``("switch", harness, model)``.
+    Raises ``typer.Exit`` on the exceeded hard stop and on quit/abort from the
+    selector."""
     status = local_budget_status()
     budget_state = status.get("state")
     if budget_state == "exceeded":
-        console.print(render_local_budget_panel(status, title="Daily budget exhausted"))
-        print_err("Daily budget exhausted — no agents can be launched until it resets.")
-        raise typer.Exit(1)
+        behavior = str(status.get("on_budget_exhausted") or "block")
+        if behavior == "block":
+            console.print(render_local_budget_panel(status, title="Daily budget exhausted"))
+            print_err("Daily budget exhausted — no agents can be launched until it resets.")
+            raise typer.Exit(1)
+        if behavior == "warn":
+            console.print(render_local_budget_panel(status, title="Daily budget exhausted"))
+            print_warning("Daily budget exhausted — continuing because policy is set to warn.")
     if budget_state == "warn" and offer_warn_selector:
-        choice = prompt_budget_warn_choice(default_agent_display=TOOL_SPECS[tool]["display"])
+        target = _budget_switch_target(tool, status)
+        if target is None:
+            return "default", None, None
+        switch_display = None
+        tier = status.get("active_tier")
+        switch_display = _tier_display(tier) if isinstance(tier, dict) else target[0]
+        choice = prompt_budget_warn_choice(
+            default_agent_display=TOOL_SPECS[tool]["display"],
+            switch_display=switch_display,
+        )
         if choice is None:
             print_note("Cancelled.")
             raise typer.Exit(0)
-        if choice == "opencode":
-            return "opencode"
-    return "default"
+        if choice == "switch" and target is not None:
+            target_tool, target_model = target
+            return "switch", target_tool, target_model
+    return "default", None, None
 
 
 def _launch_tool(tool_name: str, ctx: typer.Context, *, explicit_model: str | None = None) -> None:
@@ -739,16 +793,14 @@ def _launch_tool(tool_name: str, ctx: typer.Context, *, explicit_model: str | No
         state = configure_shared_state(
             state["workspace"], profile=state.get("profile"), tools=[tool]
         )
-        # Gate on the global daily budget before configuring/launching. An
-        # exceeded state hard-stops every agent; a warn state offers the selector
-        # (tracked agents only) to continue or switch to OpenCode. Switching
-        # re-dispatches through `_launch_tool`, which auto-configures OpenCode if
-        # it isn't set up yet and skips the selector on the second pass.
-        decision = _apply_budget_gate(
+        # Gate on the global daily budget before configuring/launching.
+        # Switching re-dispatches through `_launch_tool`, which auto-configures
+        # the target agent if needed and skips the selector on the second pass.
+        decision, target_tool, target_model = _apply_budget_gate(
             tool, offer_warn_selector=tool in BUDGET_TRACKED_AGENTS and explicit_model is None
         )
-        if decision == "opencode" and tool != "opencode":
-            return _launch_tool("opencode", ctx, explicit_model=_opencode_warn_model(state))
+        if decision == "switch" and target_tool:
+            return _launch_tool(target_tool, ctx, explicit_model=target_model)
         state, resolved_model = resolve_launch_model(tool, state, explicit_model)
         state = configure_tool(tool, state, resolved_model)
         display = TOOL_SPECS[tool]["display"]
@@ -943,25 +995,176 @@ def configure_tracing(
         raise typer.Exit(130) from None
 
 
+def _prompt_text(prompt: str, *, default: str | None = None) -> str:
+    suffix = f" [{default}]" if default else ""
+    while True:
+        raw = console.input(f"{prompt}{suffix} › ").strip()
+        if raw:
+            return raw
+        if default:
+            return default
+        print_err("Value cannot be empty.")
+
+
+def _prompt_float(
+    prompt: str,
+    *,
+    default: float | None = None,
+    minimum: float = 0.0,
+    maximum: float | None = None,
+) -> float:
+    suffix = f" [{default:g}]" if default is not None else ""
+    while True:
+        raw = console.input(f"{prompt}{suffix} › ").strip()
+        if not raw and default is not None:
+            return default
+        try:
+            value = float(raw)
+        except ValueError:
+            print_err("Please enter a valid number.")
+            continue
+        if value < minimum or (maximum is not None and value > maximum):
+            if maximum is None:
+                print_err(f"Please enter at least {minimum:g}.")
+            else:
+                print_err(f"Please enter a value from {minimum:g} to {maximum:g}.")
+            continue
+        return value
+
+
+def _prompt_int(prompt: str, *, default: int, minimum: int = 1) -> int:
+    while True:
+        value = _prompt_float(prompt, default=float(default), minimum=float(minimum))
+        if value.is_integer():
+            return int(value)
+        print_err("Please enter a whole number.")
+
+
+def _existing_policy_tiers(policy: dict | None) -> list[dict]:
+    root = policy.get("policy") if isinstance(policy, dict) else None
+    tiers = root.get("tiers") if isinstance(root, dict) else None
+    return [tier for tier in tiers if isinstance(tier, dict)] if isinstance(tiers, list) else []
+
+
+def _default_policy_tiers(state: dict) -> list[dict[str, object]]:
+    primary = state.get("default_agent")
+    if not isinstance(primary, str) or primary not in TOOL_SPECS:
+        available = state.get("available_tools") or []
+        primary = available[0] if available and available[0] in TOOL_SPECS else "claude"
+    primary_model = default_model_for_tool(primary, state) or ""
+    standard_model = primary_model
+    if primary == "claude":
+        claude_models = state.get("claude_models") or {}
+        if isinstance(claude_models, dict):
+            standard_model = str(claude_models.get("sonnet") or primary_model)
+    economy_harness = "opencode" if "opencode" in TOOL_SPECS else primary
+    economy_model = default_model_for_tool(economy_harness, state) or primary_model
+    return [
+        {
+            "name": "premium",
+            "activates_at_pct": 0.0,
+            "harness": primary,
+            "model": primary_model,
+        },
+        {
+            "name": "standard",
+            "activates_at_pct": 60.0,
+            "harness": primary,
+            "model": standard_model,
+        },
+        {
+            "name": "economy",
+            "activates_at_pct": 80.0,
+            "harness": economy_harness,
+            "model": economy_model,
+        },
+    ]
+
+
 def _run_budget_setup(workspace: str) -> None:
-    """Interactive "set the workspace's daily spend budget" flow.
-    used by both ucode setup and ucode setup budget subcommands."""
+    """Interactively author the workspace's ``policies.yaml``."""
     state = load_state()
-    policies = dict(state.get("policies") or {})
-    current_limit = policies.get("daily_limit_usd")
+    existing_policy = load_workspace_policy(workspace)
+    existing_root = existing_policy.get("policy") if isinstance(existing_policy, dict) else {}
+    if not isinstance(existing_root, dict):
+        existing_root = {}
 
     print_section("Budget")
     print_kv("Workspace", workspace)
+    current_limit = existing_root.get("daily_budget_usd")
     if isinstance(current_limit, (int, float)) and not isinstance(current_limit, bool):
         print_note(f"Current daily limit: ${float(current_limit):.2f}")
 
-    daily_limit = prompt_for_usd_amount("Daily budget in USD")
-    policies["daily_limit_usd"] = daily_limit
-    state["policies"] = policies
-    save_state(state)
+    daily_default = (
+        float(current_limit)
+        if isinstance(current_limit, (int, float)) and not isinstance(current_limit, bool)
+        else None
+    )
+    daily_limit = _prompt_float("Daily budget in USD", default=daily_default, minimum=0.01)
+    current_exhausted = existing_root.get("on_budget_exhausted")
+    exhausted_default = (
+        current_exhausted if isinstance(current_exhausted, str) and current_exhausted else "block"
+    )
+    exhausted = prompt_for_choice(
+        "At 100% of budget",
+        [(value, value) for value in sorted(VALID_ON_BUDGET_EXHAUSTED)],
+    )
+    if exhausted not in VALID_ON_BUDGET_EXHAUSTED:
+        exhausted = exhausted_default
+
+    defaults = _existing_policy_tiers(existing_policy) or _default_policy_tiers(state)
+    tier_count = _prompt_int("Number of tiers", default=len(defaults), minimum=1)
+    tiers: list[dict[str, object]] = []
+    harness_options = [(tool, TOOL_SPECS[tool]["display"]) for tool in TOOL_SPECS]
+    for index in range(tier_count):
+        default_tier = defaults[index] if index < len(defaults) else defaults[-1]
+        print_section(f"Tier {index + 1}")
+        if index == 0:
+            activates_at = 0.0
+            print_kv("Activates at", "0%")
+        else:
+            default_pct = default_tier.get("activates_at_pct")
+            if not isinstance(default_pct, (int, float)) or isinstance(default_pct, bool):
+                default_pct = 0.0
+            activates_at = _prompt_float(
+                "Activates at percent",
+                default=float(default_pct),
+                minimum=0,
+                maximum=100,
+            )
+        default_harness = str(default_tier.get("harness") or "claude")
+        print_note(
+            f"Default harness: {TOOL_SPECS.get(default_harness, {}).get('display', default_harness)}"
+        )
+        harness = prompt_for_choice("Harness", harness_options)
+        default_model = str(default_tier.get("model") or "")
+        model = _prompt_text("Model", default=default_model or None)
+        tiers.append(
+            {
+                "name": f"tier {index + 1}",
+                "activates_at_pct": activates_at,
+                "harness": harness,
+                "model": model,
+            }
+        )
+
+    policy = normalize_policy(
+        {
+            "policy": {
+                "name": DEFAULT_POLICY_NAME,
+                "daily_budget_usd": daily_limit,
+                "tiers": tiers,
+                "on_budget_exhausted": exhausted,
+            }
+        }
+    )
+    if policy is None:
+        raise RuntimeError("Policy is malformed. Check tier thresholds, harnesses, and models.")
+    save_workspace_policy(workspace, policy)
 
     print_kv("Daily limit", f"${daily_limit:.2f}")
-    print_success("Daily budget updated")
+    print_kv("Policy file", str(policy_cache_path(workspace)))
+    print_success("Budget policy updated")
 
 
 @setup_app.command("budget")
@@ -1238,7 +1441,15 @@ def export_cmd() -> None:
             print_kv("Destination", MANAGED_CONFIG_VOLUME_PATH)
             with spinner("Uploading state.json to Unity Catalog..."):
                 upload_managed_config(workspace, profile, tmp_path)
-            print_success(f"Config uploaded to {MANAGED_CONFIG_VOLUME_PATH}")
+            print_success(f"state.json uploaded to {MANAGED_CONFIG_VOLUME_PATH}")
+            policy_path = policy_cache_path(workspace)
+            if policy_path.is_file():
+                print_kv("Policy destination", MANAGED_POLICIES_VOLUME_PATH)
+                with spinner("Uploading policies.yaml to Unity Catalog..."):
+                    upload_managed_policies(workspace, profile, policy_path)
+                print_success(f"policies.yaml uploaded to {MANAGED_POLICIES_VOLUME_PATH}")
+            else:
+                print_note("No local policies.yaml found — run `ucode setup budget` to create one.")
         finally:
             tmp_path.unlink(missing_ok=True)
     except RuntimeError as exc:

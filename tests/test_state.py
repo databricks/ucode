@@ -17,9 +17,7 @@ from ucode.state import (
     load_state,
     mark_tool_managed,
     merge_managed_workspace,
-    resolve_policy_model,
     save_state,
-    select_model_for_policies,
     slice_state_for_export,
 )
 
@@ -153,7 +151,6 @@ class TestHydrateState:
         result = hydrate_state({})
         assert result == {
             "managed_configs": {},
-            "policies": {},
             "base_urls": {},
             "agents": {},
         }
@@ -220,181 +217,15 @@ class TestBuildAgentState:
 # ---------------------------------------------------------------------------
 
 
-class TestPolicies:
-    """Schema preservation + pure policy evaluation for the per-agent layout."""
-
-    _CLAUDE_POLICY = {
-        "spending_limit": {
-            "monthly_limit_usd": 300.0,
-            "start_date": "2026-06-03",
-        },
-        "default_model": "databricks-claude-sonnet-4-5",
-        "tier_2": {"usage_percent": 50.0, "model": "databricks-claude-sonnet-3-5"},
-        "tier_3": {"usage_percent": 90.0, "model": "databricks-claude-haiku-3-5"},
-    }
-
-    def test_policies_round_trip_through_save_and_load(self):
-        save_state({"workspace": FAKE_WS, "policies": {"claude": self._CLAUDE_POLICY}})
+class TestPoliciesRemovedFromState:
+    def test_save_and_load_strip_policies(self):
+        save_state({"workspace": FAKE_WS, "policies": {"daily_limit_usd": 50}})
         loaded = load_state()
-        assert loaded["policies"] == {"claude": self._CLAUDE_POLICY}
+        assert "policies" not in loaded
 
-    def test_hydrate_defaults_policies_to_empty_dict(self):
-        result = hydrate_state({"workspace": FAKE_WS})
-        assert result["policies"] == {}
-
-    def test_hydrate_drops_unknown_agent_keys(self):
-        result = hydrate_state(
-            {
-                "workspace": FAKE_WS,
-                "policies": {"not-an-agent": self._CLAUDE_POLICY},
-            }
-        )
-        assert result["policies"] == {}
-
-    def test_hydrate_keeps_global_daily_limit(self):
-        result = hydrate_state(
-            {
-                "workspace": FAKE_WS,
-                "policies": {"daily_limit_usd": 500, "claude": self._CLAUDE_POLICY},
-            }
-        )
-        assert result["policies"]["daily_limit_usd"] == 500.0
-        assert result["policies"]["claude"] == self._CLAUDE_POLICY
-
-    def test_hydrate_drops_invalid_global_daily_limit(self):
-        result = hydrate_state(
-            {
-                "workspace": FAKE_WS,
-                "policies": {"daily_limit_usd": "lots"},
-            }
-        )
-        assert result["policies"] == {}
-
-    def test_hydrate_drops_malformed_spending_limit(self):
-        # Bad monthly_limit_usd → spending_limit dropped, but valid sibling
-        # fields on the same agent (default_model) survive.
-        result = hydrate_state(
-            {
-                "workspace": FAKE_WS,
-                "policies": {
-                    "claude": {
-                        "spending_limit": {"monthly_limit_usd": "lots"},
-                        "default_model": "databricks-claude-sonnet-4-5",
-                    }
-                },
-            }
-        )
-        assert result["policies"] == {"claude": {"default_model": "databricks-claude-sonnet-4-5"}}
-
-    def test_hydrate_autofills_missing_start_date_with_today(self, monkeypatch):
-        monkeypatch.setattr("ucode.state._today_iso", lambda: "2026-06-03")
-        result = hydrate_state(
-            {
-                "workspace": FAKE_WS,
-                "policies": {"codex": {"spending_limit": {"monthly_limit_usd": 200}}},
-            }
-        )
-        assert result["policies"]["codex"]["spending_limit"] == {
-            "monthly_limit_usd": 200.0,
-            "start_date": "2026-06-03",
-        }
-
-    def test_select_model_returns_requested_with_no_policies(self):
-        assert (
-            select_model_for_policies(
-                {}, "claude", "databricks-claude-opus-4", current_spend_usd=9999.0
-            )
-            == "databricks-claude-opus-4"
-        )
-
-    def test_select_model_returns_default_under_tier_2_threshold(self):
-        # spend = $50 of $300 → 16.7% < tier_2.usage_percent(50%), use default.
-        assert (
-            select_model_for_policies(
-                {"policies": {"claude": self._CLAUDE_POLICY}},
-                "claude",
-                "databricks-claude-opus-4",
-                current_spend_usd=50.0,
-            )
-            == "databricks-claude-sonnet-4-5"
-        )
-
-    def test_select_model_returns_tier_2_at_threshold(self):
-        # spend = $150 of $300 = 50% → tier_2.
-        assert (
-            select_model_for_policies(
-                {"policies": {"claude": self._CLAUDE_POLICY}},
-                "claude",
-                "databricks-claude-opus-4",
-                current_spend_usd=150.0,
-            )
-            == "databricks-claude-sonnet-3-5"
-        )
-
-    def test_select_model_returns_tier_3_at_threshold(self):
-        # spend = $270 of $300 = 90% → tier_3 wins over tier_2.
-        assert (
-            select_model_for_policies(
-                {"policies": {"claude": self._CLAUDE_POLICY}},
-                "claude",
-                "databricks-claude-opus-4",
-                current_spend_usd=270.0,
-            )
-            == "databricks-claude-haiku-3-5"
-        )
-
-    def test_select_model_is_per_agent(self):
-        # codex has no policy entry → unaffected by claude's spending limit.
-        state = {"policies": {"claude": self._CLAUDE_POLICY}}
-        assert (
-            select_model_for_policies(state, "codex", "gpt-5", current_spend_usd=10_000.0)
-            == "gpt-5"
-        )
-
-    def test_select_model_skips_tiers_without_spending_limit(self):
-        # tier_2 configured but no spending_limit → no denominator → fall back
-        # to default_model regardless of spend.
-        state = {
-            "policies": {
-                "claude": {
-                    "default_model": "databricks-claude-sonnet-4-5",
-                    "tier_2": {
-                        "usage_percent": 50.0,
-                        "model": "databricks-claude-haiku-3-5",
-                    },
-                }
-            }
-        }
-        assert (
-            select_model_for_policies(
-                state, "claude", "databricks-claude-opus-4", current_spend_usd=10_000.0
-            )
-            == "databricks-claude-sonnet-4-5"
-        )
-
-
-class TestResolvePolicyModel:
-    """`resolve_policy_model` — the wrapper that callers (CLI, agents) use.
-
-    Verifies it threads the workspace-scoped spend stub into
-    ``select_model_for_policies`` and surfaces the admin-pinned default.
-    """
-
-    def test_returns_admin_default_when_pinned(self):
-        state = {
-            "workspace": FAKE_WS,
-            "policies": {"claude": {"default_model": "admin-pinned"}},
-        }
-        assert resolve_policy_model(state, "claude", "user-requested") == "admin-pinned"
-
-    def test_returns_requested_when_no_policy(self):
-        state = {"workspace": FAKE_WS}
-        assert resolve_policy_model(state, "claude", "user-requested") == "user-requested"
-
-    def test_returns_requested_when_no_workspace(self):
-        # No workspace means no spend lookup, but absent policies still falls
-        # straight through to the requested model.
-        assert resolve_policy_model({}, "claude", "user-requested") == "user-requested"
+    def test_hydrate_strips_policies(self):
+        result = hydrate_state({"workspace": FAKE_WS, "policies": {"daily_limit_usd": 50}})
+        assert "policies" not in result
 
 
 class TestSliceStateForExport:
@@ -418,7 +249,7 @@ class TestSliceStateForExport:
         assert sliced["workspace"] == FAKE_WS
         assert sliced["state_version"] == 3
         assert sliced["claude_models"] == {"opus": "o4"}
-        assert sliced["policies"] == {"claude": {"default_model": "haiku"}}
+        assert "policies" not in sliced
         assert "workspaces" not in sliced
         assert "current_workspace" not in sliced
 
@@ -468,9 +299,10 @@ class TestSliceStateForExport:
         # resolve their own from the workspace URL, so it must not be published.
         assert "profile" not in sliced
         for key, value in block.items():
-            if key == "profile":
+            if key in {"profile", "policies"}:
                 continue
             assert sliced[key] == value
+        assert "policies" not in sliced
         assert sliced["state_version"] == 3
 
     def test_strips_admin_tracking_uri_from_tracing_block(self):
@@ -518,7 +350,8 @@ class TestMergeManagedWorkspace:
         }
         merged = merge_managed_workspace(local, remote)
         # Every field in remote replaces local — even per-machine ones.
-        assert merged == {**remote, "workspace": FAKE_WS}
+        expected = {k: v for k, v in remote.items() if k != "policies"}
+        assert merged == {**expected, "workspace": FAKE_WS}
 
     def test_accepts_workspace_less_remote_blob(self):
         local = {"workspace": FAKE_WS, "profile": "user-local-profile"}

@@ -321,13 +321,17 @@ def prompt_for_default_agent(available: list[tuple[str, str]]) -> str:
             )
 
 
-def prompt_budget_warn_choice(*, default_agent_display: str) -> str | None:
+def prompt_budget_warn_choice(
+    *,
+    default_agent_display: str,
+    switch_display: str | None = None,
+) -> str | None:
     """Selector shown when the global daily budget is nearing its limit.
 
     Returns ``"default"`` (continue with the agent being launched) or
-    ``"opencode"`` (switch to the untracked OpenCode harness), or ``None`` if the
-    user aborts (Ctrl-C / ESC). Stays state-agnostic: the caller passes the
-    default agent's display name to label the first option."""
+    ``"switch"`` (switch to the policy-recommended tier), or ``None`` if the
+    user aborts (Ctrl-C / ESC). Stays state-agnostic: the caller passes display
+    labels for the available choices."""
     style = questionary.Style(
         [
             ("highlighted", "fg:cyan bold"),
@@ -337,8 +341,9 @@ def prompt_budget_warn_choice(*, default_agent_display: str) -> str | None:
     )
     choices = [
         questionary.Choice(title=f"Continue with {default_agent_display}", value="default"),
-        questionary.Choice(title="Switch to OpenCode", value="opencode"),
     ]
+    if switch_display:
+        choices.append(questionary.Choice(title=f"Switch to {switch_display}", value="switch"))
     return questionary.select(
         "Daily budget is nearing its limit — how would you like to continue?",
         choices=choices,
@@ -349,17 +354,27 @@ def prompt_budget_warn_choice(*, default_agent_display: str) -> str | None:
 
 
 def prompt_for_choice(prompt: str, options: list[tuple[str, str]]) -> str:
-    console.print()
-    for index, (_, option_label) in enumerate(options, start=1):
-        console.print(f"  [bold]{index}.[/bold] [cyan]{option_label}[/cyan]")
-
-    while True:
-        raw_value = console.input(f"{label(prompt)} {muted('›')} ").strip()
-        if raw_value.isdigit():
-            selected_index = int(raw_value)
-            if 1 <= selected_index <= len(options):
-                return options[selected_index - 1][0]
-        print_err("Please enter a valid option number.")
+    style = questionary.Style(
+        [
+            ("highlighted", "fg:cyan bold"),
+            ("pointer", "fg:cyan bold"),
+            ("answer", "fg:cyan"),
+        ]
+    )
+    choices = [
+        questionary.Choice(title=option_label, value=option_id)
+        for option_id, option_label in options
+    ]
+    answer = questionary.select(
+        prompt,
+        choices=choices,
+        style=style,
+        pointer="›",
+        qmark="",
+    ).ask()
+    if answer is None:
+        raise KeyboardInterrupt
+    return str(answer)
 
 
 def prompt_for_client_id() -> str:

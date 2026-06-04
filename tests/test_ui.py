@@ -11,6 +11,7 @@ from ucode.ui import (
     format_duration,
     format_token_count,
     normalize_workspace_url,
+    prompt_for_choice,
     prompt_for_workspace,
     render_box_table,
     status_badge,
@@ -192,3 +193,23 @@ class TestPromptForWorkspace:
             url, profile = prompt_for_workspace("desc", profiles=None)
         assert url == "https://example.databricks.com"
         assert profile is None
+
+
+class TestPromptForChoice:
+    def test_uses_select_and_returns_choice_value(self):
+        captured = {}
+
+        with patch("ucode.ui.questionary.select") as mock_select:
+            mock_select.return_value.ask.return_value = "block"
+            answer = prompt_for_choice("At 100% of budget", [("block", "block"), ("warn", "warn")])
+            captured["choices"] = mock_select.call_args.kwargs["choices"]
+
+        assert answer == "block"
+        assert [choice.value for choice in captured["choices"]] == ["block", "warn"]
+        assert [choice.title for choice in captured["choices"]] == ["block", "warn"]
+
+    def test_cancel_raises_keyboard_interrupt(self):
+        with patch("ucode.ui.questionary.select") as mock_select:
+            mock_select.return_value.ask.return_value = None
+            with pytest.raises(KeyboardInterrupt):
+                prompt_for_choice("Harness", [("claude", "Claude Code")])

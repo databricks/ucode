@@ -178,24 +178,34 @@ class TestResolveLaunchModel:
         with pytest.raises(RuntimeError, match="No models available"):
             resolve_launch_model("claude", {}, None)
 
-    def test_admin_default_model_policy_overrides_per_tool_default(self):
+    def test_admin_default_model_policy_overrides_per_tool_default(self, monkeypatch):
         state = {
             "workspace": "https://example.cloud.databricks.com",
             "claude_models": {"sonnet": "s4"},
-            "policies": {"claude": {"default_model": "admin-pinned-claude"}},
         }
+        monkeypatch.setattr(
+            "ucode.agents.resolve_policy_default_model",
+            lambda state, tool, model: "admin-pinned-claude",
+        )
         _, model = resolve_launch_model("claude", state, None)
         assert model == "admin-pinned-claude"
 
-    def test_policy_does_not_override_other_tools(self):
-        # codex has no policy entry -> unaffected by claude's pinned default.
+    def test_policy_does_not_override_explicit_model(self, monkeypatch):
         state = {
             "workspace": "https://example.cloud.databricks.com",
-            "codex_models": ["c1"],
-            "policies": {"claude": {"default_model": "admin-pinned-claude"}},
+            "claude_models": {"sonnet": "s4"},
         }
-        _, model = resolve_launch_model("codex", state, None)
-        assert model == "c1"
+        called = False
+
+        def policy_default(_state, _tool, _model):
+            nonlocal called
+            called = True
+            return "admin-pinned-claude"
+
+        monkeypatch.setattr("ucode.agents.resolve_policy_default_model", policy_default)
+        _, model = resolve_launch_model("claude", state, "user-model")
+        assert model == "user-model"
+        assert called is False
 
 
 class TestInstallToolBinary:

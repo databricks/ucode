@@ -53,12 +53,17 @@ MANAGED_CONFIG_CATALOG = "ai_gateway"
 MANAGED_CONFIG_SCHEMA = "default"
 MANAGED_CONFIG_VOLUME = "ucode_config"
 MANAGED_CONFIG_FILENAME = "state.json"
+MANAGED_POLICIES_FILENAME = "policies.yaml"
 MANAGED_CONFIG_VOLUME_FULL_NAME = (
     f"{MANAGED_CONFIG_CATALOG}.{MANAGED_CONFIG_SCHEMA}.{MANAGED_CONFIG_VOLUME}"
 )
 MANAGED_CONFIG_VOLUME_PATH = (
     f"dbfs:/Volumes/{MANAGED_CONFIG_CATALOG}/{MANAGED_CONFIG_SCHEMA}"
     f"/{MANAGED_CONFIG_VOLUME}/{MANAGED_CONFIG_FILENAME}"
+)
+MANAGED_POLICIES_VOLUME_PATH = (
+    f"dbfs:/Volumes/{MANAGED_CONFIG_CATALOG}/{MANAGED_CONFIG_SCHEMA}"
+    f"/{MANAGED_CONFIG_VOLUME}/{MANAGED_POLICIES_FILENAME}"
 )
 MANAGED_CONFIG_READ_PRINCIPAL = "account users"
 
@@ -1150,12 +1155,16 @@ def _ensure_managed_config_volume(workspace: str, profile: str | None) -> None:
         _grant_managed_config_read_access(workspace, profile)
 
 
-def upload_managed_config(workspace: str, profile: str | None, state_file: Path) -> None:
-    """Publish local state.json to the UC managed-config volume."""
-    if not state_file.is_file():
+def upload_managed_file(
+    workspace: str,
+    profile: str | None,
+    local_file: Path,
+    destination_path: str,
+) -> None:
+    """Publish a local file to the UC managed-config volume."""
+    if not local_file.is_file():
         raise RuntimeError(
-            f"No local state file to upload at {state_file}. "
-            "Run `ucode configure` first to create one."
+            f"No local file to upload at {local_file}. Run `ucode configure` first to create one."
         )
 
     _ensure_managed_config_volume(workspace, profile)
@@ -1165,8 +1174,8 @@ def upload_managed_config(workspace: str, profile: str | None, state_file: Path)
         "databricks",
         "fs",
         "cp",
-        str(state_file),
-        MANAGED_CONFIG_VOLUME_PATH,
+        str(local_file),
+        destination_path,
         "--overwrite",
         *_profile_args(profile),
     ]
@@ -1184,17 +1193,39 @@ def upload_managed_config(workspace: str, profile: str | None, state_file: Path)
     except subprocess.CalledProcessError as exc:
         stderr = (exc.stderr or "").strip()
         detail = f": {stderr}" if stderr else ""
-        raise RuntimeError(
-            f"Failed to upload {state_file} to {MANAGED_CONFIG_VOLUME_PATH}{detail}"
-        ) from exc
+        raise RuntimeError(f"Failed to upload {local_file} to {destination_path}{detail}") from exc
     except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"Timed out uploading {local_file} to {destination_path}.") from exc
+
+
+def upload_managed_config(workspace: str, profile: str | None, state_file: Path) -> None:
+    """Publish local state.json to the UC managed-config volume."""
+    if not state_file.is_file():
         raise RuntimeError(
-            f"Timed out uploading {state_file} to {MANAGED_CONFIG_VOLUME_PATH}."
-        ) from exc
+            f"No local state file to upload at {state_file}. "
+            "Run `ucode configure` first to create one."
+        )
+    upload_managed_file(workspace, profile, state_file, MANAGED_CONFIG_VOLUME_PATH)
 
 
-def download_managed_config(workspace: str, profile: str | None) -> dict | None:
-    """Fetch the published ``state.json`` from the managed-config UC volume."""
+def upload_managed_policies(workspace: str, profile: str | None, policy_file: Path) -> None:
+    """Publish local policies.yaml to the UC managed-config volume."""
+    if not policy_file.is_file():
+        raise RuntimeError(
+            f"No local policies.yaml to upload at {policy_file}. "
+            "Run `ucode setup budget` first to create one."
+        )
+    upload_managed_file(workspace, profile, policy_file, MANAGED_POLICIES_VOLUME_PATH)
+
+
+def download_managed_text(
+    workspace: str,
+    profile: str | None,
+    source_path: str,
+    *,
+    debug_label: str,
+) -> str | None:
+    """Fetch a text file from the UC managed-config volume."""
     env = build_databricks_cli_env(workspace, profile)
     try:
         result = run(
@@ -1202,7 +1233,7 @@ def download_managed_config(workspace: str, profile: str | None) -> dict | None:
                 "databricks",
                 "fs",
                 "cat",
-                MANAGED_CONFIG_VOLUME_PATH,
+                source_path,
                 *_profile_args(profile),
             ],
             check=False,
@@ -1212,15 +1243,28 @@ def download_managed_config(workspace: str, profile: str | None) -> dict | None:
             timeout=30,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        _debug("download_managed_config.exec_failed", repr(exc))
+        _debug(f"{debug_label}.exec_failed", repr(exc))
         return None
 
     if result.returncode != 0:
-        _debug("download_managed_config.nonzero", _format_subprocess_result(result))
+        _debug(f"{debug_label}.nonzero", _format_subprocess_result(result))
+        return None
+    return result.stdout
+
+
+def download_managed_config(workspace: str, profile: str | None) -> dict | None:
+    """Fetch the published ``state.json`` from the managed-config UC volume."""
+    text = download_managed_text(
+        workspace,
+        profile,
+        MANAGED_CONFIG_VOLUME_PATH,
+        debug_label="download_managed_config",
+    )
+    if text is None:
         return None
 
     try:
-        payload = json.loads(result.stdout)
+        payload = json.loads(text)
     except json.JSONDecodeError as exc:
         _debug("download_managed_config.bad_json", repr(exc))
         return None
@@ -1229,6 +1273,16 @@ def download_managed_config(workspace: str, profile: str | None) -> dict | None:
         _debug("download_managed_config.not_dict", type(payload).__name__)
         return None
     return payload
+
+
+def download_managed_policies(workspace: str, profile: str | None) -> str | None:
+    """Fetch the published ``policies.yaml`` from the managed-config UC volume."""
+    return download_managed_text(
+        workspace,
+        profile,
+        MANAGED_POLICIES_VOLUME_PATH,
+        debug_label="download_managed_policies",
+    )
 
 
 def build_auth_shell_command(workspace: str, profile: str | None = None) -> str:
