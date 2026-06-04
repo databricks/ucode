@@ -318,7 +318,9 @@ def get_current_user_name(workspace: str, token: str) -> str | None:
                 return entry["value"].strip()
     return None
 
+
 WORKSPACE_ADMIN_GROUP = "admins"
+
 
 def is_workspace_admin(workspace: str, token: str) -> bool | None:
     """Return True if the current user is in the workspace ``admins`` group."""
@@ -990,16 +992,30 @@ def list_databricks_apps(workspace: str, profile: str | None = None) -> list[dic
         raise RuntimeError("Databricks apps listing returned invalid JSON.") from exc
 
 
+def _uc_object_exists(probe_cmd: list[str], env: dict[str, str]) -> bool:
+    """Return True if a `databricks <object> get/read` probe succeeds."""
+    result = run(
+        probe_cmd,
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
+    )
+    return result.returncode == 0
+
+
 def _run_idempotent_create(
     cmd: list[str],
     env: dict[str, str],
     *,
     label: str,
     required_permission: str,
+    exists_probe: list[str] | None = None,
 ) -> bool:
-    """Run a `databricks <object> create` command and treat 'already exists'
-    as success. Any other non-zero exit surfaces an actionable error that
-    names the specific UC permission the admin needs."""
+    """Ensure a UC object exists, returning True iff this call created it."""
+    if exists_probe is not None and _uc_object_exists(exists_probe, env):
+        return False
     result = run(
         cmd,
         check=False,
@@ -1077,6 +1093,13 @@ def _ensure_managed_config_volume(workspace: str, profile: str | None) -> None:
         env,
         label=f"UC catalog `{MANAGED_CONFIG_CATALOG}`",
         required_permission="CREATE CATALOG on the metastore (typically the metastore admin role)",
+        exists_probe=[
+            "databricks",
+            "catalogs",
+            "get",
+            MANAGED_CONFIG_CATALOG,
+            *profile_args,
+        ],
     )
     _run_idempotent_create(
         [
@@ -1090,6 +1113,13 @@ def _ensure_managed_config_volume(workspace: str, profile: str | None) -> None:
         env,
         label=f"UC schema `{MANAGED_CONFIG_CATALOG}.{MANAGED_CONFIG_SCHEMA}`",
         required_permission=f"CREATE SCHEMA on catalog `{MANAGED_CONFIG_CATALOG}`",
+        exists_probe=[
+            "databricks",
+            "schemas",
+            "get",
+            f"{MANAGED_CONFIG_CATALOG}.{MANAGED_CONFIG_SCHEMA}",
+            *profile_args,
+        ],
     )
     volume_was_created = _run_idempotent_create(
         [
@@ -1107,6 +1137,13 @@ def _ensure_managed_config_volume(workspace: str, profile: str | None) -> None:
         required_permission=(
             f"CREATE VOLUME on schema `{MANAGED_CONFIG_CATALOG}.{MANAGED_CONFIG_SCHEMA}`"
         ),
+        exists_probe=[
+            "databricks",
+            "volumes",
+            "read",
+            MANAGED_CONFIG_VOLUME_FULL_NAME,
+            *profile_args,
+        ],
     )
 
     if volume_was_created:

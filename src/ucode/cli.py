@@ -1131,9 +1131,7 @@ def setup_cmd(ctx: typer.Context) -> None:
             )
             post_configure_state["default_agent"] = default_agent
             save_state(post_configure_state)
-            print_success(
-                f"Default agent set to {TOOL_SPECS[default_agent]['display']}"
-            )
+            print_success(f"Default agent set to {TOOL_SPECS[default_agent]['display']}")
 
         if prompt_yes_no("Set up MLflow tracing for this workspace?"):
             configure_tracing_command()

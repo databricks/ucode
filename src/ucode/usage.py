@@ -804,7 +804,9 @@ def local_budget_status(
     limit_usd = local_daily_agent_budget_usd()
     warn_at = LOCAL_BUDGET_WARN_AT
     totals = query_local_budget_totals(days=days, db_path=db_path)
-    display_totals = query_local_budget_totals(days=days, tool=tool, db_path=db_path) if tool else totals
+    display_totals = (
+        query_local_budget_totals(days=days, tool=tool, db_path=db_path) if tool else totals
+    )
     spend_usd = _coerce_cost(totals.get("cost_usd"))
     warn_usd = limit_usd * warn_at
     if spend_usd >= limit_usd:
@@ -857,7 +859,9 @@ def format_local_budget_status(status: dict[str, object]) -> str:
     remaining_usd = _coerce_cost(status.get("remaining_usd"))
     tokens = _coerce_token_count(status.get("total_tokens"))
     budget_line = _budget_line(spend_usd, limit_usd)
-    token_subject = f"{display_tool} tokens used today" if status.get("tool") else "Tokens used today"
+    token_subject = (
+        f"{display_tool} tokens used today" if status.get("tool") else "Tokens used today"
+    )
     tokens_line = f"{token_subject}: {format_token_count(tokens)}."
     if state == "exceeded":
         return (

@@ -728,8 +728,15 @@ class TestLocalUsageLedger:
         claude_status = local_budget_status("claude", db_path)
         total_status = local_budget_status(db_path=db_path)
         # 18M tokens * $1.25/1M = $22.50 across both tools, over the $20 cap.
-        assert codex_status["spend_usd"] == claude_status["spend_usd"] == total_status["spend_usd"] == 22.5
-        assert codex_status["state"] == claude_status["state"] == total_status["state"] == "exceeded"
+        assert (
+            codex_status["spend_usd"]
+            == claude_status["spend_usd"]
+            == total_status["spend_usd"]
+            == 22.5
+        )
+        assert (
+            codex_status["state"] == claude_status["state"] == total_status["state"] == "exceeded"
+        )
         assert codex_status["total_tokens"] == 10_000_000
         assert codex_status["sessions"] == 1
         assert claude_status["total_tokens"] == 8_000_000

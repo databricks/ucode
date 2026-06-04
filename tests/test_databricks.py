@@ -609,23 +609,45 @@ class TestUploadManagedConfig:
         monkeypatch.setattr(db_mod, "run", fake_run)
         return calls
 
-    def test_runs_catalog_schema_volume_grant_then_fs_cp(self, monkeypatch, tmp_path):
+    def test_first_time_setup_creates_everything_and_grants(self, monkeypatch, tmp_path):
+        """When nothing exists yet (all three probes 404), we fall through to
+        create catalog → schema → volume, then grant READ_VOLUME, then upload."""
         state_file = tmp_path / "state.json"
         state_file.write_text('{"workspace": "https://example.databricks.com"}\n')
-        calls = self._record_calls(monkeypatch)
+        calls = self._record_calls(
+            monkeypatch,
+            side_effects=[
+                (1, "Error: Catalog 'ai_gateway' does not exist"),
+                (0, ""),
+                (1, "Error: Schema 'ai_gateway.default' does not exist"),
+                (0, ""),
+                (1, "Error: Volume 'ai_gateway.default.ucode_config' does not exist"),
+                (0, ""),
+                (0, ""),
+                (0, ""),
+            ],
+        )
 
         upload_managed_config(WS, None, state_file)
 
-        assert len(calls) == 5
-        assert calls[0][:4] == ["databricks", "catalogs", "create", "ai_gateway"]
-        assert calls[1][:5] == [
+        assert len(calls) == 8
+        assert calls[0][:4] == ["databricks", "catalogs", "get", "ai_gateway"]
+        assert calls[1][:4] == ["databricks", "catalogs", "create", "ai_gateway"]
+        assert calls[2][:4] == ["databricks", "schemas", "get", "ai_gateway.default"]
+        assert calls[3][:5] == [
             "databricks",
             "schemas",
             "create",
             "default",
             "ai_gateway",
         ]
-        assert calls[2][:7] == [
+        assert calls[4][:4] == [
+            "databricks",
+            "volumes",
+            "read",
+            "ai_gateway.default.ucode_config",
+        ]
+        assert calls[5][:7] == [
             "databricks",
             "volumes",
             "create",
@@ -634,18 +656,18 @@ class TestUploadManagedConfig:
             "ucode_config",
             "MANAGED",
         ]
-        assert calls[3][:5] == [
+        assert calls[6][:5] == [
             "databricks",
             "grants",
             "update",
             "volume",
             "ai_gateway.default.ucode_config",
         ]
-        grant_json_idx = calls[3].index("--json") + 1
-        assert json.loads(calls[3][grant_json_idx]) == {
+        grant_json_idx = calls[6].index("--json") + 1
+        assert json.loads(calls[6][grant_json_idx]) == {
             "changes": [{"principal": "account users", "add": ["READ_VOLUME"]}]
         }
-        assert calls[4] == [
+        assert calls[7] == [
             "databricks",
             "fs",
             "cp",
@@ -654,14 +676,39 @@ class TestUploadManagedConfig:
             "--overwrite",
         ]
 
-    def test_treats_already_exists_at_every_create_level_as_success(self, monkeypatch, tmp_path):
+    def test_skips_creates_when_objects_already_exist(self, monkeypatch, tmp_path):
+        state_file = tmp_path / "state.json"
+        state_file.write_text("{}\n")
+        calls = self._record_calls(monkeypatch)
+
+        upload_managed_config(WS, None, state_file)
+
+        assert len(calls) == 4
+        assert calls[0][:4] == ["databricks", "catalogs", "get", "ai_gateway"]
+        assert calls[1][:4] == ["databricks", "schemas", "get", "ai_gateway.default"]
+        assert calls[2][:4] == [
+            "databricks",
+            "volumes",
+            "read",
+            "ai_gateway.default.ucode_config",
+        ]
+        assert calls[3][:3] == ["databricks", "fs", "cp"]
+
+    def test_treats_already_exists_race_at_every_create_level_as_success(
+        self, monkeypatch, tmp_path
+    ):
+        """Probe says 'missing' but `create` then loses a race with another
+        admin and reports 'already exists' — we should still treat as success."""
         state_file = tmp_path / "state.json"
         state_file.write_text("{}\n")
         calls = self._record_calls(
             monkeypatch,
             side_effects=[
+                (1, "not found"),
                 (1, "Error: Catalog 'ai_gateway' already exists"),
+                (1, "not found"),
                 (1, "Error: Schema 'ai_gateway.default' already exists"),
+                (1, "not found"),
                 (1, "Error: Volume 'ai_gateway.default.ucode_config' already exists"),
                 (0, ""),
             ],
@@ -669,8 +716,8 @@ class TestUploadManagedConfig:
 
         upload_managed_config(WS, None, state_file)
 
-        assert len(calls) == 4
-        assert calls[3][:3] == ["databricks", "fs", "cp"]
+        assert len(calls) == 7
+        assert calls[6][:3] == ["databricks", "fs", "cp"]
 
     def test_passes_profile_to_all_calls(self, monkeypatch, tmp_path):
         state_file = tmp_path / "state.json"
@@ -694,6 +741,7 @@ class TestUploadManagedConfig:
         self._record_calls(
             monkeypatch,
             side_effects=[
+                (1, "Error: catalog not found"),
                 (1, "PERMISSION_DENIED: user does not have CREATE CATALOG"),
             ],
         )
@@ -708,6 +756,7 @@ class TestUploadManagedConfig:
             monkeypatch,
             side_effects=[
                 (0, ""),
+                (1, "Error: schema not found"),
                 (1, "PERMISSION_DENIED: user does not have CREATE SCHEMA"),
             ],
         )
@@ -723,6 +772,7 @@ class TestUploadManagedConfig:
             side_effects=[
                 (0, ""),
                 (0, ""),
+                (1, "Error: volume not found"),
                 (1, "PERMISSION_DENIED: user does not have CREATE VOLUME"),
             ],
         )
@@ -738,6 +788,7 @@ class TestUploadManagedConfig:
             side_effects=[
                 (0, ""),
                 (0, ""),
+                (1, "Error: volume not found"),
                 (0, ""),
                 (1, "PERMISSION_DENIED: user does not have MANAGE on volume"),
             ],
@@ -755,7 +806,9 @@ class TestUploadManagedConfig:
 
         def fake_run(args, **kwargs):
             call_count["n"] += 1
-            if call_count["n"] < 5:
+            # 3 successful probes (catalog/schema/volume get) precede fs cp,
+            # so fs cp is the 4th call.
+            if call_count["n"] < 4:
                 return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
             raise subprocess.CalledProcessError(
                 returncode=1,

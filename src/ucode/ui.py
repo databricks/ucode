@@ -317,8 +317,7 @@ def prompt_for_default_agent(available: list[tuple[str, str]]) -> str:
             print_err("You must select exactly one default agent. Try again.")
         else:
             print_err(
-                f"You selected {len(picks)} agents; the default must be exactly one. "
-                "Try again."
+                f"You selected {len(picks)} agents; the default must be exactly one. Try again."
             )
 
 
