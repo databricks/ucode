@@ -16,6 +16,9 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import cast
 
+from rich.panel import Panel
+from rich.text import Text
+
 from ucode.config_io import APP_DIR
 from ucode.databricks import (
     discover_sql_warehouse_http_path,
@@ -26,7 +29,6 @@ from ucode.databricks import (
 from ucode.state import load_state
 from ucode.ui import (
     console,
-    err_console,
     format_duration,
     format_token_count,
     heading,
@@ -359,7 +361,7 @@ def local_daily_agent_budget_usd(tool: str | None = None) -> float:
 
     Resolution order: the ``UCODE_USAGE_DAILY_BUDGET_USD`` env override, then
     ``daily_limit_usd`` from the workspace state, then a ``$500/day`` default
-    (with a warning) when no policy is configured.
+    when no policy is configured.
     """
     env_override = os.environ.get(ENV_DAILY_BUDGET_USD)
     if env_override is not None and env_override.strip():
@@ -367,11 +369,6 @@ def local_daily_agent_budget_usd(tool: str | None = None) -> float:
     daily_limit = _state_daily_limit_usd(tool) if tool else None
     if daily_limit is not None:
         return daily_limit
-    if tool:
-        err_console.print(
-            f"[bold yellow]![/bold yellow] No spending limit configured for '{tool}' in "
-            f"state.json; falling back to a ${DEFAULT_DAILY_BUDGET_USD:.0f}/day budget."
-        )
     return DEFAULT_DAILY_BUDGET_USD
 
 
@@ -880,6 +877,68 @@ def format_local_budget_status(status: dict[str, object]) -> str:
         f"[UCODE USAGE BUDGET] {display_tool}. "
         f"{budget_line} Remaining: ${remaining_usd:.2f}. Window: {days} day(s). "
         f"{tokens_line}"
+    )
+
+
+_BUDGET_STATE_STYLE: dict[str, str] = {"ok": "green", "warn": "yellow", "exceeded": "red"}
+
+
+def _budget_state_color(state: str) -> str:
+    return _BUDGET_STATE_STYLE.get(state, "green")
+
+
+def _budget_bar_markup(percent: int, color: str, *, width: int = 28) -> str:
+    """A Rich-markup fill bar colored by budget state. The filled portion uses
+    the state color; the remainder is dimmed."""
+    capped = min(max(percent, 0), 100)
+    filled = min(max((capped * width + 50) // 100, 0), width)
+    # When spend is over the limit the bar is full and red regardless of cap.
+    return f"[{color}]{'█' * filled}[/{color}][dim]{'░' * (width - filled)}[/dim]"
+
+
+def _budget_header_line(state: str, display_tool: str) -> str | None:
+    """The status callout shown above the bar for non-ok states."""
+    if state == "exceeded":
+        return f"[bold red]⛔ {display_tool} daily budget exceeded[/bold red]"
+    if state == "warn":
+        return f"[bold yellow]⚠️  {display_tool} is nearing its daily budget[/bold yellow]"
+    return None
+
+
+def render_local_budget_panel(status: dict[str, object]) -> Panel:
+    """Render a budget status as a bordered Rich panel with a color-coded fill
+    bar. Used by `ucode usage budget-status` and the launch budget summary."""
+    state = str(status.get("state") or "ok")
+    tool = str(status.get("tool") or "agent")
+    display_tool = tool[:1].upper() + tool[1:] if tool else "Agent"
+    spend_usd = _coerce_cost(status.get("spend_usd"))
+    limit_usd = _coerce_cost(status.get("limit_usd"))
+    remaining_usd = _coerce_cost(status.get("remaining_usd"))
+    tokens = _coerce_token_count(status.get("total_tokens"))
+    sessions = _coerce_token_count(status.get("sessions"))
+    percent = _budget_usage_percent(spend_usd, limit_usd)
+    color = _budget_state_color(state)
+
+    lines: list[str] = []
+    header = _budget_header_line(state, display_tool)
+    if header:
+        lines.append(header)
+        lines.append("")
+    lines.append(
+        f"[bold]${spend_usd:,.2f}[/bold] / ${limit_usd:,.2f}    [{color}]{percent}% used[/{color}]"
+    )
+    lines.append(_budget_bar_markup(percent, color))
+    lines.append("")
+    lines.append(f"[bold]Remaining[/bold]   ${remaining_usd:,.2f}")
+    lines.append(f"[bold]Tokens[/bold]      {format_token_count(tokens)}")
+    lines.append(f"[bold]Sessions[/bold]    {sessions}")
+
+    return Panel(
+        Text.from_markup("\n".join(lines)),
+        title=Text(f"{display_tool} · Daily Budget", style=f"bold {color}"),
+        border_style=color,
+        expand=False,
+        padding=(1, 2),
     )
 
 

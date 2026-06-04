@@ -74,7 +74,6 @@ from ucode.ui import (
     print_success,
     prompt_for_tools,
     prompt_for_workspace,
-    render_error_panel,
     spinner,
     status_badge,
 )
@@ -85,6 +84,7 @@ from ucode.usage import (
     local_budget_status,
     record_local_usage_delta,
     record_local_usage_snapshot,
+    render_local_budget_panel,
 )
 from ucode.usage import (
     local_usage as local_usage_report,
@@ -99,6 +99,9 @@ _DISCOVERY_CONSUMERS: dict[str, tuple[str, ...]] = {
     "codex": ("codex", "copilot", "pi"),
     "gemini": ("gemini", "opencode", "pi"),
 }
+
+# Agents that record local spend and therefore have a daily budget to report.
+BUDGET_TRACKED_AGENTS: tuple[str, ...] = ("claude", "codex")
 
 
 def _print_discovery_diagnostics(state: dict) -> None:
@@ -708,7 +711,7 @@ def _launch_tool(tool_name: str, ctx: typer.Context) -> None:
         state, resolved_model = resolve_launch_model(tool, state, None)
         state = configure_tool(tool, state, resolved_model)
         display = TOOL_SPECS[tool]["display"]
-        if tool in {"claude", "codex"}:
+        if tool in BUDGET_TRACKED_AGENTS:
             budget_status = local_budget_status(tool)
             console.print(
                 _render_launch_panel(
@@ -1064,15 +1067,15 @@ def usage_record_cmd(
 
 @usage_app.command("budget-status")
 def usage_budget_status_cmd(
-    agent: Annotated[str, typer.Option("--agent", help="Agent name, e.g. claude or codex.")],
+    agent: Annotated[
+        str | None,
+        typer.Option("--agent", help="Agent name, e.g. claude or codex. Omit to show all."),
+    ] = None,
 ) -> None:
     """Show the current local spend budget state."""
-    status_obj = local_budget_status(agent)
-    message = format_local_budget_status(status_obj)
-    if status_obj.get("state") == "exceeded":
-        console.print(render_error_panel(message))
-    else:
-        console.print(message)
+    agents = [agent] if agent else list(BUDGET_TRACKED_AGENTS)
+    for tool in agents:
+        console.print(render_local_budget_panel(local_budget_status(tool)))
 
 
 @usage_app.command("budget-check")

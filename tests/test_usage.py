@@ -30,6 +30,7 @@ from ucode.usage import (
     query_local_usage_totals,
     record_local_usage_delta,
     record_local_usage_snapshot,
+    render_local_budget_panel,
     render_local_usage_summary,
     render_usage_summary,
     simplify_model_name,
@@ -739,6 +740,57 @@ class TestLocalUsageLedger:
 
         totals = query_local_budget_totals(tool="claude", db_path=db_path)
         assert totals["cost_usd"] == 7.5
+
+
+class TestRenderLocalBudgetPanel:
+    def _render(self, panel) -> str:
+        from rich.console import Console
+
+        console = Console(width=80, no_color=True)
+        with console.capture() as capture:
+            console.print(panel)
+        return capture.get()
+
+    def _status(self, state: str, spend: float, limit: float) -> dict:
+        return {
+            "configured": True,
+            "state": state,
+            "tool": "codex",
+            "limit_usd": limit,
+            "spend_usd": spend,
+            "remaining_usd": max(limit - spend, 0.0),
+            "days": 1,
+            "total_tokens": 1_200_000,
+            "sessions": 8,
+        }
+
+    def test_ok_state_has_no_callout(self):
+        text = self._render(render_local_budget_panel(self._status("ok", 120.0, 500.0)))
+        assert "Codex · Daily Budget" in text
+        assert "$120.00 / $500.00" in text
+        assert "24% used" in text
+        assert "Remaining" in text and "$380.00" in text
+        assert "exceeded" not in text
+        assert "nearing" not in text
+
+    def test_warn_state_shows_nearing_callout(self):
+        text = self._render(render_local_budget_panel(self._status("warn", 45.0, 50.0)))
+        assert "nearing its daily budget" in text
+        assert "90% used" in text
+
+    def test_exceeded_state_shows_blocked_callout(self):
+        text = self._render(render_local_budget_panel(self._status("exceeded", 60.0, 50.0)))
+        assert "budget exceeded" in text
+        # Over-limit spend caps the percentage display at the bar, not the number.
+        assert "120% used" in text
+
+    def test_bar_fill_scales_with_percent(self):
+        assert usage_mod._budget_bar_markup(0, "green").count("█") == 0
+        assert usage_mod._budget_bar_markup(100, "red").count("█") == 28
+        # Over 100% stays clamped to a full bar.
+        assert usage_mod._budget_bar_markup(450, "red").count("█") == 28
+        half = usage_mod._budget_bar_markup(50, "green")
+        assert 0 < half.count("█") < 28
 
 
 class TestUsageCommand:
