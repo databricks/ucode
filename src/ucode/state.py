@@ -18,9 +18,11 @@ _KNOWN_POLICY_AGENTS: frozenset[str] = frozenset(
     {"codex", "claude", "gemini", "opencode", "copilot", "pi"}
 )
 
+
 def _today_iso() -> str:
     """Return today's date as ``YYYY-MM-DD``. Factored for monkeypatching."""
     return _dt.date.today().isoformat()
+
 
 def _is_iso_date(value: str) -> bool:
     try:
@@ -28,6 +30,7 @@ def _is_iso_date(value: str) -> bool:
     except ValueError:
         return False
     return True
+
 
 def load_full_state() -> dict:
     """Load the entire state file. Returns empty structure if missing or wrong version."""
@@ -51,6 +54,37 @@ def load_state() -> dict:
     ws_state = full.get("workspaces", {}).get(workspace, {})
     ws_state["workspace"] = workspace
     return hydrate_state(ws_state)
+
+
+def slice_state_for_export(full_state: dict, workspace: str) -> dict:
+    """Return a single-workspace splice for publishing to UC.
+    {
+      "state_version": 3,
+      "workspace": "<ws url>",
+      "claude_models": {...},
+      "policies": {...},
+      ...all other per-workspace fields...
+    }
+    """
+    workspaces = full_state.get("workspaces")
+    if not isinstance(workspaces, dict) or workspace not in workspaces:
+        raise RuntimeError(
+            f"No local state for workspace {workspace}. Run `ucode configure` for it first."
+        )
+    block = workspaces[workspace]
+    if not isinstance(block, dict):
+        raise RuntimeError(
+            f"Local state for workspace {workspace} is malformed (expected an object)."
+        )
+    # Spread the block first, then override `workspace` + `state_version` so
+    # any stale values in the block (e.g. a workspace key pointing at a
+    # different URL from a long-ago import) get corrected to authoritative
+    # values from the top-level file.
+    return {
+        **block,
+        "state_version": full_state.get("state_version") or STATE_VERSION,
+        "workspace": workspace,
+    }
 
 
 def save_state(state: dict) -> None:
@@ -272,17 +306,37 @@ def resolve_policy_model(state: dict, agent: str, requested_model: str) -> str:
 
 
 def merge_managed_policies(local_state: dict, remote_blob: dict) -> dict:
-    """Overlay admin-managed ``policies`` from a pulled UC ``state.json``."""
+    """Overlay admin-managed ``policies`` from a pulled UC ``state.json``.
+
+    The UC blob is a **flat** single-workspace snapshot (produced by
+    ``slice_state_for_export``) — its top level looks like ``load_state()``'s
+    own output: ``{"workspace": ..., "policies": ..., "claude_models": ..., ...}``.
+
+    Resolution:
+      - Local must have a workspace set, otherwise nothing to overlay onto.
+      - Remote ``workspace`` must match local exactly. A mismatch means the UC
+        file was published for a different workspace (e.g. admin accidentally
+        pushed for workspace B while the user is on A) — safer to skip than to
+        cross-apply.
+      - Returns ``local_state`` unchanged when the remote has no ``policies``.
+
+    Only the ``policies`` field is overlaid; the rest of the remote blob is
+    ignored — the user's own discovered models, ``managed_configs``, and
+    workspace-specific fields stay authoritative on the local machine.
+
+    The merged ``policies`` are re-validated by ``_normalize_policies`` the
+    next time the state passes through ``hydrate_state`` (i.e. on save/load),
+    so malformed admin payloads can't corrupt local state.
+    """
     workspace = local_state.get("workspace")
     if not isinstance(workspace, str) or not workspace:
         return local_state
-    workspaces = remote_blob.get("workspaces")
-    if not isinstance(workspaces, dict):
+    if not isinstance(remote_blob, dict):
         return local_state
-    remote_ws = workspaces.get(workspace)
-    if not isinstance(remote_ws, dict):
+    remote_workspace = remote_blob.get("workspace")
+    if remote_workspace != workspace:
         return local_state
-    remote_policies = remote_ws.get("policies")
+    remote_policies = remote_blob.get("policies")
     if remote_policies is None:
         return local_state
     merged = dict(local_state)

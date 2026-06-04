@@ -256,11 +256,34 @@ class TestRevert:
 
 
 class TestExport:
+    """`ucode export` must upload a **flat single-workspace blob** to UC —
+    no multi-workspace wrapper, no other workspaces, no per-machine fields."""
+
+    @staticmethod
+    def _full_state_with(workspace_block: dict) -> dict:
+        """Wrap a single-workspace block as the multi-workspace top-level shape
+        (what `load_full_state` returns from the local file). Includes an
+        unrelated workspace so we can prove the slice drops it."""
+        ws = workspace_block.get("workspace", "https://example.databricks.com")
+        return {
+            "state_version": 3,
+            "current_workspace": ws,
+            "workspaces": {
+                ws: workspace_block,
+                "https://other.databricks.com": {
+                    "workspace": "https://other.databricks.com",
+                    "claude_models": {"opus": "should-not-be-uploaded"},
+                },
+            },
+            "mcp_servers": [],
+        }
+
     def test_uploads_state_to_uc_volume(self):
         state = {**MINIMAL_STATE, "profile": "my-profile"}
         with (
             patch("ucode.cli.install_databricks_cli"),
             patch("ucode.cli.load_state", return_value=state),
+            patch("ucode.cli.load_full_state", return_value=self._full_state_with(state)),
             patch("ucode.cli.ensure_databricks_auth") as mock_auth,
             patch("ucode.cli.upload_managed_config") as mock_upload,
         ):
@@ -274,11 +297,46 @@ class TestExport:
         assert upload_args[1] == "my-profile"
         assert f"Config uploaded to {MANAGED_CONFIG_VOLUME_PATH}" in result.output
 
+    def test_uploads_flat_single_workspace_blob(self):
+        """The temp file handed to `upload_managed_config` must be the FLAT
+        slice — no `workspaces` wrapper, no `current_workspace`, no other
+        workspaces, no per-machine fields like `mcp_servers`."""
+        import json as _json
+
+        state = {**MINIMAL_STATE, "policies": {"claude": {"default_model": "admin"}}}
+        captured: dict = {}
+
+        def fake_upload(workspace, profile, path):
+            captured.update(_json.loads(path.read_text(encoding="utf-8")))
+
+        with (
+            patch("ucode.cli.install_databricks_cli"),
+            patch("ucode.cli.load_state", return_value=state),
+            patch("ucode.cli.load_full_state", return_value=self._full_state_with(state)),
+            patch("ucode.cli.ensure_databricks_auth"),
+            patch("ucode.cli.upload_managed_config", side_effect=fake_upload),
+        ):
+            result = runner.invoke(app, ["export"])
+
+        assert result.exit_code == 0, result.output
+        # Flat shape: no wrapper.
+        assert "workspaces" not in captured
+        assert "current_workspace" not in captured
+        # Per-machine fields dropped.
+        assert "mcp_servers" not in captured
+        # Workspace + policy round-trip.
+        assert captured["workspace"] == "https://example.databricks.com"
+        assert captured["policies"] == {"claude": {"default_model": "admin"}}
+        assert captured["state_version"] == 3
+        # Other workspaces never appear in the values.
+        assert "should-not-be-uploaded" not in _json.dumps(captured)
+
     def test_uploads_without_profile(self):
         state = {k: v for k, v in MINIMAL_STATE.items() if k != "profile"}
         with (
             patch("ucode.cli.install_databricks_cli"),
             patch("ucode.cli.load_state", return_value=state),
+            patch("ucode.cli.load_full_state", return_value=self._full_state_with(state)),
             patch("ucode.cli.ensure_databricks_auth"),
             patch("ucode.cli.upload_managed_config") as mock_upload,
         ):
@@ -303,6 +361,10 @@ class TestExport:
         with (
             patch("ucode.cli.install_databricks_cli"),
             patch("ucode.cli.load_state", return_value=MINIMAL_STATE),
+            patch(
+                "ucode.cli.load_full_state",
+                return_value=self._full_state_with(MINIMAL_STATE),
+            ),
             patch("ucode.cli.ensure_databricks_auth"),
             patch(
                 "ucode.cli.upload_managed_config",
@@ -792,6 +854,8 @@ class TestConfigureSharedStatePullsManagedPolicies:
         monkeypatch.setattr(cli_mod, "purge_cross_workspace_mcp_residue", lambda *a, **k: None)
 
     def test_overlays_policies_from_uc_into_saved_state(self, monkeypatch):
+        # The UC blob is a FLAT single-workspace shape now — `workspace` at
+        # the top level, no `workspaces` wrapper.
         import ucode.cli as cli_mod
 
         ws = "https://example.databricks.com"
@@ -800,7 +864,8 @@ class TestConfigureSharedStatePullsManagedPolicies:
             cli_mod,
             "download_managed_config",
             lambda w, p: {
-                "workspaces": {ws: {"policies": {"claude": {"default_model": "admin-pinned"}}}}
+                "workspace": ws,
+                "policies": {"claude": {"default_model": "admin-pinned"}},
             },
         )
         saved: list[dict] = []

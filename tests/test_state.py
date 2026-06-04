@@ -20,6 +20,7 @@ from ucode.state import (
     resolve_policy_model,
     save_state,
     select_model_for_policies,
+    slice_state_for_export,
 )
 
 FAKE_WS = "https://example.databricks.com"
@@ -377,17 +378,70 @@ class TestResolvePolicyModel:
         assert resolve_policy_model({}, "claude", "user-requested") == "user-requested"
 
 
+class TestSliceStateForExport:
+    """`slice_state_for_export` — produces the flat single-workspace blob that
+    `ucode export` actually uploads to UC. The multi-workspace wrapper stays
+    on the admin's local machine."""
+
+    def test_returns_flat_block_with_workspace_field(self):
+        full = {
+            "state_version": 3,
+            "current_workspace": FAKE_WS,
+            "workspaces": {
+                FAKE_WS: {
+                    "workspace": FAKE_WS,
+                    "claude_models": {"opus": "o4"},
+                    "policies": {"claude": {"default_model": "haiku"}},
+                },
+            },
+        }
+        sliced = slice_state_for_export(full, FAKE_WS)
+        assert sliced["workspace"] == FAKE_WS
+        assert sliced["state_version"] == 3
+        assert sliced["claude_models"] == {"opus": "o4"}
+        assert sliced["policies"] == {"claude": {"default_model": "haiku"}}
+        assert "workspaces" not in sliced
+        assert "current_workspace" not in sliced
+
+    def test_drops_other_workspaces_and_per_machine_fields(self):
+        full = {
+            "state_version": 3,
+            "current_workspace": FAKE_WS,
+            "workspaces": {
+                FAKE_WS: {"workspace": FAKE_WS, "policies": {}},
+                "https://other.databricks.com": {"claude_models": {"opus": "leaked"}},
+            },
+            "mcp_servers": ["should not be uploaded"],
+        }
+        sliced = slice_state_for_export(full, FAKE_WS)
+        # Only the target workspace's fields are present (no merger of others).
+        assert "mcp_servers" not in sliced
+        assert all("leaked" not in str(v) for v in sliced.values())
+
+    def test_workspace_field_authoritative_over_stale_block_value(self):
+        full = {
+            "state_version": 3,
+            "workspaces": {
+                FAKE_WS: {"workspace": "https://stale.databricks.com", "policies": {}},
+            },
+        }
+        sliced = slice_state_for_export(full, FAKE_WS)
+        assert sliced["workspace"] == FAKE_WS
+
+    def test_raises_when_workspace_missing(self):
+        full = {"state_version": 3, "workspaces": {FAKE_WS: {}}}
+        with pytest.raises(RuntimeError, match="No local state for workspace"):
+            slice_state_for_export(full, "https://never-configured.databricks.com")
+
+
 class TestMergeManagedPolicies:
     """`merge_managed_policies` — pull/overlay layer between UC and local state."""
 
-    def test_overlays_policies_for_matching_workspace(self):
+    def test_overlays_policies_when_workspace_matches(self):
         local = {"workspace": FAKE_WS, "claude_models": {"opus": "o4"}}
         remote = {
-            "workspaces": {
-                FAKE_WS: {
-                    "policies": {"claude": {"default_model": "admin-pinned"}},
-                }
-            }
+            "workspace": FAKE_WS,
+            "policies": {"claude": {"default_model": "admin-pinned"}},
         }
         merged = merge_managed_policies(local, remote)
         assert merged["policies"] == {"claude": {"default_model": "admin-pinned"}}
@@ -395,25 +449,27 @@ class TestMergeManagedPolicies:
         assert merged["claude_models"] == {"opus": "o4"}
         assert merged["workspace"] == FAKE_WS
 
-    def test_no_op_when_remote_has_no_matching_workspace(self):
+    def test_no_op_when_workspaces_dont_match(self):
+        # Admin pushed for workspace B; user is on workspace A → safer to skip
+        # than to cross-apply.
         local = {"workspace": FAKE_WS, "claude_models": {}}
-        remote = {"workspaces": {"https://other.databricks.com": {"policies": {}}}}
+        remote = {"workspace": "https://other.databricks.com", "policies": {"claude": {}}}
         assert merge_managed_policies(local, remote) == local
 
-    def test_no_op_when_remote_workspace_lacks_policies(self):
+    def test_no_op_when_remote_has_no_policies(self):
         local = {"workspace": FAKE_WS, "claude_models": {}}
-        remote = {"workspaces": {FAKE_WS: {"claude_models": {"opus": "ignored"}}}}
+        remote = {"workspace": FAKE_WS, "claude_models": {"opus": "ignored"}}
         assert merge_managed_policies(local, remote) == local
 
     def test_no_op_when_local_has_no_workspace(self):
         local = {"claude_models": {}}
-        remote = {"workspaces": {FAKE_WS: {"policies": {"claude": {}}}}}
+        remote = {"workspace": FAKE_WS, "policies": {"claude": {}}}
         assert merge_managed_policies(local, remote) == local
 
     def test_no_op_when_remote_blob_malformed(self):
         local = {"workspace": FAKE_WS}
         assert merge_managed_policies(local, {}) == local
-        assert merge_managed_policies(local, {"workspaces": "nope"}) == local
+        assert merge_managed_policies(local, "not-a-dict") == local  # type: ignore[arg-type]
 
 
 class TestMarkToolManaged:

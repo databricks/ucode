@@ -57,6 +57,7 @@ from ucode.state import (
     load_state,
     merge_managed_policies,
     save_state,
+    slice_state_for_export,
 )
 from ucode.tracing import configure_tracing_command
 from ucode.ui import (
@@ -227,11 +228,6 @@ def configure_shared_state(
         state["codex_models"] = codex_models
     if fetch_all or "opencode" in tools:
         state["opencode_models"] = opencode_models
-
-    # Best-effort pull of admin-managed policies from the UC volume. Silent on
-    # failure (no admin export yet, missing READ_VOLUME, etc.) — never block the
-    # user. `merge_managed_policies` only overlays the `policies` field; all
-    # other local state (discovered models, profile, managed_configs) wins.
     remote = download_managed_config(workspace, profile)
     if remote is not None:
         state = merge_managed_policies(state, remote)
@@ -752,6 +748,10 @@ def usage_cmd() -> None:
 @app.command("export")
 def export_cmd() -> None:
     """Upload the local ucode config to Unity Catalog for workspace-wide distribution."""
+    import json
+    import tempfile
+    from pathlib import Path
+
     try:
         install_databricks_cli()
         state = load_state()
@@ -762,12 +762,28 @@ def export_cmd() -> None:
             )
         profile = state.get("profile")
         ensure_databricks_auth(workspace, profile)
-        print_section("Export")
-        print_kv("Workspace", workspace)
-        print_kv("Destination", MANAGED_CONFIG_VOLUME_PATH)
-        with spinner("Uploading state.json to Unity Catalog..."):
-            upload_managed_config(workspace, profile, STATE_PATH)
-        print_success(f"Config uploaded to {MANAGED_CONFIG_VOLUME_PATH}")
+
+        sliced = slice_state_for_export(load_full_state(), workspace)
+        tmp = tempfile.NamedTemporaryFile(
+            mode="w",
+            suffix=".json",
+            prefix="ucode-export-",
+            delete=False,
+            encoding="utf-8",
+        )
+        tmp_path = Path(tmp.name)
+        try:
+            json.dump(sliced, tmp, indent=2)
+            tmp.close()
+
+            print_section("Export")
+            print_kv("Workspace", workspace)
+            print_kv("Destination", MANAGED_CONFIG_VOLUME_PATH)
+            with spinner("Uploading state.json to Unity Catalog..."):
+                upload_managed_config(workspace, profile, tmp_path)
+            print_success(f"Config uploaded to {MANAGED_CONFIG_VOLUME_PATH}")
+        finally:
+            tmp_path.unlink(missing_ok=True)
     except RuntimeError as exc:
         print_err(str(exc))
         raise typer.Exit(1) from None
