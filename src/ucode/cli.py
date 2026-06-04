@@ -1081,6 +1081,69 @@ def _default_policy_tiers(state: dict) -> list[dict[str, object]]:
     ]
 
 
+def _policy_model_options(harness: str, state: dict) -> list[tuple[str, str]]:
+    if harness == "claude":
+        claude_models = state.get("claude_models") or {}
+        if not isinstance(claude_models, dict):
+            return []
+        family_order = {"opus": 0, "sonnet": 1, "haiku": 2}
+        items = [
+            (str(model), f"{family} ({model})")
+            for family, model in claude_models.items()
+            if isinstance(family, str) and isinstance(model, str) and model
+        ]
+        return sorted(items, key=lambda item: family_order.get(item[1].split(" ", 1)[0], 99))
+
+    if harness == "opencode":
+        opencode_models = state.get("opencode_models") or {}
+        if not isinstance(opencode_models, dict):
+            return []
+        options: list[tuple[str, str]] = []
+        for provider in ("anthropic", "gemini"):
+            models = opencode_models.get(provider) or []
+            if isinstance(models, list):
+                options.extend(
+                    (str(model), f"{provider} ({model})")
+                    for model in models
+                    if isinstance(model, str)
+                )
+        return options
+
+    if harness == "pi":
+        options = []
+        for value in (state.get("claude_models") or {}).values():
+            if isinstance(value, str):
+                options.append((value, f"claude ({value})"))
+        codex_models = state.get("codex_models") or []
+        if isinstance(codex_models, list):
+            options.extend(
+                (str(model), f"codex ({model})") for model in codex_models if isinstance(model, str)
+            )
+        gemini_models = state.get("gemini_models") or []
+        if isinstance(gemini_models, list):
+            options.extend(
+                (str(model), f"gemini ({model})")
+                for model in gemini_models
+                if isinstance(model, str)
+            )
+        return options
+
+    state_key = f"{harness}_models"
+    models = state.get(state_key) or []
+    if not isinstance(models, list):
+        return []
+    return [(str(model), str(model)) for model in models if isinstance(model, str)]
+
+
+def _prompt_policy_model(harness: str, state: dict, default: str | None = None) -> str:
+    options = _policy_model_options(harness, state)
+    if default and default not in {model for model, _label in options}:
+        options = [(default, f"{default} (current)"), *options]
+    if options:
+        return prompt_for_choice("Model", options)
+    return _prompt_text("Model", default=default)
+
+
 def _run_budget_setup(workspace: str) -> None:
     """Interactively author the workspace's ``policies.yaml``."""
     state = load_state()
@@ -1138,7 +1201,7 @@ def _run_budget_setup(workspace: str) -> None:
         )
         harness = prompt_for_choice("Harness", harness_options)
         default_model = str(default_tier.get("model") or "")
-        model = _prompt_text("Model", default=default_model or None)
+        model = _prompt_policy_model(harness, state, default=default_model or None)
         tiers.append(
             {
                 "name": f"tier {index + 1}",

@@ -201,9 +201,9 @@ class TestSetupBudgetCommand:
             stack.enter_context(patch("ucode.cli.load_state", return_value=state))
             stack.enter_context(patch("ucode.cli.load_workspace_policy", return_value=None))
             choice = stack.enter_context(patch("ucode.cli.prompt_for_choice"))
-            choice.side_effect = ["block", "claude"]
+            choice.side_effect = ["block", "claude", "databricks-claude-sonnet-4"]
             mock_save_policy = stack.enter_context(patch("ucode.cli.save_workspace_policy"))
-            result = runner.invoke(app, ["setup", "budget"], input="250\n1\nadmin-model\n")
+            result = runner.invoke(app, ["setup", "budget"], input="250\n1\n")
 
         assert result.exit_code == 0, result.output
         workspace, policy = mock_save_policy.call_args[0]
@@ -216,7 +216,7 @@ class TestSetupBudgetCommand:
                 "name": "tier 1",
                 "activates_at_pct": 0.0,
                 "harness": "claude",
-                "model": "admin-model",
+                "model": "databricks-claude-sonnet-4",
             }
         ]
         assert "Budget policy updated" in result.output
@@ -248,9 +248,9 @@ class TestSetupBudgetCommand:
             stack.enter_context(patch("ucode.cli.load_state", return_value=state))
             stack.enter_context(patch("ucode.cli.load_workspace_policy", return_value=existing))
             choice = stack.enter_context(patch("ucode.cli.prompt_for_choice"))
-            choice.side_effect = ["warn", "claude"]
+            choice.side_effect = ["warn", "claude", "old"]
             mock_save_policy = stack.enter_context(patch("ucode.cli.save_workspace_policy"))
-            result = runner.invoke(app, ["setup", "budget"], input="500\n1\n\n")
+            result = runner.invoke(app, ["setup", "budget"], input="500\n1\n")
 
         assert result.exit_code == 0, result.output
         policy = mock_save_policy.call_args[0][1]
@@ -259,6 +259,75 @@ class TestSetupBudgetCommand:
         assert policy["policy"]["on_budget_exhausted"] == "warn"
         assert policy["policy"]["tiers"][0]["name"] == "tier 1"
         assert policy["policy"]["tiers"][0]["model"] == "old"
+
+    def test_selects_model_from_harness_inventory(self):
+        state = {
+            "workspace": "https://example.databricks.com",
+            "available_tools": ["claude"],
+            "claude_models": {
+                "opus": "databricks-claude-opus-4-5",
+                "sonnet": "databricks-claude-sonnet-4",
+            },
+            "default_agent": "claude",
+        }
+        captured: list[tuple[str, list[tuple[str, str]]]] = []
+
+        def fake_choice(prompt, options):
+            captured.append((prompt, options))
+            if prompt == "At 100% of budget":
+                return "block"
+            if prompt == "Harness":
+                return "claude"
+            if prompt == "Model":
+                return "databricks-claude-sonnet-4"
+            raise AssertionError(prompt)
+
+        with contextlib.ExitStack() as stack:
+            self._admin_patches(stack)
+            stack.enter_context(patch("ucode.cli.load_state", return_value=state))
+            stack.enter_context(patch("ucode.cli.load_workspace_policy", return_value=None))
+            stack.enter_context(patch("ucode.cli.prompt_for_choice", side_effect=fake_choice))
+            text_prompt = stack.enter_context(patch("ucode.cli._prompt_text"))
+            mock_save_policy = stack.enter_context(patch("ucode.cli.save_workspace_policy"))
+            result = runner.invoke(app, ["setup", "budget"], input="250\n1\n")
+
+        assert result.exit_code == 0, result.output
+        text_prompt.assert_not_called()
+        model_prompt = [item for item in captured if item[0] == "Model"][0]
+        assert model_prompt[1] == [
+            ("databricks-claude-opus-4-5", "opus (databricks-claude-opus-4-5)"),
+            ("databricks-claude-sonnet-4", "sonnet (databricks-claude-sonnet-4)"),
+        ]
+        policy = mock_save_policy.call_args[0][1]
+        assert policy["policy"]["tiers"][0]["model"] == "databricks-claude-sonnet-4"
+
+    def test_model_prompt_falls_back_to_text_when_no_inventory(self):
+        state = {
+            "workspace": "https://example.databricks.com",
+            "available_tools": ["claude"],
+            "claude_models": {},
+            "default_agent": "claude",
+        }
+
+        def fake_choice(prompt, _options):
+            if prompt == "At 100% of budget":
+                return "block"
+            if prompt == "Harness":
+                return "claude"
+            raise AssertionError(prompt)
+
+        with contextlib.ExitStack() as stack:
+            self._admin_patches(stack)
+            stack.enter_context(patch("ucode.cli.load_state", return_value=state))
+            stack.enter_context(patch("ucode.cli.load_workspace_policy", return_value=None))
+            stack.enter_context(patch("ucode.cli.prompt_for_choice", side_effect=fake_choice))
+            stack.enter_context(patch("ucode.cli._prompt_text", return_value="manual-model"))
+            mock_save_policy = stack.enter_context(patch("ucode.cli.save_workspace_policy"))
+            result = runner.invoke(app, ["setup", "budget"], input="250\n1\n")
+
+        assert result.exit_code == 0, result.output
+        policy = mock_save_policy.call_args[0][1]
+        assert policy["policy"]["tiers"][0]["model"] == "manual-model"
 
     def test_errors_when_workspace_missing(self):
         with patch("ucode.cli.load_state", return_value={}):
