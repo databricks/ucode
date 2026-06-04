@@ -60,12 +60,6 @@ MINIMAL_STATE = {
 
 
 class TestHelp:
-    def test_no_args_shows_help(self):
-        result = runner.invoke(app, [])
-        # no_args_is_help=True exits with code 0 or 2 depending on typer version
-        assert result.exit_code in (0, 2)
-        assert "Usage:" in result.output
-
     def test_help_lists_all_agent_subcommands(self):
         result = runner.invoke(app, ["--help"])
         assert result.exit_code == 0
@@ -171,6 +165,94 @@ class TestSubcommandRouting:
         """--agent flag must no longer exist."""
         result = runner.invoke(app, ["--agent", "claude"])
         assert result.exit_code != 0
+
+
+class TestDefaultLaunch:
+    """Bare `ucode` launches the default agent, with budget-aware fallback."""
+
+    def _launch_patches(self, stack):
+        """Stub the launch pipeline so no network/disk work runs, returning the
+        ``launch_agent`` mock for the caller to assert against."""
+        stack.enter_context(patch("ucode.cli.install_databricks_cli"))
+        stack.enter_context(patch("ucode.cli.ensure_bootstrap_dependencies"))
+        stack.enter_context(patch("ucode.cli.ensure_provider_state", return_value=MINIMAL_STATE))
+        stack.enter_context(patch("ucode.cli.configure_shared_state", return_value=MINIMAL_STATE))
+        stack.enter_context(
+            patch(
+                "ucode.cli.resolve_launch_model",
+                return_value=(MINIMAL_STATE, "databricks-claude-sonnet-4"),
+            )
+        )
+        stack.enter_context(patch("ucode.cli.configure_tool", return_value=MINIMAL_STATE))
+        return stack.enter_context(patch("ucode.cli.launch_agent"))
+
+    def test_launches_default_agent(self):
+        from contextlib import ExitStack
+
+        state = {**MINIMAL_STATE, "default_agent": "claude"}
+        with ExitStack() as stack:
+            mock_launch = self._launch_patches(stack)
+            stack.enter_context(patch("ucode.cli.load_state", return_value=state))
+            stack.enter_context(
+                patch(
+                    "ucode.cli.local_budget_status", return_value={"state": "ok", "tool": "claude"}
+                )
+            )
+            result = runner.invoke(app, [])
+        assert result.exit_code == 0, result.output
+        mock_launch.assert_called_once()
+        assert mock_launch.call_args[0][0] == "claude"
+
+    def test_falls_back_when_default_over_budget(self):
+        from contextlib import ExitStack
+
+        state = {**MINIMAL_STATE, "default_agent": "codex", "available_tools": ["codex", "claude"]}
+
+        def budget(tool):
+            return {"state": "exceeded" if tool == "codex" else "ok", "tool": tool}
+
+        with ExitStack() as stack:
+            mock_launch = self._launch_patches(stack)
+            stack.enter_context(patch("ucode.cli.load_state", return_value=state))
+            stack.enter_context(patch("ucode.cli.local_budget_status", side_effect=budget))
+            result = runner.invoke(app, [])
+        assert result.exit_code == 0, result.output
+        assert mock_launch.call_args[0][0] == "claude"
+        assert "reached its daily budget" in result.output
+
+    def test_auto_configures_when_no_workspace(self):
+        """Bare `ucode` with no workspace runs configure first, then launches."""
+        from contextlib import ExitStack
+
+        configured: list[bool] = []
+
+        def fake_configure():
+            configured.append(True)
+            return 0
+
+        calls = {"n": 0}
+        configured_state = {**MINIMAL_STATE, "default_agent": "codex"}
+
+        def load_state_stub():
+            calls["n"] += 1
+            return {} if calls["n"] == 1 else configured_state
+
+        with ExitStack() as stack:
+            mock_launch = self._launch_patches(stack)
+            stack.enter_context(
+                patch("ucode.cli.configure_workspace_command", side_effect=fake_configure)
+            )
+            stack.enter_context(patch("ucode.cli.load_state", side_effect=load_state_stub))
+            stack.enter_context(
+                patch(
+                    "ucode.cli.local_budget_status", return_value={"state": "ok", "tool": "codex"}
+                )
+            )
+            result = runner.invoke(app, [])
+        assert result.exit_code == 0, result.output
+        assert configured == [True]
+        mock_launch.assert_called_once()
+        assert mock_launch.call_args[0][0] == "codex"
 
 
 class TestMcpSubcommands:

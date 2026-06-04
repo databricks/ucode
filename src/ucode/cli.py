@@ -544,7 +544,7 @@ def revert() -> int:
 
 app = typer.Typer(
     add_completion=False,
-    no_args_is_help=True,
+    no_args_is_help=False,
     context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
 )
 configure_app = typer.Typer(add_completion=False, no_args_is_help=False)
@@ -553,6 +553,32 @@ mcp_app = typer.Typer(add_completion=False, no_args_is_help=True)
 app.add_typer(mcp_app, name="mcp", help="MCP servers exposed by ucode.")
 usage_app = typer.Typer(add_completion=False, no_args_is_help=False)
 app.add_typer(usage_app, name="usage", help="Show or record coding-agent usage.")
+
+
+@app.callback(invoke_without_command=True)
+def default_launch(ctx: typer.Context) -> None:
+    """Launch the configured default agent when ``ucode`` is run with no subcommand.
+
+    Runs `ucode configure` first if the workspace isn't set up yet, then launches
+    `default_agent` — falling back to another configured agent when the default's
+    daily budget is exhausted."""
+    if ctx.invoked_subcommand is not None:
+        return
+    try:
+        install_databricks_cli()
+        if not load_state().get("workspace"):
+            configure_workspace_command()
+        state = load_state()
+        if not state.get("workspace"):
+            return
+        tool = _resolve_default_launch_tool(state)
+    except RuntimeError as exc:
+        print_err(str(exc))
+        raise typer.Exit(1) from None
+    except KeyboardInterrupt:
+        print_err("Interrupted.")
+        raise typer.Exit(130) from None
+    _launch_tool(tool, ctx)
 
 
 @mcp_app.command("web-search")
@@ -618,6 +644,42 @@ def _render_launch_panel(
         expand=False,
         padding=(0, 2),
     )
+
+
+def _agent_budget_exceeded(tool: str) -> bool:
+    """True when ``tool`` has a local daily budget and it's already exceeded.
+
+    Only claude/codex record local spend, so other agents report ``ok`` and are
+    always considered launchable."""
+    try:
+        return local_budget_status(tool).get("state") == "exceeded"
+    except RuntimeError:
+        return False
+
+
+def _resolve_default_launch_tool(state: dict) -> str:
+    """Pick which agent bare ``ucode`` should launch.
+
+    Starts with ``default_agent`` (falling back to the first configured agent
+    when it's unset or no longer available), then skips any agent whose daily
+    budget is exhausted. If every agent is over budget we return the default so
+    ``_launch_tool`` surfaces its budget panel and exits."""
+    available = state.get("available_tools") or []
+    if not available:
+        raise RuntimeError("No coding agents are configured. Run `ucode configure` to set one up.")
+    default_agent = state.get("default_agent")
+    if default_agent not in available:
+        default_agent = available[0]
+    ordered = [default_agent] + [tool for tool in available if tool != default_agent]
+    for tool in ordered:
+        if not _agent_budget_exceeded(tool):
+            if tool != default_agent:
+                print_note(
+                    f"{TOOL_SPECS[default_agent]['display']} has reached its daily budget; "
+                    f"launching {TOOL_SPECS[tool]['display']} instead."
+                )
+            return tool
+    return default_agent
 
 
 def _launch_tool(tool_name: str, ctx: typer.Context) -> None:

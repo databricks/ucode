@@ -180,6 +180,17 @@ def ensure_bootstrap_dependencies(tool: str, *, update_existing: bool = False) -
     install_tool_binary(tool, strict=True, update_existing=update_existing)
 
 
+def _ensure_default_agent(state: dict) -> None:
+    """Set ``default_agent`` to the first configured agent when it's missing or
+    no longer available, preserving an existing valid choice. ``default_agent``
+    is the agent bare ``ucode`` launches."""
+    available = state.get("available_tools") or []
+    if not available:
+        return
+    if state.get("default_agent") not in available:
+        state["default_agent"] = available[0]
+
+
 def default_model_for_tool(tool: str, state: dict) -> str | None:
     return _MODULES[tool].default_model(state)
 
@@ -283,6 +294,7 @@ def configure_single_tool(tool: str, state: dict) -> dict:
         state = configure_tool(tool, state, model)
     available_tools = list(set((state.get("available_tools") or []) + [tool]))
     state["available_tools"] = available_tools
+    _ensure_default_agent(state)
     save_state(state)
     return state
 
@@ -304,6 +316,7 @@ def configure_selected_tools(state: dict, tools: list[str]) -> dict:
 
     existing = state.get("available_tools") or []
     state["available_tools"] = sorted(set(existing) | set(tools))
+    _ensure_default_agent(state)
     save_state(state)
     return state
 
