@@ -259,7 +259,7 @@ class TestDefaultLaunch:
 
         state = {**MINIMAL_STATE, "default_agent": "codex", "available_tools": ["codex", "claude"]}
 
-        def budget(tool):
+        def budget(tool=None):
             return {"state": "exceeded" if tool == "codex" else "ok", "tool": tool}
 
         with ExitStack() as stack:
@@ -389,7 +389,14 @@ class TestUsageCommands:
         with patch("ucode.cli.claude_usage_hook", return_value={"decision": "block"}):
             result = runner.invoke(
                 app,
-                ["usage", "hook", "claude", "pre-tool", "--model", "databricks-claude-sonnet-4"],
+                [
+                    "usage",
+                    "hook",
+                    "claude",
+                    "prompt-submit",
+                    "--model",
+                    "databricks-claude-sonnet-4",
+                ],
                 input="{}",
             )
 

@@ -249,23 +249,26 @@ class TestWriteToolConfigMcpRegistration:
         result = claude.write_tool_config(state, "databricks-claude-sonnet-4")
 
         hooks = written["hooks"]
-        assert set(hooks) == {"PreToolUse", "PostToolUse"}
-        pre_command = hooks["PreToolUse"][0]["hooks"][0]["command"]
+        assert set(hooks) == {"PostToolUse", "UserPromptSubmit"}
         post_command = hooks["PostToolUse"][0]["hooks"][0]["command"]
-        assert "ucode usage hook claude pre-tool" in pre_command
+        prompt_command = hooks["UserPromptSubmit"][0]["hooks"][0]["command"]
         assert "ucode usage hook claude post-tool" in post_command
-        command = pre_command
+        assert "ucode usage hook claude prompt-submit" in prompt_command
+        command = prompt_command
         assert "--model databricks-claude-sonnet-4" in command
         assert ["hooks"] in result["managed_configs"]["claude"]["keys"]
 
-    def test_preserves_user_pre_and_post_tool_hooks(self, monkeypatch):
-        # A user's own PreToolUse/PostToolUse hooks must survive: deep_merge_dict
-        # would replace the whole list, so the usage hooks are upserted instead.
+    def test_preserves_user_hooks(self, monkeypatch):
+        # A user's own hooks must survive: deep_merge_dict would replace the
+        # whole list, so the usage hooks are upserted instead. ucode records on
+        # PostToolUse and enforces on UserPromptSubmit; a user's PreToolUse hook
+        # is left fully intact since ucode no longer installs one there.
         written: dict = {}
         existing = {
             "hooks": {
                 "PreToolUse": [{"hooks": [{"type": "command", "command": "user-pre"}]}],
                 "PostToolUse": [{"hooks": [{"type": "command", "command": "user-post"}]}],
+                "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "user-prompt"}]}],
             }
         }
         monkeypatch.setattr(claude, "backup_existing_file", lambda *a, **kw: True)
@@ -286,10 +289,19 @@ class TestWriteToolConfigMcpRegistration:
         post_commands = [
             hook["command"] for entry in written["hooks"]["PostToolUse"] for hook in entry["hooks"]
         ]
+        prompt_commands = [
+            hook["command"]
+            for entry in written["hooks"]["UserPromptSubmit"]
+            for hook in entry["hooks"]
+        ]
+        # The user's own hooks for every event survive untouched.
         assert "user-pre" in pre_commands
         assert "user-post" in post_commands
-        assert any("usage hook claude pre-tool" in c for c in pre_commands)
+        assert "user-prompt" in prompt_commands
+        # ucode never installs a PreToolUse hook anymore.
+        assert not any("usage hook claude" in c for c in pre_commands)
         assert any("usage hook claude post-tool" in c for c in post_commands)
+        assert any("usage hook claude prompt-submit" in c for c in prompt_commands)
 
     def test_usage_hooks_idempotent_across_reruns(self, monkeypatch):
         # Re-running configure must not stack duplicate ucode usage hooks; the
@@ -307,16 +319,18 @@ class TestWriteToolConfigMcpRegistration:
         claude.write_tool_config(state, "databricks-claude-sonnet-4")
         claude.write_tool_config(state, "databricks-claude-sonnet-4")
 
-        pre = store["doc"]["hooks"]["PreToolUse"]
         post = store["doc"]["hooks"]["PostToolUse"]
-        usage_pre = [
-            h for entry in pre for h in entry["hooks"] if "usage hook claude" in h["command"]
-        ]
+        prompt = store["doc"]["hooks"]["UserPromptSubmit"]
         usage_post = [
             h for entry in post for h in entry["hooks"] if "usage hook claude" in h["command"]
         ]
-        assert len(usage_pre) == 1
+        usage_prompt = [
+            h for entry in prompt for h in entry["hooks"] if "usage hook claude" in h["command"]
+        ]
         assert len(usage_post) == 1
+        assert len(usage_prompt) == 1
+        # No stale PreToolUse enforcement hook lingers after reconfigure.
+        assert "PreToolUse" not in store["doc"]["hooks"]
 
 
 class TestRegisterWebSearchMcp:

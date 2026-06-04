@@ -90,7 +90,7 @@ def test_claude_post_tool_records_transcript_usage(tmp_path, monkeypatch):
     assert response == {}
 
 
-def test_claude_pre_tool_blocks_when_budget_exceeded(monkeypatch):
+def test_claude_prompt_submit_blocks_when_budget_exceeded(monkeypatch):
     monkeypatch.setattr(
         usage_hooks,
         "local_budget_status",
@@ -107,15 +107,47 @@ def test_claude_pre_tool_blocks_when_budget_exceeded(monkeypatch):
 
     response = usage_hooks.claude_usage_hook(
         model="databricks-claude-sonnet-4",
-        event="pre-tool",
+        event="prompt-submit",
         payload={"session_id": "s1"},
     )
 
     assert response["decision"] == "block"
-    assert "⛔ [UCODE USAGE BUDGET] Claude daily budget exceeded" in response["reason"]
-    assert "Budget: $21.00 / $20.00 used today" in response["reason"]
+    assert "⛔ Daily budget — limit exceeded" in response["reason"]
+    assert "$21.00 / $20.00 (105%)" in response["reason"]
+    assert "further tool use blocked today" in response["reason"]
     assert "Tokens used today" not in response["reason"]
     assert "Window:" not in response["reason"]
+
+
+def test_claude_prompt_submit_warns_visibly_when_nearing_budget(monkeypatch):
+    # Claude renders `systemMessage` visibly to the user but injects
+    # `additionalContext` silently, so the warn path must use systemMessage to
+    # surface the budget warning the same way Codex does.
+    monkeypatch.setattr(
+        usage_hooks,
+        "local_budget_status",
+        lambda tool: {
+            "configured": True,
+            "state": "warn",
+            "tool": tool,
+            "spend_usd": 18.0,
+            "limit_usd": 20.0,
+            "days": 1,
+            "remaining_usd": 2.0,
+            "total_tokens": 120,
+        },
+    )
+
+    response = usage_hooks.claude_usage_hook(
+        model="databricks-claude-sonnet-4",
+        event="prompt-submit",
+        payload={"session_id": "s1"},
+    )
+
+    assert "additionalContext" not in response
+    assert response["systemMessage"].startswith("⚠️ Daily budget — nearing limit")
+    assert "$18.00 / $20.00 (90%)" in response["systemMessage"]
+    assert "$2.00 left" in response["systemMessage"]
 
 
 def test_codex_session_usage_reads_latest_token_count(tmp_path):
@@ -172,7 +204,10 @@ def test_codex_session_usage_reads_latest_token_count(tmp_path):
     }
 
 
-def test_codex_hook_records_usage_payload_and_warns(monkeypatch):
+def test_codex_notify_records_usage_payload_without_warning(monkeypatch):
+    # The notify callback only records spend; it must return an empty response
+    # so the budget warning is surfaced solely by the UserPromptSubmit hook
+    # (otherwise the same message would appear twice).
     recorded: list[dict] = []
     monkeypatch.setattr(
         usage_hooks,
@@ -202,10 +237,8 @@ def test_codex_hook_records_usage_payload_and_warns(monkeypatch):
     assert recorded[0]["session_id"] == "s2"
     assert recorded[0]["tool"] == "codex"
     assert recorded[0]["input_tokens"] == 100
-    assert response["systemMessage"].startswith("⚠️ [UCODE USAGE BUDGET]")
-    assert "Budget: $0.90 / $1.00 used today" in response["systemMessage"]
-    assert "Tokens used today" not in response["systemMessage"]
-    assert "Window:" not in response["systemMessage"]
+    # Records spend but stays silent — no warning from the notify path.
+    assert response == {}
 
 
 def test_codex_prompt_submit_blocks_with_valid_prompt_json(monkeypatch):
@@ -232,8 +265,8 @@ def test_codex_prompt_submit_blocks_with_valid_prompt_json(monkeypatch):
     )
 
     assert response["decision"] == "block"
-    assert "⛔ [UCODE USAGE BUDGET] Codex daily budget exceeded" in response["reason"]
-    assert "Further tool use is blocked for this agent today." in response["reason"]
+    assert "⛔ Daily budget — limit exceeded" in response["reason"]
+    assert "further tool use blocked today" in response["reason"]
     assert "Tokens used today" not in response["reason"]
     assert "Window:" not in response["reason"]
 
@@ -265,9 +298,8 @@ def test_codex_prompt_submit_returns_warning_additional_context(monkeypatch):
         "hookSpecificOutput": {
             "hookEventName": "UserPromptSubmit",
             "additionalContext": (
-                "⚠️ [UCODE USAGE BUDGET] Codex is nearing its daily budget. "
-                "Budget: $0.90 / $1.00 used today ▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▱▱ 90%. "
-                "$0.10 remains."
+                "⚠️ Daily budget — nearing limit\n"
+                "$0.90 / $1.00 (90%)  ▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▱▱  $0.10 left"
             ),
         }
     }

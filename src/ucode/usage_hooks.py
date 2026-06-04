@@ -272,7 +272,10 @@ def claude_usage_hook(
     payload = payload if payload is not None else _read_json_stdin()
     session_id = str(payload.get("session_id") or payload.get("sessionId") or "claude")
     transcript = payload.get("transcript_path")
-    if event == "post-tool" and isinstance(transcript, str) and transcript:
+    # Both the recording event (post-tool) and the enforcement event
+    # (prompt-submit) carry a transcript path, so record spend whenever one is
+    # present to keep the shared daily budget current.
+    if isinstance(transcript, str) and transcript:
         usage = claude_transcript_usage(Path(transcript))
         record_local_usage_snapshot(
             session_id=session_id,
@@ -286,7 +289,14 @@ def claude_usage_hook(
             cache_creation_input_tokens=usage["cache_creation_input_tokens"],
             total_tokens=usage["total_tokens"],
         )
-    return _hook_response_for_budget(local_budget_status("claude"), can_block=event == "pre-tool")
+    # Enforce on prompt submission (mirrors Codex): block the next prompt once
+    # the global daily budget is exceeded, and warn otherwise. Claude renders a
+    # `systemMessage` visibly to the user (unlike `additionalContext`, which is
+    # injected silently into the model context), so leave quiet_warn off here to
+    # surface the warning the same way Codex does.
+    if event in {"prompt-submit", "user-prompt-submit"}:
+        return _hook_response_for_budget(local_budget_status("claude"), can_block=True)
+    return _hook_response_for_budget(local_budget_status("claude"))
 
 
 def codex_usage_hook(
@@ -324,4 +334,7 @@ def codex_usage_hook(
             can_block=True,
             quiet_warn=True,
         )
-    return _hook_response_for_budget(local_budget_status("codex"))
+    # The notify callback only records spend — it must not surface the budget
+    # warning, or the message would appear twice (once here, once from the
+    # UserPromptSubmit hook). Enforcement/warning is the prompt-submit hook's job.
+    return {}

@@ -695,7 +695,10 @@ def _launch_tool(tool_name: str, ctx: typer.Context) -> None:
         state = configure_tool(tool, state, resolved_model)
         display = TOOL_SPECS[tool]["display"]
         if tool in BUDGET_TRACKED_AGENTS:
-            budget_status = local_budget_status(tool)
+            # The daily budget is a single global pool shared across all tools,
+            # so render it tool-agnostically (no per-tool label in the callout).
+            # The panel title still names the tool being launched.
+            budget_status = local_budget_status()
             console.print(
                 render_local_budget_panel(
                     budget_status,
@@ -1228,7 +1231,10 @@ def usage_budget_check_cmd(
 @usage_app.command("hook")
 def usage_hook_cmd(
     agent: Annotated[str, typer.Argument(help="Hook adapter: claude or codex.")],
-    event: Annotated[str, typer.Argument(help="Hook event: pre-tool, post-tool, or notify.")],
+    event: Annotated[
+        str,
+        typer.Argument(help="Hook event: prompt-submit, post-tool, or notify."),
+    ],
     model: Annotated[str, typer.Option("--model", help="Model or endpoint name.")],
     workspace: Annotated[str | None, typer.Option("--workspace")] = None,
 ) -> None:

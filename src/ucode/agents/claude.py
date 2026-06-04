@@ -74,9 +74,9 @@ CLAUDE_TRACING_ENV_KEYS = (
     "MLFLOW_TRACING_SQL_WAREHOUSE_ID",
 )
 CLAUDE_TRACING_STOP_HOOK_SUFFIX = " autolog claude stop-hook"
-# Substring identifying ucode's own usage-tracking hooks (PreToolUse/PostToolUse).
-# Used to recognize and replace stale ucode hooks on re-run without disturbing a
-# user's own hooks for the same events.
+# Substring identifying ucode's own usage-tracking hooks (PostToolUse recording
+# + UserPromptSubmit enforcement). Used to recognize and replace stale ucode
+# hooks on re-run without disturbing a user's own hooks for the same events.
 CLAUDE_USAGE_HOOK_MARKER = "usage hook claude "
 # Tracing is driven by an `mlflow autolog claude stop-hook` Stop hook, run by
 # the `mlflow` CLI on each session end. Pin to 3.11.x: 3.12 dropped the Unity
@@ -238,10 +238,18 @@ def _remove_usage_hooks(settings: dict, event: str) -> None:
 
 
 def _upsert_usage_hooks(settings: dict, workspace: str, model: str) -> None:
-    """Install ucode's PreToolUse/PostToolUse usage hooks, replacing any prior
-    ucode usage hooks (idempotent on re-run) while preserving the user's own
-    hooks for those events."""
-    for event, action in (("PreToolUse", "pre-tool"), ("PostToolUse", "post-tool")):
+    """Install ucode's usage hooks, replacing any prior ucode usage hooks
+    (idempotent on re-run) while preserving the user's own hooks for those
+    events.
+
+    Recording runs on PostToolUse; budget enforcement runs on
+    UserPromptSubmit (mirrors Codex — block the next prompt once the shared
+    daily budget is exceeded). The legacy PreToolUse hook is stripped so older
+    configs migrate cleanly."""
+    # Strip the legacy enforcement hook in case an earlier ucode version
+    # installed it on PreToolUse.
+    _remove_usage_hooks(settings, "PreToolUse")
+    for event, action in (("PostToolUse", "post-tool"), ("UserPromptSubmit", "prompt-submit")):
         _remove_usage_hooks(settings, event)
         hooks = settings.get("hooks")
         if not isinstance(hooks, dict):
@@ -329,8 +337,9 @@ def write_tool_config(state: dict, model: str) -> dict:
     existing = read_json_safe(CLAUDE_SETTINGS_PATH)
     merged = deep_merge_dict(existing, overlay)
     # Upsert (don't deep-merge) the usage hooks: deep_merge_dict replaces whole
-    # lists, so merging a PreToolUse/PostToolUse overlay would wipe a user's own
-    # hooks for those events. Upserting preserves them and stays idempotent.
+    # lists, so merging a PostToolUse/UserPromptSubmit overlay would wipe a
+    # user's own hooks for those events. Upserting preserves them and stays
+    # idempotent.
     _upsert_usage_hooks(merged, state["workspace"], model)
     if tracing_env_vars and stop_hook_command:
         _upsert_tracing_stop_hook(merged, stop_hook_command)

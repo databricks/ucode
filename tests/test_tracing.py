@@ -300,7 +300,7 @@ class TestClaudeTracingEnv:
         assert "MLFLOW_TRACKING_URI" not in settings.get("env", {})
         # Usage hooks are always written; only the tracing Stop hook is absent.
         assert "Stop" not in settings.get("hooks", {})
-        assert set(settings["hooks"]) == {"PreToolUse", "PostToolUse"}
+        assert set(settings["hooks"]) == {"PostToolUse", "UserPromptSubmit"}
 
     def test_strips_stale_keys_when_disabled(self, tmp_path, monkeypatch):
         settings = tmp_path / "ucode-settings.json"

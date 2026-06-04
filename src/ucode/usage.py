@@ -962,24 +962,36 @@ def render_local_budget_panel(
 
 
 def format_local_budget_hook_status(status: dict[str, object]) -> str:
+    # The daily budget is a single global pool shared across all tools, so the
+    # message is tool-agnostic — it never names the agent that triggered it.
+    #
+    # Agent hook UIs render this as plain text (Claude `systemMessage`, Codex
+    # `additionalContext`) with no Rich/ANSI support, so the "rich" feel comes
+    # from a Unicode fill bar plus a compact two-line layout: a headline, then a
+    # spend/bar/remaining detail line.
     state = str(status.get("state") or "ok")
-    tool = str(status.get("tool") or "agent")
-    display_tool = tool[:1].upper() + tool[1:] if tool else "Agent"
     spend_usd = _coerce_cost(status.get("spend_usd"))
     limit_usd = _coerce_cost(status.get("limit_usd"))
     remaining_usd = _coerce_cost(status.get("remaining_usd"))
-    budget_line = _budget_line(spend_usd, limit_usd)
+    percent = _budget_usage_percent(spend_usd, limit_usd)
+    bar = _budget_progress_bar(percent)
     if state == "exceeded":
-        return (
-            f"⛔ [UCODE USAGE BUDGET] {display_tool} daily budget exceeded. "
-            f"{budget_line} Further tool use is blocked for this agent today."
+        headline = "⛔ Daily budget — limit exceeded"
+        detail = (
+            f"${spend_usd:.2f} / ${limit_usd:.2f} ({percent}%)  {bar}  "
+            "further tool use blocked today"
         )
-    if state == "warn":
-        return (
-            f"⚠️ [UCODE USAGE BUDGET] {display_tool} is nearing its daily budget. "
-            f"{budget_line} ${remaining_usd:.2f} remains."
+    elif state == "warn":
+        headline = "⚠️ Daily budget — nearing limit"
+        detail = (
+            f"${spend_usd:.2f} / ${limit_usd:.2f} ({percent}%)  {bar}  ${remaining_usd:.2f} left"
         )
-    return f"[UCODE USAGE BUDGET] {display_tool}. {budget_line} ${remaining_usd:.2f} remains."
+    else:
+        headline = "Daily budget"
+        detail = (
+            f"${spend_usd:.2f} / ${limit_usd:.2f} ({percent}%)  {bar}  ${remaining_usd:.2f} left"
+        )
+    return f"{headline}\n{detail}"
 
 
 def render_local_usage_summary(
