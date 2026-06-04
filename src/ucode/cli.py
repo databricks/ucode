@@ -299,9 +299,13 @@ def configure_shared_state(
     # Pull-and-replace: when the workspace publishes a UC state.json, that blob
     # is the authoritative workspace block. Local discovery above is only the
     # fallback for workspaces without a managed config.
-    remote = download_managed_config(workspace, profile)
+    with spinner("Pulling managed config from your org..."):
+        remote = download_managed_config(workspace, profile)
     if remote is not None:
         state = merge_managed_workspace(state, remote, profile=profile)
+        print_success("Managed config applied (set by your account admin)")
+    else:
+        print_note("No managed config published for this workspace — using local defaults.")
 
     save_state(state)
     if remote is not None:
@@ -345,7 +349,11 @@ def configure_workspace_command(
     tool: str | None = None,
     selected_tools: list[str] | None = None,
     workspaces: list[tuple[str, str | None]] | None = None,
+    *,
+    update_existing: bool = True,
+    validate: bool = True,
 ) -> int:
+    """Configure one or more coding agents for the current/selected workspace."""
     if tool is not None and selected_tools is not None:
         raise RuntimeError("Use either --agent or --agents, not both.")
 
@@ -356,15 +364,9 @@ def configure_workspace_command(
         state = states[0]
         state = configure_single_tool(tool, state)
         spec = TOOL_SPECS[tool]
-        console.print(
-            Panel(
-                f"[bold]Workspace:[/bold] [cyan]{state['workspace']}[/cyan]\n"
-                f"[bold]{spec['display']}:[/bold] [green]configured[/green]",
-                title="Configuration Complete",
-                style="green",
-                expand=False,
-            )
-        )
+        _render_configuration_panel(state, configured_tools=[tool])
+        if not validate:
+            return 0
         with spinner(f"Validating {spec['display']}..."):
             ok, err = validate_tool(tool)
         if ok:
@@ -436,14 +438,48 @@ def configure_workspace_command(
         return 0
 
     for tool_name in picked:
-        install_tool_binary(tool_name, strict=False, update_existing=True)
+        install_tool_binary(tool_name, strict=False, update_existing=update_existing)
 
     state = configure_selected_tools(_persistable_state(state), picked)
 
-    summary_lines = [f"[bold]Workspace:[/bold] [cyan]{state['workspace']}[/cyan]"]
-    for tool_name in picked:
-        spec = TOOL_SPECS[tool_name]
+    _render_configuration_panel(state, configured_tools=picked)
+
+    if validate:
+        # Limit validation to just-configured tools so we don't re-validate
+        # previously-configured tools the user didn't touch this run.
+        validate_state = {**state, "available_tools": picked}
+        validate_all_tools(validate_state)
+    return 0
+
+
+def _render_configuration_panel(state: dict, configured_tools: list[str] | None = None) -> None:
+    """Render the "Configuration Complete" summary panel."""
+    tools_to_show = configured_tools or list(state.get("available_tools") or [])
+
+    summary_lines = [f"[bold]Workspace:[/bold] [cyan]{state.get('workspace', '?')}[/cyan]"]
+    for tool_name in tools_to_show:
+        spec = TOOL_SPECS.get(tool_name)
+        if spec is None:
+            continue
         summary_lines.append(f"[bold]{spec['display']}:[/bold] [green]configured[/green]")
+
+    mcp_names = sorted(
+        {
+            str(server.get("name"))
+            for server in (state.get("mcp_servers") or [])
+            if server.get("name")
+        }
+    )
+    summary_lines.append(
+        f"[bold]MCPs:[/bold] {', '.join(mcp_names) if mcp_names else '[dim]none[/dim]'}"
+    )
+
+    allowlist = state.get("allowlist")
+    if isinstance(allowlist, list) and allowlist:
+        allowlist_display = ", ".join(str(item) for item in allowlist)
+        managed_suffix = "  [dim](managed)[/dim]" if state.get("_managed_config_pulled") else ""
+        summary_lines.append(f"[bold]Allowlist:[/bold]    {allowlist_display}{managed_suffix}")
+
     console.print(
         Panel(
             "\n".join(summary_lines),
@@ -452,12 +488,6 @@ def configure_workspace_command(
             expand=False,
         )
     )
-
-    # Limit validation to just-configured tools so we don't re-validate
-    # previously-configured tools the user didn't touch this run.
-    validate_state = {**state, "available_tools": picked}
-    validate_all_tools(validate_state)
-    return 0
 
 
 def status() -> int:
@@ -629,15 +659,7 @@ def _auto_configure_tool(tool: str) -> None:
     state = configure_single_tool(tool, state)
 
     spec = TOOL_SPECS[tool]
-    console.print(
-        Panel(
-            f"[bold]Workspace:[/bold] [cyan]{state['workspace']}[/cyan]\n"
-            f"[bold]{spec['display']}:[/bold] [green]configured[/green]",
-            title="Configuration Complete",
-            style="green",
-            expand=False,
-        )
-    )
+    _render_configuration_panel(state, configured_tools=[tool])
 
     with spinner(f"Validating {spec['display']}..."):
         ok, err = validate_tool(tool)
@@ -730,6 +752,7 @@ def _launch_tool(tool_name: str, ctx: typer.Context, *, explicit_model: str | No
         state, resolved_model = resolve_launch_model(tool, state, explicit_model)
         state = configure_tool(tool, state, resolved_model)
         display = TOOL_SPECS[tool]["display"]
+        _render_configuration_panel(state)
         if tool in BUDGET_TRACKED_AGENTS:
             # The daily budget is a single global pool shared across all tools,
             # so render it tool-agnostically (no per-tool label in the callout).
@@ -1112,9 +1135,15 @@ def setup_cmd(ctx: typer.Context) -> None:
             print_note("No coding agents selected — nothing to configure.")
             return
 
+        # Admin config-authoring: skip the optional "update X to vY?" prompts
+        # and the post-configure end-to-end validation. Required minimum-version
+        # upgrades will still trigger the next time the admin actually launches
+        # the agent via `ucode <agent>`.
         configure_rc = configure_workspace_command(
             workspaces=[(workspace, profile)],
             selected_tools=picked_tools,
+            update_existing=False,
+            validate=False,
         )
         if configure_rc != 0:
             raise typer.Exit(configure_rc)
