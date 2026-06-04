@@ -143,6 +143,8 @@ class TestSubcommandRouting:
             "spend_usd": 12.4,
             "limit_usd": 200,
             "remaining_usd": 187.6,
+            "total_tokens": 456_000,
+            "sessions": 6,
         }
         with (
             patches[0],
@@ -164,6 +166,10 @@ class TestSubcommandRouting:
         assert "$12.40 / $200.00" in result.output
         assert "6% used" in result.output
         assert "$187.60" in result.output
+        assert "Codex Tokens" in result.output
+        assert "456.0K" in result.output
+        assert "Codex Sessions" in result.output
+        assert "6" in result.output
 
     def test_no_agent_flag(self):
         """--agent flag must no longer exist."""

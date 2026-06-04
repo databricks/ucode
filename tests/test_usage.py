@@ -674,11 +674,11 @@ class TestLocalUsageLedger:
         message = format_local_budget_status(status)
         assert "⚠️ [UCODE USAGE BUDGET] Codex is nearing" in message
         assert "Budget: $16.25 / $20.00 used today ▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▱▱▱▱ 81%." in message
-        assert "Tokens used today" in message
+        assert "Codex tokens used today" in message
         flattened = message.replace("\n", "")
         assert "daily budget. Budget" in flattened
         assert "Remaining: $3.75. Window" in flattened
-        assert "day(s). Tokens" in flattened
+        assert "day(s). Codex tokens" in flattened
 
     def test_budget_env_override(self, tmp_path, monkeypatch):
         db_path = tmp_path / "usage.sqlite"
@@ -726,9 +726,16 @@ class TestLocalUsageLedger:
 
         codex_status = local_budget_status("codex", db_path)
         claude_status = local_budget_status("claude", db_path)
+        total_status = local_budget_status(db_path=db_path)
         # 18M tokens * $1.25/1M = $22.50 across both tools, over the $20 cap.
-        assert codex_status["spend_usd"] == claude_status["spend_usd"] == 22.5
-        assert codex_status["state"] == claude_status["state"] == "exceeded"
+        assert codex_status["spend_usd"] == claude_status["spend_usd"] == total_status["spend_usd"] == 22.5
+        assert codex_status["state"] == claude_status["state"] == total_status["state"] == "exceeded"
+        assert codex_status["total_tokens"] == 10_000_000
+        assert codex_status["sessions"] == 1
+        assert claude_status["total_tokens"] == 8_000_000
+        assert claude_status["sessions"] == 1
+        assert total_status["total_tokens"] == 18_000_000
+        assert total_status["sessions"] == 2
 
     def test_budget_status_exceeded(self, tmp_path, monkeypatch):
         db_path = tmp_path / "usage.sqlite"
@@ -749,7 +756,7 @@ class TestLocalUsageLedger:
         assert status["state"] == "exceeded"
         message = format_local_budget_status(status)
         assert "Budget: $20.00 / $20.00 used today ▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰ 100%." in message
-        assert "Tokens used today: 16.0M.\nFurther tool use" in message
+        assert "Codex tokens used today: 16.0M.\nFurther tool use" in message
 
     def test_budget_totals_recompute_zero_cost_rows(self, tmp_path, monkeypatch):
         db_path = tmp_path / "usage.sqlite"
@@ -800,8 +807,29 @@ class TestRenderLocalBudgetPanel:
         assert "$120.00 / $500.00" in text
         assert "24% used" in text
         assert "Remaining" in text and "$380.00" in text
+        assert "Codex Tokens" in text
+        assert "Codex Sessions" in text
         assert "exceeded" not in text
         assert "nearing" not in text
+
+    def test_global_panel_uses_total_labels(self):
+        text = self._render(
+            render_local_budget_panel(
+                {
+                    "configured": True,
+                    "state": "ok",
+                    "tool": None,
+                    "limit_usd": 500.0,
+                    "spend_usd": 120.0,
+                    "remaining_usd": 380.0,
+                    "days": 1,
+                    "total_tokens": 1_200_000,
+                    "sessions": 8,
+                }
+            )
+        )
+        assert "Total Tokens" in text
+        assert "Total Sessions" in text
 
     def test_warn_state_shows_nearing_callout(self):
         text = self._render(render_local_budget_panel(self._status("warn", 45.0, 50.0)))

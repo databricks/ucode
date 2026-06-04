@@ -719,19 +719,20 @@ def query_local_budget_totals(
     tool: str | None = None,
     db_path: Path = LOCAL_USAGE_DB_PATH,
 ) -> dict[str, object]:
-    """Sum local spend over the trailing window.
+    """Sum local usage over the trailing window.
 
-    Spend is aggregated across every coding tool — the daily budget is a single
-    pool shared by all of them. ``tool`` is accepted for backwards
-    compatibility but ignored.
+    When ``tool`` is provided, only rows for that tool are included. Callers
+    that need the shared daily-budget spend across all tools should omit it.
     """
-    del tool
     ensure_local_usage_schema(db_path)
+    tool_filter = "AND tool = ?" if tool else ""
+    params: tuple[object, ...] = (f"-{days} days", tool) if tool else (f"-{days} days",)
     with _connect_local_usage_db(db_path) as conn:
         rows = conn.execute(
-            """
+            f"""
             SELECT
               session_id,
+              tool,
               model,
               input_tokens,
               output_tokens,
@@ -741,8 +742,9 @@ def query_local_budget_totals(
               cost_usd
             FROM usage_events
             WHERE created_at >= datetime('now', ?)
+              {tool_filter}
             """,
-            (f"-{days} days",),
+            params,
         ).fetchall()
 
     sessions: set[str] = set()
@@ -797,11 +799,12 @@ def local_budget_status(
 ) -> dict[str, object]:
     """Budget status for the single daily limit shared across all tools.
 
-    ``tool`` only labels the returned status (e.g. for a launch panel); spend
-    and the limit are aggregated globally across every coding tool."""
+    ``tool`` scopes the displayed session/token totals for launch panels, while
+    spend and the limit remain aggregated globally across every coding tool."""
     limit_usd = local_daily_agent_budget_usd()
     warn_at = LOCAL_BUDGET_WARN_AT
     totals = query_local_budget_totals(days=days, db_path=db_path)
+    display_totals = query_local_budget_totals(days=days, tool=tool, db_path=db_path) if tool else totals
     spend_usd = _coerce_cost(totals.get("cost_usd"))
     warn_usd = limit_usd * warn_at
     if spend_usd >= limit_usd:
@@ -820,8 +823,8 @@ def local_budget_status(
         "days": days,
         "spend_usd": spend_usd,
         "remaining_usd": max(limit_usd - spend_usd, 0.0),
-        "total_tokens": _coerce_token_count(totals.get("total_tokens")),
-        "sessions": _coerce_token_count(totals.get("sessions")),
+        "total_tokens": _coerce_token_count(display_totals.get("total_tokens")),
+        "sessions": _coerce_token_count(display_totals.get("sessions")),
     }
 
 
@@ -854,7 +857,8 @@ def format_local_budget_status(status: dict[str, object]) -> str:
     remaining_usd = _coerce_cost(status.get("remaining_usd"))
     tokens = _coerce_token_count(status.get("total_tokens"))
     budget_line = _budget_line(spend_usd, limit_usd)
-    tokens_line = f"Tokens used today: {format_token_count(tokens)}."
+    token_subject = f"{display_tool} tokens used today" if status.get("tool") else "Tokens used today"
+    tokens_line = f"{token_subject}: {format_token_count(tokens)}."
     if state == "exceeded":
         return (
             f"⛔ [UCODE USAGE BUDGET] {display_tool} daily budget exceeded. \n"
@@ -931,6 +935,8 @@ def render_local_budget_panel(
     sessions = _coerce_token_count(status.get("sessions"))
     percent = _budget_usage_percent(spend_usd, limit_usd)
     color = _budget_state_color(state)
+    tokens_label = f"{display_tool} Tokens" if display_tool else "Total Tokens"
+    sessions_label = f"{display_tool} Sessions" if display_tool else "Total Sessions"
 
     lines: list[str] = []
     header = _budget_header_line(state, display_tool)
@@ -943,8 +949,8 @@ def render_local_budget_panel(
     lines.append(_budget_bar_markup(percent, color))
     lines.append("")
     lines.append(f"[bold]Remaining[/bold]   ${remaining_usd:,.2f}")
-    lines.append(f"[bold]Tokens[/bold]      {format_token_count(tokens)}")
-    lines.append(f"[bold]Sessions[/bold]    {sessions}")
+    lines.append(f"[bold]{tokens_label}[/bold]   {format_token_count(tokens)}")
+    lines.append(f"[bold]{sessions_label}[/bold]   {sessions}")
 
     return Panel(
         Text.from_markup("\n".join(lines)),
