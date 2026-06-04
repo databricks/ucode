@@ -278,6 +278,46 @@ def prompt_yes_no(prompt: str) -> bool:
         print_err("Please answer yes or no.")
 
 
+def prompt_for_default_agent(available: list[tuple[str, str]]) -> str:
+    """Single-select picker for the workspace's default coding agent."""
+    if not available:
+        raise RuntimeError("Cannot pick a default agent from an empty list.")
+    if len(available) == 1:
+        return available[0][0]
+
+    style = questionary.Style(
+        [
+            ("pointer", "fg:cyan bold"),
+            ("highlighted", "fg:white noinherit"),
+            ("selected", "fg:white noinherit"),
+            ("answer", "fg:cyan"),
+        ]
+    )
+    while True:
+        choices = [
+            questionary.Choice(title=display, value=tool_id, checked=False)
+            for tool_id, display in available
+        ]
+        answer = questionary.checkbox(
+            "Select the default coding agent (exactly one):",
+            choices=choices,
+            style=style,
+            pointer="›",
+            qmark="",
+            instruction="(space to toggle, enter to confirm)",
+        ).ask()
+        picks = list(answer) if answer else []
+        if len(picks) == 1:
+            return picks[0]
+        if not picks:
+            print_err("You must select exactly one default agent. Try again.")
+        else:
+            print_err(
+                f"You selected {len(picks)} agents; the default must be exactly one. "
+                "Try again."
+            )
+
+
 def prompt_for_choice(prompt: str, options: list[tuple[str, str]]) -> str:
     console.print()
     for index, (_, option_label) in enumerate(options, start=1):

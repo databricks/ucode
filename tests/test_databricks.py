@@ -24,6 +24,7 @@ from ucode.databricks import (
     download_managed_config,
     ensure_databricks_cli_version,
     get_databricks_token,
+    is_workspace_admin,
     list_databricks_apps,
     list_databricks_connections,
     list_genie_spaces,
@@ -994,6 +995,77 @@ class TestHttpGetJsonReason:
             payload, reason = _http_get_json("https://x/y", "tok")
         assert payload is None
         assert reason == "HTTP 404 Not Found"
+
+
+class TestIsWorkspaceAdmin:
+    """`is_workspace_admin` — used to gate `ucode setup`. Returns True only
+    when SCIM `Me` reports the user is in the workspace `admins` group."""
+
+    def _patch_scim(self, monkeypatch, payload):
+        def fake(url, token):
+            assert url.endswith("/api/2.0/preview/scim/v2/Me")
+            return payload, None
+
+        monkeypatch.setattr(db_mod, "_http_get_json", fake)
+
+    def test_returns_true_when_admins_group_present(self, monkeypatch):
+        self._patch_scim(
+            monkeypatch,
+            {
+                "userName": "alice@db.com",
+                "groups": [
+                    {"display": "users"},
+                    {"display": "admins"},
+                    {"display": "team.eng"},
+                ],
+            },
+        )
+        assert is_workspace_admin(WS, "token") is True
+
+    def test_returns_false_when_only_non_admin_groups(self, monkeypatch):
+        self._patch_scim(
+            monkeypatch,
+            {
+                "userName": "bob@db.com",
+                "groups": [
+                    {"display": "users"},
+                    {"display": "account users"},
+                    {"display": "team.eng"},
+                ],
+            },
+        )
+        assert is_workspace_admin(WS, "token") is False
+
+    def test_returns_false_when_groups_field_missing(self, monkeypatch):
+        # SCIM Me without `groups` (e.g. service principal) — treat as non-admin.
+        self._patch_scim(monkeypatch, {"userName": "svc@db.com"})
+        assert is_workspace_admin(WS, "token") is False
+
+    def test_returns_false_when_groups_is_not_a_list(self, monkeypatch):
+        # Malformed payload — fail closed.
+        self._patch_scim(monkeypatch, {"groups": "admins"})
+        assert is_workspace_admin(WS, "token") is False
+
+    def test_ignores_group_entries_without_display_field(self, monkeypatch):
+        self._patch_scim(
+            monkeypatch,
+            {"groups": [{"value": "123"}, {"display": None}, "stray-string"]},
+        )
+        assert is_workspace_admin(WS, "token") is False
+
+    def test_does_not_match_substring(self, monkeypatch):
+        # `super-admins` is not the workspace `admins` group; require exact match.
+        self._patch_scim(
+            monkeypatch,
+            {"groups": [{"display": "super-admins"}, {"display": "admins-readonly"}]},
+        )
+        assert is_workspace_admin(WS, "token") is False
+
+    def test_returns_none_when_scim_call_fails(self, monkeypatch):
+        monkeypatch.setattr(
+            db_mod, "_http_get_json", lambda url, token: (None, "HTTP 401 Unauthorized")
+        )
+        assert is_workspace_admin(WS, "token") is None
 
 
 class TestParseDatabricksCliVersion:

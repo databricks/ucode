@@ -318,6 +318,22 @@ def get_current_user_name(workspace: str, token: str) -> str | None:
                 return entry["value"].strip()
     return None
 
+WORKSPACE_ADMIN_GROUP = "admins"
+
+def is_workspace_admin(workspace: str, token: str) -> bool | None:
+    """Return True if the current user is in the workspace ``admins`` group."""
+    hostname = workspace_hostname(workspace)
+    payload, _ = _http_get_json(f"https://{hostname}/api/2.0/preview/scim/v2/Me", token)
+    if not isinstance(payload, dict):
+        return None
+    groups = payload.get("groups")
+    if not isinstance(groups, list):
+        return False
+    for group in groups:
+        if isinstance(group, dict) and group.get("display") == WORKSPACE_ADMIN_GROUP:
+            return True
+    return False
+
 
 # Experiment tag Databricks sets when an experiment's traces are written to a
 # Unity Catalog table. Its value is the UC destination, e.g.

@@ -41,6 +41,7 @@ from ucode.databricks import (
     get_databricks_profiles,
     get_databricks_token,
     install_databricks_cli,
+    is_workspace_admin,
     normalize_workspace_url,
     run_databricks_login,
     upload_managed_config,
@@ -71,9 +72,12 @@ from ucode.ui import (
     print_note,
     print_section,
     print_success,
+    print_warning,
+    prompt_for_default_agent,
     prompt_for_tools,
     prompt_for_usd_amount,
     prompt_for_workspace,
+    prompt_yes_no,
     spinner,
     status_badge,
 )
@@ -555,7 +559,7 @@ app = typer.Typer(
 )
 configure_app = typer.Typer(add_completion=False, no_args_is_help=False)
 app.add_typer(configure_app, name="configure", help="Configure workspace and tool settings.")
-setup_app = typer.Typer(add_completion=False, no_args_is_help=True)
+setup_app = typer.Typer(add_completion=False)
 app.add_typer(setup_app, name="setup", help="Configure workspace policy settings.")
 mcp_app = typer.Typer(add_completion=False, no_args_is_help=True)
 app.add_typer(mcp_app, name="mcp", help="MCP servers exposed by ucode.")
@@ -882,6 +886,25 @@ def setup_budget_cmd() -> None:
         workspace = state.get("workspace")
         if not isinstance(workspace, str) or not workspace:
             raise RuntimeError("No workspace is configured. Run `ucode configure` first.")
+        profile = state.get("profile")
+
+        ensure_databricks_auth(workspace, profile)
+        with spinner("Checking workspace admin permissions..."):
+            token = get_databricks_token(workspace, profile)
+            admin = is_workspace_admin(workspace, token)
+        if admin is False:
+            raise RuntimeError(
+                f"You do not have admin permissions to change the ucode budget "
+                f"for {workspace}. `ucode setup budget` is restricted to workspace admins."
+            )
+        if admin is None:
+            print_warning(
+                "Could not verify workspace admin permissions (SCIM `Me` call failed). "
+                "Proceeding optimistically — the final UC write will fail if you "
+                "lack the required role."
+            )
+        else:
+            print_success("Admin permissions verified")
 
         policies = dict(state.get("policies") or {})
         current_limit = policies.get("daily_limit_usd")
@@ -950,6 +973,108 @@ def usage_cmd(
     except RuntimeError as exc:
         print_err(str(exc))
         raise typer.Exit(1) from None
+
+
+@setup_app.callback(invoke_without_command=True)
+def setup_cmd(ctx: typer.Context) -> None:
+    """Interactively build the managed ucode config for a workspace (admin-only)."""
+    # Let subcommands (e.g. `ucode setup budget`) handle themselves.
+    if ctx.invoked_subcommand is not None:
+        return
+    try:
+        install_databricks_cli()
+        console.print(
+            Panel(
+                "Author the managed coding config for your workspace.\n"
+                "Developers in this workspace pull this automatically on `ucode configure`.",
+                title="ucode setup",
+                style="cyan",
+                expand=False,
+            )
+        )
+
+        state = load_state()
+        workspace = state.get("workspace")
+        profile = state.get("profile")
+        if not workspace:
+            workspace, profile = _prompt_for_configuration()
+        ensure_databricks_auth(workspace, profile)
+
+        with spinner("Checking workspace admin permissions..."):
+            token = get_databricks_token(workspace, profile)
+            admin = is_workspace_admin(workspace, token)
+        if admin is False:
+            raise RuntimeError(
+                f"You do not have admin permissions to change the ucode config "
+                f"for {workspace}. `ucode setup` is restricted to workspace admins."
+            )
+        if admin is None:
+            print_warning(
+                "Could not verify workspace admin permissions (SCIM `Me` call failed). "
+                "Proceeding optimistically — the final UC write will fail if you "
+                "lack the required role."
+            )
+        else:
+            print_success("Admin permissions verified")
+
+        configure_rc = configure_workspace_command(workspaces=[(workspace, profile)])
+        if configure_rc != 0:
+            raise typer.Exit(configure_rc)
+
+        post_configure_state = load_state()
+        configured_tools = [
+            tool
+            for tool in (post_configure_state.get("available_tools") or [])
+            if isinstance(tool, str) and tool in TOOL_SPECS
+        ]
+        if configured_tools:
+            default_agent = prompt_for_default_agent(
+                [(tool, TOOL_SPECS[tool]["display"]) for tool in configured_tools]
+            )
+            post_configure_state["default_agent"] = default_agent
+            save_state(post_configure_state)
+            print_success(
+                f"Default agent set to {TOOL_SPECS[default_agent]['display']}"
+            )
+
+        if prompt_yes_no("Set up MLflow tracing for this workspace?"):
+            configure_tracing_command()
+
+        if prompt_yes_no("Set up managed MCP servers for this workspace?"):
+            configure_mcp_command()
+
+        if prompt_yes_no("Set up budget policies for this workspace?"):
+            print_warning("Budget policy setup is NOT IMPLEMENTED yet.")
+            print_note(
+                "Exiting without publishing. Re-run `ucode setup` once policy "
+                "support lands, or run `ucode export` to publish the current "
+                "config (workspace + agents + tracing + MCP) without policies."
+            )
+            return
+
+        final_state = load_state()
+        summary_default = final_state.get("default_agent")
+        default_display = (
+            TOOL_SPECS[summary_default]["display"]
+            if isinstance(summary_default, str) and summary_default in TOOL_SPECS
+            else "not set"
+        )
+        console.print(
+            Panel(
+                f"[bold]Workspace:[/bold] [cyan]{workspace}[/cyan]\n"
+                f"[bold]Default agent:[/bold] [cyan]{default_display}[/cyan]\n"
+                "Run [bold]ucode export[/bold] to publish this config to Unity Catalog.",
+                title="Setup Complete",
+                style="green",
+                expand=False,
+            )
+        )
+    except RuntimeError as exc:
+        print_err(str(exc))
+        raise typer.Exit(1) from None
+    except KeyboardInterrupt:
+        print_err("Interrupted.")
+        raise typer.Exit(130) from None
 
 
 @app.command("export")
