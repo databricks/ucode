@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import re
 from unittest.mock import patch
 
@@ -178,14 +179,21 @@ class TestSubcommandRouting:
 
 
 class TestSetupBudgetCommand:
+    @staticmethod
+    def _admin_patches(stack):
+        stack.enter_context(patch("ucode.cli.ensure_databricks_auth"))
+        stack.enter_context(patch("ucode.cli.get_databricks_token", return_value="tok"))
+        stack.enter_context(patch("ucode.cli.is_workspace_admin", return_value=True))
+
     def test_sets_daily_budget_for_current_workspace(self):
         state = {
             "workspace": "https://example.databricks.com",
             "policies": {"claude": {"default_model": "databricks-claude-sonnet-4"}},
         }
-        with patch("ucode.cli.load_state", return_value=state), patch(
-            "ucode.cli.save_state"
-        ) as mock_save:
+        with contextlib.ExitStack() as stack:
+            self._admin_patches(stack)
+            stack.enter_context(patch("ucode.cli.load_state", return_value=state))
+            mock_save = stack.enter_context(patch("ucode.cli.save_state"))
             result = runner.invoke(app, ["setup", "budget"], input="250\n")
 
         assert result.exit_code == 0, result.output
@@ -200,9 +208,10 @@ class TestSetupBudgetCommand:
             "workspace": "https://example.databricks.com",
             "policies": {"daily_limit_usd": 125.0, "claude": {"default_model": "old"}},
         }
-        with patch("ucode.cli.load_state", return_value=state), patch(
-            "ucode.cli.save_state"
-        ) as mock_save:
+        with contextlib.ExitStack() as stack:
+            self._admin_patches(stack)
+            stack.enter_context(patch("ucode.cli.load_state", return_value=state))
+            mock_save = stack.enter_context(patch("ucode.cli.save_state"))
             result = runner.invoke(app, ["setup", "budget"], input="500\n")
 
         assert result.exit_code == 0, result.output

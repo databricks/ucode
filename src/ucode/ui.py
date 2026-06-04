@@ -265,7 +265,9 @@ def prompt_for_tools(available: list[tuple[str, str]]) -> list[str]:
         qmark="",
         instruction="(space to toggle, enter to confirm)",
     ).ask()
-    return list(answer) if answer else []
+    if answer is None:
+        raise KeyboardInterrupt
+    return list(answer)
 
 
 def prompt_yes_no(prompt: str) -> bool:
@@ -306,7 +308,9 @@ def prompt_for_default_agent(available: list[tuple[str, str]]) -> str:
             qmark="",
             instruction="(space to toggle, enter to confirm)",
         ).ask()
-        picks = list(answer) if answer else []
+        if answer is None:
+            raise KeyboardInterrupt
+        picks = list(answer)
         if len(picks) == 1:
             return picks[0]
         if not picks:

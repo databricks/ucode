@@ -881,6 +881,27 @@ def configure_tracing(
         raise typer.Exit(130) from None
 
 
+def _run_budget_setup(workspace: str) -> None:
+    """Interactive "set the workspace's daily spend budget" flow.
+    used by both ucode setup and ucode setup budget subcommands."""
+    state = load_state()
+    policies = dict(state.get("policies") or {})
+    current_limit = policies.get("daily_limit_usd")
+
+    print_section("Budget")
+    print_kv("Workspace", workspace)
+    if isinstance(current_limit, (int, float)) and not isinstance(current_limit, bool):
+        print_note(f"Current daily limit: ${float(current_limit):.2f}")
+
+    daily_limit = prompt_for_usd_amount("Daily budget in USD")
+    policies["daily_limit_usd"] = daily_limit
+    state["policies"] = policies
+    save_state(state)
+
+    print_kv("Daily limit", f"${daily_limit:.2f}")
+    print_success("Daily budget updated")
+
+
 @setup_app.command("budget")
 def setup_budget_cmd() -> None:
     """Set the shared daily spend budget for the current workspace."""
@@ -909,21 +930,46 @@ def setup_budget_cmd() -> None:
         else:
             print_success("Admin permissions verified")
 
-        policies = dict(state.get("policies") or {})
-        current_limit = policies.get("daily_limit_usd")
+        _run_budget_setup(workspace)
+    except RuntimeError as exc:
+        print_err(str(exc))
+        raise typer.Exit(1) from None
+    except KeyboardInterrupt:
+        print_err("Interrupted.")
+        raise typer.Exit(130) from None
 
-        print_section("Budget")
-        print_kv("Workspace", workspace)
-        if isinstance(current_limit, (int, float)) and not isinstance(current_limit, bool):
-            print_note(f"Current daily limit: ${float(current_limit):.2f}")
 
-        daily_limit = prompt_for_usd_amount("Daily budget in USD")
-        policies["daily_limit_usd"] = daily_limit
-        state["policies"] = policies
-        save_state(state)
+@setup_app.command("mcp")
+def setup_mcp_cmd() -> None:
+    """Configure managed MCP servers for the current workspace."""
+    try:
+        state = load_state()
+        workspace = state.get("workspace")
+        if not isinstance(workspace, str) or not workspace:
+            raise RuntimeError("No workspace is configured. Run `ucode configure` first.")
+        profile = state.get("profile")
 
-        print_kv("Daily limit", f"${daily_limit:.2f}")
-        print_success("Daily budget updated")
+        # Pushing MCP config to UC is a workspace-wide write, so admin-only —
+        # same gate as `ucode setup budget`.
+        ensure_databricks_auth(workspace, profile)
+        with spinner("Checking workspace admin permissions..."):
+            token = get_databricks_token(workspace, profile)
+            admin = is_workspace_admin(workspace, token)
+        if admin is False:
+            raise RuntimeError(
+                f"You do not have admin permissions to change MCP settings "
+                f"for {workspace}. `ucode setup mcp` is restricted to workspace admins."
+            )
+        if admin is None:
+            print_warning(
+                "Could not verify workspace admin permissions (SCIM `Me` call failed). "
+                "Proceeding optimistically — the final UC write will fail if you "
+                "lack the required role."
+            )
+        else:
+            print_success("Admin permissions verified")
+
+        configure_mcp_command()
     except RuntimeError as exc:
         print_err(str(exc))
         raise typer.Exit(1) from None
@@ -1020,7 +1066,17 @@ def setup_cmd(ctx: typer.Context) -> None:
         else:
             print_success("Admin permissions verified")
 
-        configure_rc = configure_workspace_command(workspaces=[(workspace, profile)])
+        picked_tools = prompt_for_tools(
+            [(tool, TOOL_SPECS[tool]["display"]) for tool in TOOL_SPECS]
+        )
+        if not picked_tools:
+            print_note("No coding agents selected — nothing to configure.")
+            return
+
+        configure_rc = configure_workspace_command(
+            workspaces=[(workspace, profile)],
+            selected_tools=picked_tools,
+        )
         if configure_rc != 0:
             raise typer.Exit(configure_rc)
 
@@ -1047,13 +1103,9 @@ def setup_cmd(ctx: typer.Context) -> None:
             configure_mcp_command()
 
         if prompt_yes_no("Set up budget policies for this workspace?"):
-            print_warning("Budget policy setup is NOT IMPLEMENTED yet.")
-            print_note(
-                "Exiting without publishing. Re-run `ucode setup` once policy "
-                "support lands, or run `ucode export` to publish the current "
-                "config (workspace + agents + tracing + MCP) without policies."
-            )
-            return
+            _run_budget_setup(workspace)
+        else:
+            print_note("Skipping budget setup — run `ucode setup budget` anytime to set one.")
 
         final_state = load_state()
         summary_default = final_state.get("default_agent")
