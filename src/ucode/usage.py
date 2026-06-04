@@ -833,20 +833,6 @@ def _budget_line(spend_usd: float, limit_usd: float) -> str:
     )
 
 
-def format_local_budget_launch_line(status: dict[str, object]) -> str:
-    spend_usd = _coerce_cost(status.get("spend_usd"))
-    limit_usd = _coerce_cost(status.get("limit_usd"))
-    percent = _budget_usage_percent(spend_usd, limit_usd)
-    return (
-        f"${spend_usd:.2f} / ${limit_usd:.2f} used today "
-        f"{_budget_progress_bar(percent)} {percent}%."
-    )
-
-
-def format_local_budget_remaining(status: dict[str, object]) -> str:
-    return f"${_coerce_cost(status.get('remaining_usd')):.2f} remaining today"
-
-
 def format_local_budget_status(status: dict[str, object]) -> str:
     state = str(status.get("state") or "ok")
     tool = str(status.get("tool") or "agent")
@@ -905,9 +891,16 @@ def _budget_header_line(state: str, display_tool: str) -> str | None:
     return None
 
 
-def render_local_budget_panel(status: dict[str, object]) -> Panel:
+def render_local_budget_panel(
+    status: dict[str, object],
+    *,
+    title: str | None = None,
+) -> Panel:
     """Render a budget status as a bordered Rich panel with a color-coded fill
-    bar. Used by `ucode usage budget-status` and the launch budget summary."""
+    bar. Used by `ucode usage budget-status` and the launch budget summary.
+
+    Pass ``title`` to override the default ``"<Tool> · Daily Budget"`` panel
+    title."""
     state = str(status.get("state") or "ok")
     tool = str(status.get("tool") or "agent")
     display_tool = tool[:1].upper() + tool[1:] if tool else "Agent"
@@ -935,10 +928,10 @@ def render_local_budget_panel(status: dict[str, object]) -> Panel:
 
     return Panel(
         Text.from_markup("\n".join(lines)),
-        title=Text(f"{display_tool} · Daily Budget", style=f"bold {color}"),
+        title=Text(title or f"{display_tool} · Daily Budget", style=f"bold {color}"),
         border_style=color,
         expand=False,
-        padding=(1, 2),
+        padding=(1, 2, 0, 2),
     )
 
 

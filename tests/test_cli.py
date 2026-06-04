@@ -156,10 +156,9 @@ class TestSubcommandRouting:
 
         assert result.exit_code == 0, result.output
         assert "ucode with Codex" in result.output
-        assert "Model:   databricks-claude-opus-4-8[1m]" in result.output
-        assert "Budget:  $12.40 / $200.00 used today" in result.output
-        assert "6%." in result.output
-        assert "Pending: $187.60 remaining today" in result.output
+        assert "$12.40 / $200.00" in result.output
+        assert "6% used" in result.output
+        assert "$187.60" in result.output
 
     def test_no_agent_flag(self):
         """--agent flag must no longer exist."""

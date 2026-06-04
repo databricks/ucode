@@ -8,7 +8,6 @@ from typing import Annotated
 
 import typer
 from rich.panel import Panel
-from rich.text import Text
 
 from ucode.agents import (
     TOOL_SPECS,
@@ -78,8 +77,6 @@ from ucode.ui import (
     status_badge,
 )
 from ucode.usage import (
-    format_local_budget_launch_line,
-    format_local_budget_remaining,
     format_local_budget_status,
     local_budget_status,
     record_local_usage_delta,
@@ -633,27 +630,6 @@ def _auto_configure_tool(tool: str) -> None:
         raise RuntimeError(f"{spec['display']} validation failed — config reverted.")
 
 
-def _render_launch_panel(
-    *,
-    display: str,
-    model: str | None,
-    budget_status: dict[str, object] | None = None,
-) -> Panel:
-    lines = []
-    if model:
-        lines.append(f"Model:   {model}")
-    if budget_status is not None:
-        lines.append(f"Budget:  {format_local_budget_launch_line(budget_status)}")
-        lines.append(f"Pending: {format_local_budget_remaining(budget_status)}")
-    return Panel(
-        Text("\n".join(lines)),
-        title=Text(f"ucode with {display}"),
-        border_style="blue",
-        expand=False,
-        padding=(0, 2),
-    )
-
-
 def _agent_budget_exceeded(tool: str) -> bool:
     """True when ``tool`` has a local daily budget and it's already exceeded.
 
@@ -714,10 +690,9 @@ def _launch_tool(tool_name: str, ctx: typer.Context) -> None:
         if tool in BUDGET_TRACKED_AGENTS:
             budget_status = local_budget_status(tool)
             console.print(
-                _render_launch_panel(
-                    display=display,
-                    model=resolved_model,
-                    budget_status=budget_status,
+                render_local_budget_panel(
+                    budget_status,
+                    title=f"ucode with {display}",
                 )
             )
             budget_message = format_local_budget_status(budget_status)
