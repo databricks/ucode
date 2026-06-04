@@ -74,6 +74,10 @@ CLAUDE_TRACING_ENV_KEYS = (
     "MLFLOW_TRACING_SQL_WAREHOUSE_ID",
 )
 CLAUDE_TRACING_STOP_HOOK_SUFFIX = " autolog claude stop-hook"
+# Substring identifying ucode's own usage-tracking hooks (PreToolUse/PostToolUse).
+# Used to recognize and replace stale ucode hooks on re-run without disturbing a
+# user's own hooks for the same events.
+CLAUDE_USAGE_HOOK_MARKER = "usage hook claude "
 # Tracing is driven by an `mlflow autolog claude stop-hook` Stop hook, run by
 # the `mlflow` CLI on each session end. Pin to 3.11.x: 3.12 dropped the Unity
 # Catalog trace-write path, so traces silently land in the classic store
@@ -190,25 +194,71 @@ def _usage_hook_command(workspace: str, model: str, event: str) -> str:
     )
 
 
-def _usage_hooks_overlay(workspace: str, model: str) -> dict:
-    pre_tool_hook = {
-        "matcher": "",
-        "hooks": [
-            {"type": "command", "command": _usage_hook_command(workspace, model, "pre-tool")}
-        ],
-    }
-    post_tool_hook = {
-        "matcher": "",
-        "hooks": [
-            {"type": "command", "command": _usage_hook_command(workspace, model, "post-tool")}
-        ],
-    }
-    return {
-        "hooks": {
-            "PreToolUse": [pre_tool_hook],
-            "PostToolUse": [post_tool_hook],
-        }
-    }
+def _is_usage_hook(hook: object) -> bool:
+    if not isinstance(hook, dict):
+        return False
+    hook = cast(dict, hook)
+    if hook.get("type") != "command":
+        return False
+    command = hook.get("command")
+    return isinstance(command, str) and CLAUDE_USAGE_HOOK_MARKER in command
+
+
+def _remove_usage_hooks(settings: dict, event: str) -> None:
+    """Strip only ucode's usage hooks from one event's hook list, leaving the
+    user's own hooks for that event intact. Mirrors `_remove_tracing_stop_hook`."""
+    hooks = settings.get("hooks")
+    if not isinstance(hooks, dict):
+        return
+    entries = hooks.get(event)
+    if not isinstance(entries, list):
+        return
+
+    cleaned_entries = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            cleaned_entries.append(entry)
+            continue
+        hook_list = entry.get("hooks")
+        if not isinstance(hook_list, list):
+            cleaned_entries.append(entry)
+            continue
+        cleaned_hooks = [hook for hook in hook_list if not _is_usage_hook(hook)]
+        if cleaned_hooks:
+            cleaned_entry = dict(entry)
+            cleaned_entry["hooks"] = cleaned_hooks
+            cleaned_entries.append(cleaned_entry)
+
+    if cleaned_entries:
+        hooks[event] = cleaned_entries
+    else:
+        hooks.pop(event, None)
+    if not hooks:
+        settings.pop("hooks", None)
+
+
+def _upsert_usage_hooks(settings: dict, workspace: str, model: str) -> None:
+    """Install ucode's PreToolUse/PostToolUse usage hooks, replacing any prior
+    ucode usage hooks (idempotent on re-run) while preserving the user's own
+    hooks for those events."""
+    for event, action in (("PreToolUse", "pre-tool"), ("PostToolUse", "post-tool")):
+        _remove_usage_hooks(settings, event)
+        hooks = settings.get("hooks")
+        if not isinstance(hooks, dict):
+            hooks = {}
+            settings["hooks"] = hooks
+        entries = hooks.get(event)
+        if not isinstance(entries, list):
+            entries = []
+            hooks[event] = entries
+        entries.append(
+            {
+                "matcher": "",
+                "hooks": [
+                    {"type": "command", "command": _usage_hook_command(workspace, model, action)}
+                ],
+            }
+        )
 
 
 def _register_web_search_mcp(workspace: str, search_model: str, profile: str | None = None) -> bool:
@@ -274,11 +324,14 @@ def write_tool_config(state: dict, model: str) -> dict:
                 "to install the Claude Stop hook — traces won't be emitted. Re-run "
                 "`ucode configure tracing`."
             )
-    deep_merge_dict(overlay, _usage_hooks_overlay(state["workspace"], model))
     managed_keys = managed_keys + [["hooks"]]
 
     existing = read_json_safe(CLAUDE_SETTINGS_PATH)
     merged = deep_merge_dict(existing, overlay)
+    # Upsert (don't deep-merge) the usage hooks: deep_merge_dict replaces whole
+    # lists, so merging a PreToolUse/PostToolUse overlay would wipe a user's own
+    # hooks for those events. Upserting preserves them and stays idempotent.
+    _upsert_usage_hooks(merged, state["workspace"], model)
     if tracing_env_vars and stop_hook_command:
         _upsert_tracing_stop_hook(merged, stop_hook_command)
     if not tracing_env_vars:

@@ -251,6 +251,18 @@ def _install_agent_tracing_deps(state: dict) -> None:
         claude.ensure_tracing_runtime()
 
 
+def install_tracing_runtime(state: dict) -> None:
+    """Public entry point for ensuring the tracing runtime is present.
+
+    Called from the configure/launch path after a managed config is pulled: the
+    pulled state may have tracing enabled, but the agent config writer only
+    installs the Claude Stop hook when the pinned ``mlflow`` CLI is already on
+    disk — otherwise it writes the env vars and silently drops the hook, so no
+    traces are emitted. Installing the runtime here closes that gap. No-op when
+    tracing is disabled or Claude isn't configured."""
+    _install_agent_tracing_deps(state)
+
+
 def configure_tracing_command(
     disable: bool = False, workspaces: list[tuple[str, str | None]] | None = None
 ) -> int:

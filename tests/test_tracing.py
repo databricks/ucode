@@ -298,7 +298,9 @@ class TestClaudeTracingEnv:
         state = {"workspace": WS, "claude_models": {}}
         settings = self._write(state, tmp_path, monkeypatch)
         assert "MLFLOW_TRACKING_URI" not in settings.get("env", {})
-        assert "hooks" not in settings
+        # Usage hooks are always written; only the tracing Stop hook is absent.
+        assert "Stop" not in settings.get("hooks", {})
+        assert set(settings["hooks"]) == {"PreToolUse", "PostToolUse"}
 
     def test_strips_stale_keys_when_disabled(self, tmp_path, monkeypatch):
         settings = tmp_path / "ucode-settings.json"
@@ -594,6 +596,20 @@ class TestInstallAgentTracingDeps:
         state = {**_enabled_state(), "available_tools": ["codex"]}
         with patch("ucode.agents.claude.ensure_tracing_runtime") as claude_dep:
             tracing._install_agent_tracing_deps(state)
+        claude_dep.assert_not_called()
+
+    def test_public_install_runtime_installs_when_enabled(self):
+        # The pull path calls the public wrapper; it must install when tracing is
+        # on and Claude is configured.
+        state = {**_enabled_state(), "available_tools": ["claude"]}
+        with patch("ucode.agents.claude.ensure_tracing_runtime") as claude_dep:
+            tracing.install_tracing_runtime(state)
+        claude_dep.assert_called_once()
+
+    def test_public_install_runtime_skips_when_tracing_disabled(self):
+        state = {"workspace": WS, "available_tools": ["claude"]}
+        with patch("ucode.agents.claude.ensure_tracing_runtime") as claude_dep:
+            tracing.install_tracing_runtime(state)
         claude_dep.assert_not_called()
 
 

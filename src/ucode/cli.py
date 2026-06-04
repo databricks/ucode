@@ -61,7 +61,7 @@ from ucode.state import (
     save_state,
     slice_state_for_export,
 )
-from ucode.tracing import configure_tracing_command
+from ucode.tracing import configure_tracing_command, install_tracing_runtime
 from ucode.ui import (
     console,
     heading,
@@ -285,6 +285,11 @@ def configure_shared_state(
     save_state(state)
     if remote is not None:
         state = {**state, "_managed_config_pulled": True}
+        # A pulled config may enable tracing. The agent config writer only
+        # installs the Claude Stop hook when the pinned mlflow CLI is present,
+        # so install the runtime now — otherwise the env vars get written but
+        # the hook is silently skipped and no traces are emitted.
+        install_tracing_runtime(state)
     # Scrub MCP entries that ucode wrote for the previous workspace so the new
     # workspace's agent configs aren't stale.
     if previous_workspace and previous_workspace != workspace:

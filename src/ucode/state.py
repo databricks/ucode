@@ -65,6 +65,14 @@ def slice_state_for_export(full_state: dict, workspace: str) -> dict:
           "policies": {...},
           ...all other per-workspace fields...
         }
+
+    The ``workspace`` URL is the only stable, machine-independent identity in the
+    blob: every consumer resolves their own local Databricks profile from it via
+    ``find_profile_name_for_host``. Machine-local fields derived from the
+    exporter's profile (the top-level ``profile`` and the tracing
+    ``tracking_uri``, which is ``databricks://<profile>``) are stripped so the
+    admin's profile name never leaks into a user's config — the consumer
+    recomputes both from the workspace on pull.
     """
     workspaces = full_state.get("workspaces")
     if not isinstance(workspaces, dict) or workspace not in workspaces:
@@ -76,11 +84,18 @@ def slice_state_for_export(full_state: dict, workspace: str) -> dict:
         raise RuntimeError(
             f"Local state for workspace {workspace} is malformed (expected an object)."
         )
-    return {
+    sliced = {
         **block,
         "state_version": full_state.get("state_version") or STATE_VERSION,
         "workspace": workspace,
     }
+    sliced.pop("profile", None)
+    tracing = sliced.get("tracing")
+    if isinstance(tracing, dict):
+        tracing = dict(tracing)
+        tracing.pop("tracking_uri", None)
+        sliced["tracing"] = tracing
+    return sliced
 
 
 def save_state(state: dict) -> None:
@@ -325,7 +340,20 @@ def merge_managed_workspace(
     merged = {**remote_splice, "workspace": workspace}
     if profile:
         merged["profile"] = profile
+    _localize_tracking_uri(merged)
     return merged
+
+
+def _localize_tracking_uri(state: dict) -> None:
+    """Re-point a pulled tracing block's MLflow tracking URI at the local
+    profile. The admin's export carries ``databricks://<admin-profile>``; that
+    profile name has no matching ``~/.databrickscfg`` entry on the user's
+    machine, so auth would fail. Derived in-place from the merged profile."""
+    tracing = state.get("tracing")
+    if not isinstance(tracing, dict):
+        return
+    profile = state.get("profile")
+    tracing["tracking_uri"] = f"databricks://{profile}" if profile else "databricks"
 
 
 def build_agent_state(state: dict) -> dict[str, dict]:

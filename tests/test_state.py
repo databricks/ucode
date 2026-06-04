@@ -433,7 +433,7 @@ class TestSliceStateForExport:
         with pytest.raises(RuntimeError, match="No local state for workspace"):
             slice_state_for_export(full, "https://never-configured.databricks.com")
 
-    def test_publishes_entire_block_verbatim(self):
+    def test_publishes_block_minus_machine_local_fields(self):
         block = {
             "workspace": FAKE_WS,
             "profile": "admins-cli-profile",
@@ -445,9 +445,38 @@ class TestSliceStateForExport:
         }
         full = {"state_version": 3, "workspaces": {FAKE_WS: block}}
         sliced = slice_state_for_export(full, FAKE_WS)
+        # The exporter's local profile name is machine-specific; consumers
+        # resolve their own from the workspace URL, so it must not be published.
+        assert "profile" not in sliced
         for key, value in block.items():
+            if key == "profile":
+                continue
             assert sliced[key] == value
         assert sliced["state_version"] == 3
+
+    def test_strips_admin_tracking_uri_from_tracing_block(self):
+        # The tracing tracking_uri is `databricks://<admin-profile>` — a local
+        # credential pointer, not a shared address. It must not be published;
+        # the rest of the tracing block (the shared experiment) is preserved.
+        block = {
+            "workspace": FAKE_WS,
+            "tracing": {
+                "enabled": True,
+                "tracking_uri": "databricks://eng-ml-inference-team-us-east-1",
+                "experiment_id": "111",
+                "uc_destination": "main.default.ucode_traces",
+                "sql_warehouse_id": "wh123",
+            },
+        }
+        full = {"state_version": 3, "workspaces": {FAKE_WS: block}}
+        sliced = slice_state_for_export(full, FAKE_WS)
+        assert "tracking_uri" not in sliced["tracing"]
+        assert sliced["tracing"]["enabled"] is True
+        assert sliced["tracing"]["experiment_id"] == "111"
+        assert sliced["tracing"]["uc_destination"] == "main.default.ucode_traces"
+        assert sliced["tracing"]["sql_warehouse_id"] == "wh123"
+        # The source block is not mutated.
+        assert block["tracing"]["tracking_uri"] == "databricks://eng-ml-inference-team-us-east-1"
 
 
 class TestMergeManagedWorkspace:
@@ -501,6 +530,50 @@ class TestMergeManagedWorkspace:
             "workspace": FAKE_WS,
             "profile": "user-local-profile",
         }
+
+    def test_localizes_tracing_uri_to_local_profile(self):
+        # The admin's export bakes its own profile into the tracing URI; after a
+        # pull it must point at the user's local profile or MLflow auth fails.
+        local = {"workspace": FAKE_WS, "profile": "user-local-profile"}
+        remote = {
+            "workspace": FAKE_WS,
+            "profile": "admin-profile",
+            "tracing": {
+                "enabled": True,
+                "tracking_uri": "databricks://admin-profile",
+                "experiment_id": "111",
+            },
+        }
+
+        merged = merge_managed_workspace(local, remote, profile="user-local-profile")
+
+        assert merged["tracing"]["tracking_uri"] == "databricks://user-local-profile"
+        # Other tracing fields are preserved untouched.
+        assert merged["tracing"]["experiment_id"] == "111"
+
+    def test_localizes_tracing_uri_to_bare_databricks_without_profile(self):
+        local = {"workspace": FAKE_WS}
+        remote = {
+            "workspace": FAKE_WS,
+            "tracing": {"enabled": True, "tracking_uri": "databricks://admin-profile"},
+        }
+
+        merged = merge_managed_workspace(local, remote)
+
+        assert merged["tracing"]["tracking_uri"] == "databricks"
+
+    def test_sets_tracking_uri_when_export_omits_it(self):
+        # New exports strip tracking_uri; the consumer must populate it from the
+        # locally-resolved profile rather than leave it missing.
+        local = {"workspace": FAKE_WS, "profile": "user-local-profile"}
+        remote = {
+            "workspace": FAKE_WS,
+            "tracing": {"enabled": True, "experiment_id": "111"},
+        }
+
+        merged = merge_managed_workspace(local, remote, profile="user-local-profile")
+
+        assert merged["tracing"]["tracking_uri"] == "databricks://user-local-profile"
 
     def test_no_op_when_workspaces_dont_match(self):
         local = {"workspace": FAKE_WS, "claude_models": {"opus": "local"}}

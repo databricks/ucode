@@ -258,6 +258,66 @@ class TestWriteToolConfigMcpRegistration:
         assert "--model databricks-claude-sonnet-4" in command
         assert ["hooks"] in result["managed_configs"]["claude"]["keys"]
 
+    def test_preserves_user_pre_and_post_tool_hooks(self, monkeypatch):
+        # A user's own PreToolUse/PostToolUse hooks must survive: deep_merge_dict
+        # would replace the whole list, so the usage hooks are upserted instead.
+        written: dict = {}
+        existing = {
+            "hooks": {
+                "PreToolUse": [{"hooks": [{"type": "command", "command": "user-pre"}]}],
+                "PostToolUse": [{"hooks": [{"type": "command", "command": "user-post"}]}],
+            }
+        }
+        monkeypatch.setattr(claude, "backup_existing_file", lambda *a, **kw: True)
+        monkeypatch.setattr(claude, "read_json_safe", lambda path: existing)
+        monkeypatch.setattr(
+            claude, "write_json_file", lambda path, payload: written.update(payload)
+        )
+        monkeypatch.setattr(claude, "save_state", lambda state: None)
+        monkeypatch.setattr(claude, "_register_web_search_mcp", lambda *a, **kw: None)
+
+        claude.write_tool_config(
+            {"workspace": WS, "codex_models": []}, "databricks-claude-sonnet-4"
+        )
+
+        pre_commands = [
+            hook["command"] for entry in written["hooks"]["PreToolUse"] for hook in entry["hooks"]
+        ]
+        post_commands = [
+            hook["command"] for entry in written["hooks"]["PostToolUse"] for hook in entry["hooks"]
+        ]
+        assert "user-pre" in pre_commands
+        assert "user-post" in post_commands
+        assert any("usage hook claude pre-tool" in c for c in pre_commands)
+        assert any("usage hook claude post-tool" in c for c in post_commands)
+
+    def test_usage_hooks_idempotent_across_reruns(self, monkeypatch):
+        # Re-running configure must not stack duplicate ucode usage hooks; the
+        # prior ucode hook is replaced, not appended to.
+        store: dict = {}
+        monkeypatch.setattr(claude, "backup_existing_file", lambda *a, **kw: True)
+        monkeypatch.setattr(claude, "read_json_safe", lambda path: store.get("doc", {}))
+        monkeypatch.setattr(
+            claude, "write_json_file", lambda path, payload: store.update(doc=payload)
+        )
+        monkeypatch.setattr(claude, "save_state", lambda state: None)
+        monkeypatch.setattr(claude, "_register_web_search_mcp", lambda *a, **kw: None)
+
+        state = {"workspace": WS, "codex_models": []}
+        claude.write_tool_config(state, "databricks-claude-sonnet-4")
+        claude.write_tool_config(state, "databricks-claude-sonnet-4")
+
+        pre = store["doc"]["hooks"]["PreToolUse"]
+        post = store["doc"]["hooks"]["PostToolUse"]
+        usage_pre = [
+            h for entry in pre for h in entry["hooks"] if "usage hook claude" in h["command"]
+        ]
+        usage_post = [
+            h for entry in post for h in entry["hooks"] if "usage hook claude" in h["command"]
+        ]
+        assert len(usage_pre) == 1
+        assert len(usage_post) == 1
+
 
 class TestRegisterWebSearchMcp:
     def test_clears_existing_then_adds(self, monkeypatch):

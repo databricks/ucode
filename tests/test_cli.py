@@ -1264,3 +1264,51 @@ class TestConfigureSharedStatePullsManagedWorkspace:
         # The saved state dict passed to save_state should NOT contain a
         # policies key from the pull (hydrate_state adds an empty one later).
         assert "policies" not in saved[0]
+
+    def test_installs_tracing_runtime_when_pulled_config_enables_it(self, monkeypatch):
+        # A pulled config with tracing on must install the mlflow runtime so the
+        # Claude Stop hook actually gets written by the later config writer.
+        import ucode.cli as cli_mod
+
+        ws = "https://example.databricks.com"
+        self._stub_external_deps(monkeypatch)
+        monkeypatch.setattr(
+            cli_mod,
+            "download_managed_config",
+            lambda w, p: {
+                "workspace": ws,
+                "available_tools": ["claude"],
+                "claude_models": {"opus": "admin-pinned"},
+                "tracing": {
+                    "enabled": True,
+                    "tracking_uri": "databricks://admin-profile",
+                    "experiment_id": "111",
+                    "sql_warehouse_id": "wh123",
+                },
+            },
+        )
+        monkeypatch.setattr(cli_mod, "save_state", lambda state: None)
+        installed: list[dict] = []
+        monkeypatch.setattr(
+            cli_mod, "install_tracing_runtime", lambda state: installed.append(state)
+        )
+
+        cli_mod.configure_shared_state(ws)
+
+        assert len(installed) == 1
+        assert installed[0]["tracing"]["enabled"] is True
+
+    def test_install_tracing_runtime_noops_without_managed_pull(self, monkeypatch):
+        import ucode.cli as cli_mod
+
+        self._stub_external_deps(monkeypatch)
+        monkeypatch.setattr(cli_mod, "download_managed_config", lambda w, p: None)
+        monkeypatch.setattr(cli_mod, "save_state", lambda state: None)
+        installed: list[dict] = []
+        monkeypatch.setattr(
+            cli_mod, "install_tracing_runtime", lambda state: installed.append(state)
+        )
+
+        cli_mod.configure_shared_state("https://example.databricks.com")
+
+        assert installed == []
