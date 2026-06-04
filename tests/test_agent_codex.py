@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import os
+from unittest.mock import patch
 
 from ucode.agents import codex
 from ucode.config_io import read_toml_safe
@@ -200,6 +202,109 @@ class TestCodexWriteConfig:
         doc = read_toml_safe(legacy_path)
         assert doc["profiles"]["other"]["model_provider"] == "keep"
         assert doc["profiles"]["ucode"]["model_provider"] == "ucode-databricks"
+
+
+class TestCodexUsageNotify:
+    def test_sets_usage_notify_when_available(self):
+        doc: dict = {}
+        state = {"workspace": WS}
+
+        codex._apply_usage_notify(doc, state, "databricks-gpt-5")
+
+        assert doc["notify"] == [
+            "ucode",
+            "usage",
+            "hook",
+            "codex",
+            "notify",
+            "--model",
+            "databricks-gpt-5",
+            "--workspace",
+            WS,
+        ]
+
+    def test_skips_when_tracing_owns_notify(self):
+        doc = {"notify": ["mlflow-codex", "notify-hook"]}
+        state = {
+            "workspace": WS,
+            "tracing": {
+                "enabled": True,
+                "tracking_uri": "databricks",
+                "agents": {"codex": {"experiment_id": "1"}},
+            },
+        }
+
+        codex._apply_usage_notify(doc, state, "databricks-gpt-5")
+
+        assert doc["notify"] == ["mlflow-codex", "notify-hook"]
+
+    def test_warns_and_preserves_user_notify(self):
+        doc = {"notify": ["user-hook"]}
+        with patch.object(codex, "print_warning") as warn:
+            codex._apply_usage_notify(doc, {"workspace": WS}, "databricks-gpt-5")
+
+        assert doc["notify"] == ["user-hook"]
+        warn.assert_called_once()
+
+
+class TestCodexUsageBudgetHook:
+    def test_adds_user_prompt_budget_hook(self, tmp_path, monkeypatch):
+        hooks_path = tmp_path / ".codex" / "hooks.json"
+        backup_path = tmp_path / "codex-hooks.backup.json"
+        monkeypatch.setattr(codex, "CODEX_HOOKS_PATH", hooks_path)
+        monkeypatch.setattr(codex, "CODEX_HOOKS_BACKUP_PATH", backup_path)
+        monkeypatch.setattr(codex, "_ucode_command_prefix", lambda: ["ucode"])
+
+        codex._apply_usage_budget_hook(WS, "gpt-5.5")
+
+        written = json.loads(hooks_path.read_text())
+        hook = written["hooks"]["UserPromptSubmit"][0]["hooks"][0]
+        assert hook == {
+            "type": "command",
+            "command": "ucode usage hook codex prompt-submit --model gpt-5.5 --workspace https://example.databricks.com",
+            "timeout": 10,
+        }
+
+    def test_preserves_existing_prompt_hooks_and_replaces_old_ucode_hook(
+        self, tmp_path, monkeypatch
+    ):
+        hooks_path = tmp_path / ".codex" / "hooks.json"
+        backup_path = tmp_path / "codex-hooks.backup.json"
+        hooks_path.parent.mkdir(parents=True)
+        hooks_path.write_text(
+            json.dumps(
+                {
+                    "hooks": {
+                        "UserPromptSubmit": [
+                            {"hooks": [{"type": "command", "command": "existing"}]},
+                            {
+                                "hooks": [
+                                    {
+                                        "type": "command",
+                                        "command": "ucode usage budget-check --agent codex",
+                                    }
+                                ]
+                            },
+                        ]
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(codex, "CODEX_HOOKS_PATH", hooks_path)
+        monkeypatch.setattr(codex, "CODEX_HOOKS_BACKUP_PATH", backup_path)
+        monkeypatch.setattr(codex, "_ucode_command_prefix", lambda: ["uv", "run", "ucode"])
+
+        codex._apply_usage_budget_hook(WS, "gpt-5.5")
+
+        prompt_hooks = json.loads(hooks_path.read_text())["hooks"]["UserPromptSubmit"]
+        assert prompt_hooks[0]["hooks"][0]["command"] == "existing"
+        assert (
+            prompt_hooks[1]["hooks"][0]["command"]
+            == "uv run ucode usage hook codex prompt-submit --model gpt-5.5 --workspace https://example.databricks.com"
+        )
+        assert len(prompt_hooks) == 2
+        assert backup_path.exists()
 
 
 class TestCodexLegacyLayoutDetection:

@@ -234,6 +234,30 @@ class TestWriteToolConfigMcpRegistration:
         claude.write_tool_config(state, "databricks-claude-sonnet-4")
         assert calls == [("register", WS, "explicit-model")]
 
+    def test_writes_usage_hooks(self, monkeypatch):
+        calls: list = []
+        written: dict = {}
+        monkeypatch.setattr(claude, "backup_existing_file", lambda *a, **kw: True)
+        monkeypatch.setattr(claude, "read_json_safe", lambda path: {})
+        monkeypatch.setattr(
+            claude, "write_json_file", lambda path, payload: written.update(payload)
+        )
+        monkeypatch.setattr(claude, "save_state", lambda state: None)
+        monkeypatch.setattr(claude, "_register_web_search_mcp", lambda *a, **kw: calls.append(a))
+
+        state = {"workspace": WS, "codex_models": []}
+        result = claude.write_tool_config(state, "databricks-claude-sonnet-4")
+
+        hooks = written["hooks"]
+        assert set(hooks) == {"PreToolUse", "PostToolUse"}
+        pre_command = hooks["PreToolUse"][0]["hooks"][0]["command"]
+        post_command = hooks["PostToolUse"][0]["hooks"][0]["command"]
+        assert "ucode usage hook claude pre-tool" in pre_command
+        assert "ucode usage hook claude post-tool" in post_command
+        command = pre_command
+        assert "--model databricks-claude-sonnet-4" in command
+        assert ["hooks"] in result["managed_configs"]["claude"]["keys"]
+
 
 class TestRegisterWebSearchMcp:
     def test_clears_existing_then_adds(self, monkeypatch):

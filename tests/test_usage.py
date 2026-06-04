@@ -15,11 +15,22 @@ from ucode.usage import (
     coerce_datetime,
     configured_usage_tools,
     empty_tool_day,
+    estimate_cost_usd,
     extract_model_names,
     extract_model_token_breakdown,
     filter_records_for_tools,
+    format_local_budget_status,
     has_tool_usage_last_week,
+    local_budget_status,
+    local_daily_agent_budget_usd,
+    local_price_multiplier,
     parse_usage_rows,
+    query_local_budget_totals,
+    query_local_usage_summary,
+    query_local_usage_totals,
+    record_local_usage_delta,
+    record_local_usage_snapshot,
+    render_local_usage_summary,
     render_usage_summary,
     simplify_model_name,
     summarize_model_tokens,
@@ -391,6 +402,243 @@ class TestRenderUsageSummary:
     def test_empty_records(self):
         result = render_usage_summary([], "user", {"claude": "Claude Code"})
         assert "user" in result
+
+
+class TestLocalUsageLedger:
+    def test_records_delta_events_and_aggregates_across_sessions(self, tmp_path):
+        db_path = tmp_path / "usage.sqlite"
+
+        record_local_usage_delta(
+            session_id="s1",
+            tool="claude",
+            model="databricks-claude-sonnet-4",
+            input_tokens=1_000,
+            output_tokens=200,
+            db_path=db_path,
+        )
+        record_local_usage_delta(
+            session_id="s2",
+            tool="codex",
+            model="databricks-gpt-5",
+            input_tokens=500,
+            output_tokens=100,
+            db_path=db_path,
+        )
+
+        totals = query_local_usage_totals(db_path=db_path)
+        assert totals["sessions"] == 2
+        assert totals["total_tokens"] == 1_800
+        assert totals["cost_usd"] > 0
+
+        rows = query_local_usage_summary(db_path=db_path)
+        assert {row["tool"] for row in rows} == {"claude", "codex"}
+
+    def test_snapshot_records_only_new_tokens(self, tmp_path):
+        db_path = tmp_path / "usage.sqlite"
+
+        first = record_local_usage_snapshot(
+            session_id="s1",
+            tool="claude",
+            model="databricks-claude-sonnet-4",
+            input_tokens=1_000,
+            output_tokens=100,
+            db_path=db_path,
+        )
+        second = record_local_usage_snapshot(
+            session_id="s1",
+            tool="claude",
+            model="databricks-claude-sonnet-4",
+            input_tokens=1_500,
+            output_tokens=150,
+            db_path=db_path,
+        )
+        third = record_local_usage_snapshot(
+            session_id="s1",
+            tool="claude",
+            model="databricks-claude-sonnet-4",
+            input_tokens=1_500,
+            output_tokens=150,
+            db_path=db_path,
+        )
+
+        assert first is not None
+        assert first["total_tokens"] == 1_100
+        assert second is not None
+        assert second["input_tokens"] == 500
+        assert second["output_tokens"] == 50
+        assert second["total_tokens"] == 550
+        assert third is None
+
+        totals = query_local_usage_totals(db_path=db_path)
+        assert totals["total_tokens"] == 1_650
+
+    def test_snapshot_never_records_negative_delta(self, tmp_path):
+        db_path = tmp_path / "usage.sqlite"
+        record_local_usage_snapshot(
+            session_id="s1",
+            tool="claude",
+            model="databricks-claude-sonnet-4",
+            total_tokens=1_000,
+            db_path=db_path,
+        )
+
+        event = record_local_usage_snapshot(
+            session_id="s1",
+            tool="claude",
+            model="databricks-claude-sonnet-4",
+            total_tokens=900,
+            db_path=db_path,
+        )
+
+        assert event is None
+        totals = query_local_usage_totals(db_path=db_path)
+        assert totals["total_tokens"] == 1_000
+
+    def test_unknown_model_tracks_tokens_with_zero_cost(self, tmp_path):
+        db_path = tmp_path / "usage.sqlite"
+        record_local_usage_delta(
+            session_id="s1",
+            tool="claude",
+            model="unknown-model",
+            total_tokens=42,
+            db_path=db_path,
+        )
+
+        totals = query_local_usage_totals(db_path=db_path)
+        assert totals["total_tokens"] == 42
+        assert totals["cost_usd"] == 0
+
+    def test_estimates_cost_from_input_and_output_rates(self):
+        assert estimate_cost_usd("databricks-gpt-5", 1_000_000, 1_000_000) == 11.25
+
+    def test_estimates_total_only_cost_with_input_rate(self):
+        assert estimate_cost_usd("databricks-gpt-5", 0, 0, total_tokens=1_000_000) == 1.25
+
+    def test_estimates_new_claude_opus_variant(self):
+        assert estimate_cost_usd("databricks-claude-opus-4-8", 1_000_000, 1_000_000) == 90.0
+
+    def test_estimates_one_m_suffix(self):
+        assert estimate_cost_usd("databricks-claude-opus-4-8[1m]", 1_000_000, 1_000_000) == 90.0
+
+    def test_price_multiplier_env_inflates_cost(self, monkeypatch):
+        monkeypatch.setenv("UCODE_USAGE_PRICE_MULTIPLIER", "10")
+
+        assert estimate_cost_usd("databricks-gpt-5", 0, 0, total_tokens=1_000_000) == 12.5
+        assert local_price_multiplier() == 10
+
+    def test_invalid_price_multiplier_env_falls_back(self, monkeypatch):
+        monkeypatch.setenv("UCODE_USAGE_PRICE_MULTIPLIER", "not-a-number")
+
+        assert local_price_multiplier() == 1.0
+
+    def test_renders_local_summary(self, tmp_path):
+        db_path = tmp_path / "usage.sqlite"
+        record_local_usage_delta(
+            session_id="s1",
+            tool="codex",
+            model="databricks-gpt-5",
+            total_tokens=100,
+            db_path=db_path,
+        )
+        result = render_local_usage_summary(
+            query_local_usage_summary(db_path=db_path),
+            query_local_usage_totals(db_path=db_path),
+        )
+
+        assert "Local Usage Summary" in result
+        assert "100 tokens" in result
+        assert "databricks-gpt-5" in result
+
+    def test_reports_state_budget_warning_status(self, tmp_path, monkeypatch):
+        db_path = tmp_path / "usage.sqlite"
+        # monthly_limit_usd / 30 -> $20.00 daily cap.
+        monkeypatch.setattr(
+            usage_mod,
+            "load_state",
+            lambda: {"policies": {"codex": {"spending_limit": {"monthly_limit_usd": 600}}}},
+        )
+        record_local_usage_delta(
+            session_id="s1",
+            tool="codex",
+            model="databricks-gpt-5",
+            total_tokens=13_000_000,
+            db_path=db_path,
+        )
+
+        status = local_budget_status("codex", db_path)
+        assert status["state"] == "warn"
+        assert status["spend_usd"] == 16.25
+        assert status["limit_usd"] == 20.0
+        message = format_local_budget_status(status)
+        assert "⚠️ [UCODE USAGE BUDGET] Codex is nearing" in message
+        assert "Budget: $16.25 / $20.00 used today ▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▱▱▱▱ 81%." in message
+        assert "Tokens used today" in message
+        flattened = message.replace("\n", "")
+        assert "daily budget. Budget" in flattened
+        assert "Remaining: $3.75. Window" in flattened
+        assert "day(s). Tokens" in flattened
+
+    def test_budget_env_override(self, tmp_path, monkeypatch):
+        db_path = tmp_path / "usage.sqlite"
+        monkeypatch.setenv("UCODE_USAGE_DAILY_BUDGET_USD", "0.05")
+        record_local_usage_delta(
+            session_id="s1",
+            tool="claude",
+            model="databricks-claude-sonnet-4",
+            total_tokens=20_000,
+            db_path=db_path,
+        )
+
+        status = local_budget_status("claude", db_path)
+        assert local_daily_agent_budget_usd("claude") == 0.05
+        assert status["limit_usd"] == 0.05
+        assert status["state"] == "exceeded"
+
+    def test_budget_falls_back_to_default_without_policy(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(usage_mod, "load_state", lambda: {})
+        assert local_daily_agent_budget_usd("codex") == 500.0
+
+    def test_budget_status_exceeded(self, tmp_path, monkeypatch):
+        db_path = tmp_path / "usage.sqlite"
+        # monthly_limit_usd / 30 -> $20.00 daily cap.
+        monkeypatch.setattr(
+            usage_mod,
+            "load_state",
+            lambda: {"policies": {"codex": {"spending_limit": {"monthly_limit_usd": 600}}}},
+        )
+        record_local_usage_delta(
+            session_id="s1",
+            tool="codex",
+            model="databricks-gpt-5",
+            total_tokens=16_000_000,
+            db_path=db_path,
+        )
+
+        status = local_budget_status("codex", db_path)
+        assert status["state"] == "exceeded"
+        message = format_local_budget_status(status)
+        assert "Budget: $20.00 / $20.00 used today ▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰ 100%." in message
+        assert "Tokens used today: 16.0M.\nFurther tool use" in message
+
+    def test_budget_totals_recompute_zero_cost_rows(self, tmp_path, monkeypatch):
+        db_path = tmp_path / "usage.sqlite"
+        monkeypatch.setenv("UCODE_USAGE_PRICE_MULTIPLIER", "1000")
+        record_local_usage_delta(
+            session_id="s1",
+            tool="claude",
+            model="unknown-model",
+            input_tokens=1_000,
+            output_tokens=100,
+            db_path=db_path,
+        )
+        with usage_mod._connect_local_usage_db(db_path) as conn:
+            conn.execute(
+                "UPDATE usage_events SET model = ?, cost_usd = 0",
+                ("databricks-claude-opus-4-8",),
+            )
+
+        totals = query_local_budget_totals(tool="claude", db_path=db_path)
+        assert totals["cost_usd"] == 22.5
 
 
 class TestUsageCommand:

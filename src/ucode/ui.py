@@ -13,6 +13,7 @@ from datetime import timedelta
 import questionary
 from rich.console import Console
 from rich.panel import Panel
+from rich.text import Text
 
 console = Console(highlight=False)
 err_console = Console(stderr=True, highlight=False)
@@ -46,6 +47,24 @@ def print_warning(message: str) -> None:
 
 def print_err(message: str) -> None:
     err_console.print(f"[bold red]ERROR[/bold red] {message}")
+
+
+def render_error_panel(message: str) -> Panel:
+    lines = message.splitlines()
+    title = lines[0] if lines else "ERROR"
+    body = "\n".join(lines[1:]) if len(lines) > 1 else ""
+    return Panel(
+        Text(body or message),
+        title=Text(title),
+        border_style="red",
+        style="red",
+        expand=False,
+        padding=(1, 2),
+    )
+
+
+def print_err_panel(message: str) -> None:
+    err_console.print(render_error_panel(message))
 
 
 def heading(text: str) -> str:

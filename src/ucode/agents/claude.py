@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import shutil
 import subprocess
 from pathlib import Path
@@ -172,6 +173,44 @@ def _maybe_add_1m_suffix(model: str) -> str:
     return f"{model}[1m]" if should_suffix else model
 
 
+def _usage_hook_command(workspace: str, model: str, event: str) -> str:
+    ucode_binary = shutil.which("ucode") or "ucode"
+    return " ".join(
+        [
+            shlex.quote(ucode_binary),
+            "usage",
+            "hook",
+            "claude",
+            event,
+            "--model",
+            shlex.quote(model),
+            "--workspace",
+            shlex.quote(workspace),
+        ]
+    )
+
+
+def _usage_hooks_overlay(workspace: str, model: str) -> dict:
+    pre_tool_hook = {
+        "matcher": "",
+        "hooks": [
+            {"type": "command", "command": _usage_hook_command(workspace, model, "pre-tool")}
+        ],
+    }
+    post_tool_hook = {
+        "matcher": "",
+        "hooks": [
+            {"type": "command", "command": _usage_hook_command(workspace, model, "post-tool")}
+        ],
+    }
+    return {
+        "hooks": {
+            "PreToolUse": [pre_tool_hook],
+            "PostToolUse": [post_tool_hook],
+        }
+    }
+
+
 def _register_web_search_mcp(workspace: str, search_model: str, profile: str | None = None) -> bool:
     """Register (or replace) the web_search MCP server in Claude Code's user
     scope via `claude mcp add-json`. Removes any prior entry first so re-runs
@@ -229,14 +268,14 @@ def write_tool_config(state: dict, model: str) -> dict:
         overlay["env"]["MLFLOW_CLAUDE_TRACING_ENABLED"] = "true"
         overlay["env"].update(tracing_env_vars)
         managed_keys = managed_keys + [["env", key] for key in CLAUDE_TRACING_ENV_KEYS]
-        if stop_hook_command:
-            managed_keys = managed_keys + [["hooks", "Stop"]]
-        else:
+        if not stop_hook_command:
             print_warning(
                 "MLflow tracing env was written, but the `mlflow` CLI could not be located "
                 "to install the Claude Stop hook — traces won't be emitted. Re-run "
                 "`ucode configure tracing`."
             )
+    deep_merge_dict(overlay, _usage_hooks_overlay(state["workspace"], model))
+    managed_keys = managed_keys + [["hooks"]]
 
     existing = read_json_safe(CLAUDE_SETTINGS_PATH)
     merged = deep_merge_dict(existing, overlay)

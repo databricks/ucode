@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
+import shutil
+from collections.abc import Mapping
 from pathlib import Path
+from typing import cast
 
 from ucode.agent_updates import available_npm_package_update
 from ucode.config_io import (
@@ -12,7 +16,9 @@ from ucode.config_io import (
     ToolSpec,
     backup_existing_file,
     deep_merge_dict,
+    read_json_safe,
     read_toml_safe,
+    write_json_file,
     write_toml_file,
 )
 from ucode.databricks import (
@@ -22,16 +28,21 @@ from ucode.databricks import (
 )
 from ucode.state import mark_tool_managed, resolve_policy_model, save_state
 from ucode.telemetry import agent_version, ucode_version
+from ucode.ui import print_warning
 
 CODEX_CONFIG_DIR = Path.home() / ".codex"
 CODEX_PROFILE_NAME = "ucode"
 CODEX_CONFIG_PATH = CODEX_CONFIG_DIR / f"{CODEX_PROFILE_NAME}.config.toml"
 CODEX_BACKUP_PATH = APP_DIR / "codex-ucode-config.backup.toml"
+CODEX_HOOKS_PATH = CODEX_CONFIG_DIR / "hooks.json"
+CODEX_HOOKS_BACKUP_PATH = APP_DIR / "codex-hooks.backup.json"
 LEGACY_CODEX_CONFIG_PATH = CODEX_CONFIG_DIR / "config.toml"
 LEGACY_CODEX_BACKUP_PATH = APP_DIR / "codex-config.backup.toml"
 CODEX_MODEL_PROVIDER_NAME = "ucode-databricks"
 MINIMUM_CODEX_VERSION = (0, 134, 0)
 MINIMUM_CODEX_VERSION_TEXT = "0.134.0"
+CODEX_USAGE_NOTIFY_PREFIX = ["ucode", "usage", "hook", "codex", "notify"]
+CODEX_USAGE_BUDGET_HOOK_PREFIX = "usage hook codex prompt-submit"
 
 
 SPEC: ToolSpec = {
@@ -45,6 +56,7 @@ SPEC: ToolSpec = {
 MANAGED_KEYS: list[list[str]] = [
     ["model_provider"],
     ["model"],
+    ["notify"],
     ["model_providers", CODEX_MODEL_PROVIDER_NAME],
     ["model_providers", CODEX_MODEL_PROVIDER_NAME, "http_headers"],
 ]
@@ -52,6 +64,7 @@ MANAGED_KEYS: list[list[str]] = [
 LEGACY_MANAGED_KEYS: list[list[str]] = [
     ["profile"],
     ["profiles", CODEX_PROFILE_NAME],
+    ["notify"],
     ["model_providers", CODEX_MODEL_PROVIDER_NAME],
     ["model_providers", CODEX_MODEL_PROVIDER_NAME, "http_headers"],
 ]
@@ -238,6 +251,8 @@ def write_tool_config(state: dict, model: str | None = None) -> dict:
         overlay = render_legacy_overlay(workspace, chosen_model, databricks_profile)
         doc = read_toml_safe(LEGACY_CODEX_CONFIG_PATH)
         deep_merge_dict(doc, overlay)
+        _apply_usage_notify(doc, state, chosen_model)
+        _apply_usage_budget_hook(state["workspace"], chosen_model)
         write_toml_file(LEGACY_CODEX_CONFIG_PATH, doc)
         state = mark_tool_managed(state, "codex", LEGACY_MANAGED_KEYS)
         save_state(state)
@@ -248,10 +263,119 @@ def write_tool_config(state: dict, model: str | None = None) -> dict:
     overlay = render_overlay(workspace, chosen_model, databricks_profile)
     doc = read_toml_safe(CODEX_CONFIG_PATH)
     deep_merge_dict(doc, overlay)
+    _apply_usage_notify(doc, state, chosen_model)
+    _apply_usage_budget_hook(state["workspace"], chosen_model)
     write_toml_file(CODEX_CONFIG_PATH, doc)
     state = mark_tool_managed(state, "codex", MANAGED_KEYS)
     save_state(state)
     return state
+
+
+def _usage_notify(workspace: str, model: str | None) -> list[str]:
+    notify = [*CODEX_USAGE_NOTIFY_PREFIX]
+    if model:
+        notify.extend(["--model", model])
+    notify.extend(["--workspace", workspace])
+    return notify
+
+
+def _is_ucode_usage_notify(value: object) -> bool:
+    return (
+        isinstance(value, list)
+        and value[: len(CODEX_USAGE_NOTIFY_PREFIX)] == CODEX_USAGE_NOTIFY_PREFIX
+    )
+
+
+def _apply_usage_notify(doc: dict, state: dict, model: str | None) -> None:
+    """Set Codex's notify hook for local usage unless another integration owns it."""
+    if not model:
+        return
+    existing = doc.get("notify")
+    notify = _usage_notify(state["workspace"], model)
+    if existing is not None and list(existing) != notify and not _is_ucode_usage_notify(existing):
+        print_warning(
+            f"Codex `notify` is already set to {existing!r}; local usage tracking for "
+            "Codex will be inactive until that hook is removed."
+        )
+        return
+    doc["notify"] = notify
+
+
+def _ucode_command_prefix() -> list[str]:
+    """Use the editable checkout when running from source; fall back to PATH."""
+    repo_root = Path(__file__).resolve().parents[3]
+    if (repo_root / "pyproject.toml").exists() and (repo_root / "src" / "ucode").exists():
+        return ["uv", "run", "--project", str(repo_root), "ucode"]
+    return [shutil.which("ucode") or "ucode"]
+
+
+def _usage_budget_hook_command(workspace: str, model: str | None) -> str:
+    chosen_model = model or "codex"
+    return " ".join(
+        [
+            *[shlex.quote(part) for part in _ucode_command_prefix()],
+            "usage",
+            "hook",
+            "codex",
+            "prompt-submit",
+            "--model",
+            shlex.quote(chosen_model),
+            "--workspace",
+            shlex.quote(workspace),
+        ]
+    )
+
+
+def _is_ucode_usage_budget_hook(value: object) -> bool:
+    if not isinstance(value, Mapping):
+        return False
+    hook = cast(Mapping[str, object], value)
+    command = hook.get("command")
+    return isinstance(command, str) and (
+        "usage hook codex prompt-submit" in command or "usage budget-check --agent codex" in command
+    )
+
+
+def _apply_usage_budget_hook(workspace: str, model: str | None) -> None:
+    """Block new Codex prompts once the local Codex budget is exceeded."""
+    backup_existing_file(CODEX_HOOKS_PATH, CODEX_HOOKS_BACKUP_PATH)
+    doc = read_json_safe(CODEX_HOOKS_PATH)
+    hooks = doc.setdefault("hooks", {})
+    if not isinstance(hooks, dict):
+        hooks = {}
+        doc["hooks"] = hooks
+    prompt_blocks = hooks.setdefault("UserPromptSubmit", [])
+    if not isinstance(prompt_blocks, list):
+        prompt_blocks = []
+        hooks["UserPromptSubmit"] = prompt_blocks
+
+    filtered_blocks = []
+    for block in prompt_blocks:
+        if not isinstance(block, dict):
+            filtered_blocks.append(block)
+            continue
+        block_hooks = block.get("hooks")
+        if not isinstance(block_hooks, list):
+            filtered_blocks.append(block)
+            continue
+        kept_hooks = [hook for hook in block_hooks if not _is_ucode_usage_budget_hook(hook)]
+        if kept_hooks:
+            updated = dict(block)
+            updated["hooks"] = kept_hooks
+            filtered_blocks.append(updated)
+    filtered_blocks.append(
+        {
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": _usage_budget_hook_command(workspace, model),
+                    "timeout": 10,
+                }
+            ]
+        }
+    )
+    hooks["UserPromptSubmit"] = filtered_blocks
+    write_json_file(CODEX_HOOKS_PATH, doc)
 
 
 def default_model(state: dict) -> str | None:

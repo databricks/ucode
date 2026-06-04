@@ -37,6 +37,7 @@ def no_state_writes():
         patch("ucode.agents.claude.save_state"),
         patch("ucode.agents.gemini.save_state"),
         patch("ucode.agents.opencode.save_state"),
+        patch("ucode.cli.local_budget_status", return_value={"state": "ok", "tool": "codex"}),
     ):
         yield
 
@@ -135,6 +136,37 @@ class TestSubcommandRouting:
         called_tool = mock_launch.call_args[0][0]
         assert called_tool == tool
 
+    def test_codex_launch_shows_model_and_budget_panel(self):
+        patches = _patch_launch("codex")
+        budget_status = {
+            "state": "ok",
+            "tool": "codex",
+            "spend_usd": 12.4,
+            "limit_usd": 200,
+            "remaining_usd": 187.6,
+        }
+        with (
+            patches[0],
+            patches[1],
+            patches[2],
+            patches[3],
+            patch(
+                "ucode.cli.resolve_launch_model",
+                return_value=(MINIMAL_STATE, "databricks-claude-opus-4-8[1m]"),
+            ),
+            patches[5],
+            patches[6],
+            patch("ucode.cli.local_budget_status", return_value=budget_status),
+        ):
+            result = runner.invoke(app, ["codex"])
+
+        assert result.exit_code == 0, result.output
+        assert "ucode with Codex" in result.output
+        assert "Model:   databricks-claude-opus-4-8[1m]" in result.output
+        assert "Budget:  $12.40 / $200.00 used today" in result.output
+        assert "6%." in result.output
+        assert "Pending: $187.60 remaining today" in result.output
+
     def test_no_agent_flag(self):
         """--agent flag must no longer exist."""
         result = runner.invoke(app, ["--agent", "claude"])
@@ -151,6 +183,107 @@ class TestMcpSubcommands:
         result = runner.invoke(app, ["mcp", "--help"])
         assert result.exit_code == 0
         assert "web-search" in result.output
+
+
+class TestUsageCommands:
+    def test_usage_default_uses_databricks_report(self):
+        calls: list[str] = []
+        with (
+            patch("ucode.cli.install_databricks_cli", side_effect=lambda: calls.append("install")),
+            patch("ucode.cli.usage_report", side_effect=lambda: calls.append("gateway")),
+        ):
+            result = runner.invoke(app, ["usage"])
+
+        assert result.exit_code == 0, result.output
+        assert calls == ["install", "gateway"]
+
+    def test_usage_local_uses_local_report(self):
+        calls: list[int] = []
+        with patch("ucode.cli.local_usage_report", side_effect=lambda days: calls.append(days)):
+            result = runner.invoke(app, ["usage", "--local", "--days", "3"])
+
+        assert result.exit_code == 0, result.output
+        assert calls == [3]
+
+    def test_usage_record_snapshot(self):
+        calls: list[dict] = []
+        event = {"total_tokens": 123, "cost_usd": 0.001}
+        with patch(
+            "ucode.cli.record_local_usage_snapshot",
+            side_effect=lambda **kwargs: calls.append(kwargs) or event,
+        ):
+            result = runner.invoke(
+                app,
+                [
+                    "usage",
+                    "record",
+                    "--tool",
+                    "claude",
+                    "--model",
+                    "databricks-claude-sonnet-4",
+                    "--session-id",
+                    "s1",
+                    "--input-tokens",
+                    "100",
+                    "--output-tokens",
+                    "23",
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert calls[0]["tool"] == "claude"
+        assert calls[0]["model"] == "databricks-claude-sonnet-4"
+        assert calls[0]["session_id"] == "s1"
+        assert calls[0]["input_tokens"] == 100
+        assert calls[0]["output_tokens"] == 23
+        assert "Recorded 123 tokens" in result.output
+
+    def test_budget_check_exits_nonzero_when_exceeded(self):
+        message = "⛔ [UCODE USAGE BUDGET] Codex daily budget exceeded.\nBudget: $2.00 / $1.00"
+        with (
+            patch("ucode.cli.local_budget_status", return_value={"state": "exceeded"}),
+            patch("ucode.cli.format_local_budget_status", return_value=message),
+        ):
+            result = runner.invoke(app, ["usage", "budget-check", "--agent", "codex"])
+
+        assert result.exit_code == 1
+        assert "╭" in result.output
+        assert "Codex daily budget exceeded" in result.output
+        assert "Budget: $2.00 / $1.00" in result.output
+        assert "ERROR" not in result.output
+
+    def test_usage_hook_claude_outputs_json(self):
+        with patch("ucode.cli.claude_usage_hook", return_value={"decision": "block"}):
+            result = runner.invoke(
+                app,
+                ["usage", "hook", "claude", "pre-tool", "--model", "databricks-claude-sonnet-4"],
+                input="{}",
+            )
+
+        assert result.exit_code == 0, result.output
+        assert result.output.strip() == '{"decision": "block"}'
+
+    def test_usage_hook_codex_prompt_warning_outputs_valid_json(self):
+        with patch(
+            "ucode.cli.codex_usage_hook",
+            return_value={
+                "hookSpecificOutput": {
+                    "hookEventName": "UserPromptSubmit",
+                    "additionalContext": "warning text",
+                }
+            },
+        ):
+            result = runner.invoke(
+                app,
+                ["usage", "hook", "codex", "prompt-submit", "--model", "gpt-5.5"],
+                input="{}",
+            )
+
+        assert result.exit_code == 0, result.output
+        assert (
+            result.output.strip()
+            == '{"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": "warning text"}}'
+        )
 
 
 class TestStatus:

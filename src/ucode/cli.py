@@ -3,10 +3,12 @@
 
 from __future__ import annotations
 
+import json
 from typing import Annotated
 
 import typer
 from rich.panel import Panel
+from rich.text import Text
 
 from ucode.agents import (
     TOOL_SPECS,
@@ -64,6 +66,7 @@ from ucode.ui import (
     console,
     heading,
     print_err,
+    print_err_panel,
     print_heading,
     print_kv,
     print_note,
@@ -71,10 +74,25 @@ from ucode.ui import (
     print_success,
     prompt_for_tools,
     prompt_for_workspace,
+    render_error_panel,
     spinner,
     status_badge,
 )
-from ucode.usage import usage as usage_report
+from ucode.usage import (
+    format_local_budget_launch_line,
+    format_local_budget_remaining,
+    format_local_budget_status,
+    local_budget_status,
+    record_local_usage_delta,
+    record_local_usage_snapshot,
+)
+from ucode.usage import (
+    local_usage as local_usage_report,
+)
+from ucode.usage import (
+    usage as usage_report,
+)
+from ucode.usage_hooks import claude_usage_hook, codex_usage_hook
 
 _DISCOVERY_CONSUMERS: dict[str, tuple[str, ...]] = {
     "claude": ("claude", "opencode", "copilot", "pi"),
@@ -533,6 +551,8 @@ configure_app = typer.Typer(add_completion=False, no_args_is_help=False)
 app.add_typer(configure_app, name="configure", help="Configure workspace and tool settings.")
 mcp_app = typer.Typer(add_completion=False, no_args_is_help=True)
 app.add_typer(mcp_app, name="mcp", help="MCP servers exposed by ucode.")
+usage_app = typer.Typer(add_completion=False, no_args_is_help=False)
+app.add_typer(usage_app, name="usage", help="Show or record coding-agent usage.")
 
 
 @mcp_app.command("web-search")
@@ -579,6 +599,27 @@ def _auto_configure_tool(tool: str) -> None:
         raise RuntimeError(f"{spec['display']} validation failed — config reverted.")
 
 
+def _render_launch_panel(
+    *,
+    display: str,
+    model: str | None,
+    budget_status: dict[str, object] | None = None,
+) -> Panel:
+    lines = []
+    if model:
+        lines.append(f"Model:   {model}")
+    if budget_status is not None:
+        lines.append(f"Budget:  {format_local_budget_launch_line(budget_status)}")
+        lines.append(f"Pending: {format_local_budget_remaining(budget_status)}")
+    return Panel(
+        Text("\n".join(lines)),
+        title=Text(f"ucode with {display}"),
+        border_style="blue",
+        expand=False,
+        padding=(0, 2),
+    )
+
+
 def _launch_tool(tool_name: str, ctx: typer.Context) -> None:
     try:
         tool = normalize_tool(tool_name)
@@ -599,15 +640,32 @@ def _launch_tool(tool_name: str, ctx: typer.Context) -> None:
         )
         state, resolved_model = resolve_launch_model(tool, state, None)
         state = configure_tool(tool, state, resolved_model)
-        print_section(f"ucode with {TOOL_SPECS[tool]['display']}")
-        if resolved_model:
-            print_kv("Model", resolved_model)
+        display = TOOL_SPECS[tool]["display"]
+        if tool in {"claude", "codex"}:
+            budget_status = local_budget_status(tool)
+            console.print(
+                _render_launch_panel(
+                    display=display,
+                    model=resolved_model,
+                    budget_status=budget_status,
+                )
+            )
+            budget_message = format_local_budget_status(budget_status)
+            if budget_status.get("state") == "exceeded":
+                print_err_panel(budget_message)
+                raise typer.Exit(1)
+            if budget_status.get("state") == "warn":
+                print_note(budget_message)
+        else:
+            print_section(f"ucode with {display}")
+            if resolved_model:
+                print_kv("Model", resolved_model)
         if tool in ("gemini", "opencode", "copilot", "pi"):
             print_note(
-                f"{TOOL_SPECS[tool]['display']} token refresh is managed automatically "
+                f"{display} token refresh is managed automatically "
                 f"every 30 minutes while the session is running."
             )
-        print_success(f"Starting {TOOL_SPECS[tool]['display']}")
+        print_success(f"Starting {display}")
         launch_agent(tool, state, ctx.args)
     except RuntimeError as exc:
         print_err(str(exc))
@@ -790,12 +848,27 @@ def revert_cmd() -> None:
         raise typer.Exit(1) from None
 
 
-@app.command("usage")
-def usage_cmd() -> None:
-    """Show Databricks AI Gateway usage summary (last 7 days)."""
+@usage_app.callback(invoke_without_command=True)
+def usage_cmd(
+    ctx: typer.Context,
+    local: Annotated[
+        bool,
+        typer.Option("--local", help="Read the local SQLite usage ledger instead of AI Gateway."),
+    ] = False,
+    days: Annotated[
+        int,
+        typer.Option("--days", min=1, help="Number of days to include for local usage."),
+    ] = 7,
+) -> None:
+    """Show Databricks AI Gateway usage summary."""
+    if ctx.invoked_subcommand is not None:
+        return
     try:
-        install_databricks_cli()
-        usage_report()
+        if local:
+            local_usage_report(days=days)
+        else:
+            install_databricks_cli()
+            usage_report()
     except RuntimeError as exc:
         print_err(str(exc))
         raise typer.Exit(1) from None
@@ -846,6 +919,130 @@ def export_cmd() -> None:
     except KeyboardInterrupt:
         print_err("Interrupted.")
         raise typer.Exit(130) from None
+
+
+@usage_app.command("record")
+def usage_record_cmd(
+    tool: Annotated[str, typer.Option("--tool", help="Agent name, e.g. claude or codex.")],
+    model: Annotated[str, typer.Option("--model", help="Model or endpoint name.")],
+    session_id: Annotated[
+        str,
+        typer.Option("--session-id", help="Stable ID for the running agent session."),
+    ],
+    mode: Annotated[
+        str,
+        typer.Option(
+            "--mode",
+            help="Use 'delta' for incremental events or 'snapshot' for cumulative totals.",
+        ),
+    ] = "snapshot",
+    input_tokens: Annotated[int, typer.Option("--input-tokens", min=0)] = 0,
+    output_tokens: Annotated[int, typer.Option("--output-tokens", min=0)] = 0,
+    cache_read_input_tokens: Annotated[
+        int,
+        typer.Option("--cache-read-input-tokens", min=0),
+    ] = 0,
+    cache_creation_input_tokens: Annotated[
+        int,
+        typer.Option("--cache-creation-input-tokens", min=0),
+    ] = 0,
+    total_tokens: Annotated[int, typer.Option("--total-tokens", min=0)] = 0,
+    workspace: Annotated[str | None, typer.Option("--workspace")] = None,
+    source: Annotated[str, typer.Option("--source")] = "hook",
+) -> None:
+    """Record local token usage for budget checks and local aggregation."""
+    try:
+        if mode == "delta":
+            event = record_local_usage_delta(
+                session_id=session_id,
+                tool=tool,
+                model=model,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cache_read_input_tokens=cache_read_input_tokens,
+                cache_creation_input_tokens=cache_creation_input_tokens,
+                total_tokens=total_tokens,
+                workspace=workspace,
+                source=source,
+            )
+        elif mode == "snapshot":
+            event = record_local_usage_snapshot(
+                session_id=session_id,
+                tool=tool,
+                model=model,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cache_read_input_tokens=cache_read_input_tokens,
+                cache_creation_input_tokens=cache_creation_input_tokens,
+                total_tokens=total_tokens,
+                workspace=workspace,
+                source=source,
+            )
+        else:
+            raise RuntimeError("Invalid --mode. Use 'delta' or 'snapshot'.")
+    except RuntimeError as exc:
+        print_err(str(exc))
+        raise typer.Exit(1) from None
+
+    if event is None:
+        print_note("No new tokens recorded for this snapshot.")
+        return
+    cost_usd = event.get("cost_usd")
+    if not isinstance(cost_usd, int | float | str):
+        cost_usd = 0.0
+    print_success(
+        f"Recorded {event['total_tokens']} tokens for {tool} ({model}, ${float(cost_usd):.4f})."
+    )
+
+
+@usage_app.command("budget-status")
+def usage_budget_status_cmd(
+    agent: Annotated[str, typer.Option("--agent", help="Agent name, e.g. claude or codex.")],
+) -> None:
+    """Show the current local spend budget state."""
+    status_obj = local_budget_status(agent)
+    message = format_local_budget_status(status_obj)
+    if status_obj.get("state") == "exceeded":
+        console.print(render_error_panel(message))
+    else:
+        console.print(message)
+
+
+@usage_app.command("budget-check")
+def usage_budget_check_cmd(
+    agent: Annotated[str, typer.Option("--agent", help="Agent name, e.g. claude or codex.")],
+) -> None:
+    """Exit nonzero when the local spend budget is exceeded."""
+    status_obj = local_budget_status(agent)
+    message = format_local_budget_status(status_obj)
+    if status_obj.get("state") == "exceeded":
+        print_err_panel(message)
+        raise typer.Exit(1)
+    if status_obj.get("state") == "warn":
+        print_note(message)
+    else:
+        console.print(message)
+
+
+@usage_app.command("hook")
+def usage_hook_cmd(
+    agent: Annotated[str, typer.Argument(help="Hook adapter: claude or codex.")],
+    event: Annotated[str, typer.Argument(help="Hook event: pre-tool, post-tool, or notify.")],
+    model: Annotated[str, typer.Option("--model", help="Model or endpoint name.")],
+    workspace: Annotated[str | None, typer.Option("--workspace")] = None,
+) -> None:
+    """Agent hook adapter. Reads hook JSON from stdin and writes hook JSON to stdout."""
+    try:
+        if agent == "claude":
+            response = claude_usage_hook(model=model, event=event, workspace=workspace)
+        elif agent == "codex":
+            response = codex_usage_hook(model=model, event=event, workspace=workspace)
+        else:
+            raise RuntimeError("Unsupported usage hook. Use 'claude' or 'codex'.")
+    except RuntimeError as exc:
+        typer.echo(json.dumps({"systemMessage": str(exc)}))
+        raise typer.Exit(0) from None
+    typer.echo(json.dumps(response))
 
 
 @app.command("upgrade")
