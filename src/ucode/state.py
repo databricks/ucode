@@ -18,9 +18,11 @@ _KNOWN_POLICY_AGENTS: frozenset[str] = frozenset(
     {"codex", "claude", "gemini", "opencode", "copilot", "pi"}
 )
 
+
 def _today_iso() -> str:
     """Return today's date as ``YYYY-MM-DD``. Factored for monkeypatching."""
     return _dt.date.today().isoformat()
+
 
 def _is_iso_date(value: str) -> bool:
     try:
@@ -28,6 +30,7 @@ def _is_iso_date(value: str) -> bool:
     except ValueError:
         return False
     return True
+
 
 def load_full_state() -> dict:
     """Load the entire state file. Returns empty structure if missing or wrong version."""
@@ -66,8 +69,7 @@ def slice_state_for_export(full_state: dict, workspace: str) -> dict:
     workspaces = full_state.get("workspaces")
     if not isinstance(workspaces, dict) or workspace not in workspaces:
         raise RuntimeError(
-            f"No local state for workspace {workspace}. "
-            "Run `ucode configure` for it first."
+            f"No local state for workspace {workspace}. Run `ucode configure` for it first."
         )
     block = workspaces[workspace]
     if not isinstance(block, dict):
@@ -79,6 +81,7 @@ def slice_state_for_export(full_state: dict, workspace: str) -> dict:
         "state_version": full_state.get("state_version") or STATE_VERSION,
         "workspace": workspace,
     }
+
 
 def save_state(state: dict) -> None:
     """Save workspace state back into the per-workspace structure."""
@@ -298,22 +301,16 @@ def resolve_policy_model(state: dict, agent: str, requested_model: str) -> str:
     return select_model_for_policies(state, agent, requested_model, spend)
 
 
-def merge_managed_policies(local_state: dict, remote_splice: dict) -> dict:
-    """Overlay admin-managed ``policies`` from a pulled UC ``state.json``."""
+def merge_managed_workspace(local_state: dict, remote_splice: dict) -> dict:
+    """Pull-and-replace: the admin's UC blob fully replaces the user's workspace block."""
     workspace = local_state.get("workspace")
     if not isinstance(workspace, str) or not workspace:
         return local_state
     if not isinstance(remote_splice, dict):
         return local_state
-    remote_workspace = remote_splice.get("workspace")
-    if remote_workspace != workspace:
+    if remote_splice.get("workspace") != workspace:
         return local_state
-    remote_policies = remote_splice.get("policies")
-    if remote_policies is None:
-        return local_state
-    merged = dict(local_state)
-    merged["policies"] = remote_policies
-    return merged
+    return {**remote_splice, "workspace": workspace}
 
 
 def build_agent_state(state: dict) -> dict[str, dict]:

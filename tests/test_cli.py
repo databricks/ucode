@@ -827,11 +827,12 @@ class TestConfigureSharedStateMcpCleanup:
         assert purge_calls == []
 
 
-class TestConfigureSharedStatePullsManagedPolicies:
-    """`configure_shared_state` should silently pull the UC ``state.json`` and
-    overlay only its ``policies``. Failures (no admin export yet, no permission,
-    network down) must not block the user — ``download_managed_config`` returns
-    ``None`` and the local state is unchanged."""
+class TestConfigureSharedStatePullsManagedWorkspace:
+    """`configure_shared_state` pulls the UC ``state.json`` and pull-and-replaces
+    the workspace block (admin-managed fields from remote, per-machine
+    preserved, ``agents`` rebuilt). Failures (no admin export yet, no
+    permission, network down) must not block the user — ``download_managed_config``
+    returns ``None`` and the local discovery path stands as-is."""
 
     @staticmethod
     def _stub_external_deps(monkeypatch):
@@ -850,7 +851,7 @@ class TestConfigureSharedStatePullsManagedPolicies:
         monkeypatch.setattr(cli_mod, "load_state", lambda: {})
         monkeypatch.setattr(cli_mod, "purge_cross_workspace_mcp_residue", lambda *a, **k: None)
 
-    def test_overlays_policies_from_uc_into_saved_state(self, monkeypatch):
+    def test_pulls_and_replaces_workspace_block_from_uc(self, monkeypatch):
         import ucode.cli as cli_mod
 
         ws = "https://example.databricks.com"
@@ -860,6 +861,7 @@ class TestConfigureSharedStatePullsManagedPolicies:
             "download_managed_config",
             lambda w, p: {
                 "workspace": ws,
+                "claude_models": {"opus": "admin-pinned"},
                 "policies": {"claude": {"default_model": "admin-pinned"}},
             },
         )
@@ -869,6 +871,8 @@ class TestConfigureSharedStatePullsManagedPolicies:
         cli_mod.configure_shared_state(ws)
 
         assert len(saved) == 1
+        # Both admin-managed fields land on the saved state.
+        assert saved[0]["claude_models"] == {"opus": "admin-pinned"}
         assert saved[0]["policies"] == {"claude": {"default_model": "admin-pinned"}}
 
     def test_silent_when_download_returns_none(self, monkeypatch):

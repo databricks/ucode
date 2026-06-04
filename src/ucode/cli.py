@@ -55,7 +55,7 @@ from ucode.state import (
     clear_state,
     load_full_state,
     load_state,
-    merge_managed_policies,
+    merge_managed_workspace,
     save_state,
     slice_state_for_export,
 )
@@ -228,9 +228,14 @@ def configure_shared_state(
         state["codex_models"] = codex_models
     if fetch_all or "opencode" in tools:
         state["opencode_models"] = opencode_models
+    # Pull-and-replace: the UC blob is authoritative for admin-managed fields
+    # (models, base_urls, mcp_servers, tracing, policies, ...). Per-machine
+    # fields (profile, managed_configs, ...) are preserved, and `agents` is
+    # rebuilt so auth_command uses the user's profile. See
+    # `merge_managed_workspace` for the full contract.
     remote = download_managed_config(workspace, profile)
     if remote is not None:
-        state = merge_managed_policies(state, remote)
+        state = merge_managed_workspace(state, remote)
 
     save_state(state)
     # Scrub MCP entries that ucode wrote for the previous workspace so the new

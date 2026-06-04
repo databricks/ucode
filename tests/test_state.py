@@ -16,7 +16,7 @@ from ucode.state import (
     load_full_state,
     load_state,
     mark_tool_managed,
-    merge_managed_policies,
+    merge_managed_workspace,
     resolve_policy_model,
     save_state,
     select_model_for_policies,
@@ -433,43 +433,62 @@ class TestSliceStateForExport:
         with pytest.raises(RuntimeError, match="No local state for workspace"):
             slice_state_for_export(full, "https://never-configured.databricks.com")
 
+    def test_publishes_entire_block_verbatim(self):
+        block = {
+            "workspace": FAKE_WS,
+            "profile": "admins-cli-profile",
+            "managed_configs": {"claude": {"keys": [["env", "X"]]}},
+            "claude_models": {"opus": "admin-pinned"},
+            "available_tools": ["claude", "codex"],
+            "mcp_servers": [{"name": "jira"}],
+            "policies": {"claude": {}},
+        }
+        full = {"state_version": 3, "workspaces": {FAKE_WS: block}}
+        sliced = slice_state_for_export(full, FAKE_WS)
+        for key, value in block.items():
+            assert sliced[key] == value
+        assert sliced["state_version"] == 3
 
-class TestMergeManagedPolicies:
-    """`merge_managed_policies` — pull/overlay layer between UC and local state."""
 
-    def test_overlays_policies_when_workspace_matches(self):
-        local = {"workspace": FAKE_WS, "claude_models": {"opus": "o4"}}
+class TestMergeManagedWorkspace:
+    def test_full_replace_from_remote(self):
+        local = {
+            "workspace": FAKE_WS,
+            "profile": "user-local-profile",
+            "claude_models": {"opus": "local-stale"},
+            "managed_configs": {"claude": {"keys": [["env", "X"]]}},
+            "agents": {"claude": {"auth_command": "local-cmd"}},
+        }
         remote = {
             "workspace": FAKE_WS,
-            "policies": {"claude": {"default_model": "admin-pinned"}},
+            "profile": "admin-profile",
+            "claude_models": {"opus": "admin-pinned"},
+            "base_urls": {"claude": "https://admin"},
+            "managed_configs": {"claude": {"keys": [["admin-key"]]}},
+            "agents": {"claude": {"auth_command": "admin-cmd"}},
+            "policies": {"claude": {"default_model": "haiku"}},
         }
-        merged = merge_managed_policies(local, remote)
-        assert merged["policies"] == {"claude": {"default_model": "admin-pinned"}}
-        # Other local fields untouched.
-        assert merged["claude_models"] == {"opus": "o4"}
-        assert merged["workspace"] == FAKE_WS
+        merged = merge_managed_workspace(local, remote)
+        # Every field in remote replaces local — even per-machine ones.
+        assert merged == {**remote, "workspace": FAKE_WS}
 
     def test_no_op_when_workspaces_dont_match(self):
-        # Admin pushed for workspace B; user is on workspace A → safer to skip
-        # than to cross-apply.
-        local = {"workspace": FAKE_WS, "claude_models": {}}
-        remote = {"workspace": "https://other.databricks.com", "policies": {"claude": {}}}
-        assert merge_managed_policies(local, remote) == local
-
-    def test_no_op_when_remote_has_no_policies(self):
-        local = {"workspace": FAKE_WS, "claude_models": {}}
-        remote = {"workspace": FAKE_WS, "claude_models": {"opus": "ignored"}}
-        assert merge_managed_policies(local, remote) == local
+        local = {"workspace": FAKE_WS, "claude_models": {"opus": "local"}}
+        remote = {
+            "workspace": "https://other.databricks.com",
+            "claude_models": {"opus": "wrong-workspace"},
+        }
+        assert merge_managed_workspace(local, remote) == local
 
     def test_no_op_when_local_has_no_workspace(self):
         local = {"claude_models": {}}
         remote = {"workspace": FAKE_WS, "policies": {"claude": {}}}
-        assert merge_managed_policies(local, remote) == local
+        assert merge_managed_workspace(local, remote) == local
 
     def test_no_op_when_remote_blob_malformed(self):
         local = {"workspace": FAKE_WS}
-        assert merge_managed_policies(local, {}) == local
-        assert merge_managed_policies(local, "not-a-dict") == local  # type: ignore[arg-type]
+        assert merge_managed_workspace(local, "not-a-dict") == local  # type: ignore[arg-type]
+        assert merge_managed_workspace(local, {}) == local
 
 
 class TestMarkToolManaged:
