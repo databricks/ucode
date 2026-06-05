@@ -252,6 +252,9 @@ def configure_workspace_command(
     tool: str | None = None,
     selected_tools: list[str] | None = None,
     workspaces: list[tuple[str, str | None]] | None = None,
+    *,
+    skip_install: bool = False,
+    skip_validation: bool = False,
 ) -> int:
     if tool is not None and selected_tools is not None:
         raise RuntimeError("Use either --agent or --agents, not both.")
@@ -272,6 +275,8 @@ def configure_workspace_command(
                 expand=False,
             )
         )
+        if skip_validation:
+            return 0
         with spinner(f"Validating {spec['display']}..."):
             ok, err = validate_tool(tool)
         if ok:
@@ -320,8 +325,9 @@ def configure_workspace_command(
         print_note("No coding agents selected — nothing to configure.")
         return 0
 
-    for tool_name in picked:
-        install_tool_binary(tool_name, strict=False, update_existing=True)
+    if not skip_install:
+        for tool_name in picked:
+            install_tool_binary(tool_name, strict=False, update_existing=True)
 
     state = configure_selected_tools(state, picked)
 
@@ -338,10 +344,11 @@ def configure_workspace_command(
         )
     )
 
-    # Limit validation to just-configured tools so we don't re-validate
-    # previously-configured tools the user didn't touch this run.
-    validate_state = {**state, "available_tools": picked}
-    validate_all_tools(validate_state)
+    if not skip_validation:
+        # Limit validation to just-configured tools so we don't re-validate
+        # previously-configured tools the user didn't touch this run.
+        validate_state = {**state, "available_tools": picked}
+        validate_all_tools(validate_state)
     return 0
 
 
@@ -618,6 +625,24 @@ def configure(
             help="Also enable MLflow tracing for the configured workspace(s).",
         ),
     ] = False,
+    skip_install: Annotated[
+        bool,
+        typer.Option(
+            "--skip-install",
+            help=(
+                "Don't install or update the agent CLIs; only configure workspace "
+                "auth + Gateway routing. Use when the agent binaries are managed "
+                "elsewhere (e.g. by a tool that embeds ucode)."
+            ),
+        ),
+    ] = False,
+    skip_validation: Annotated[
+        bool,
+        typer.Option(
+            "--skip-validation",
+            help="Skip the post-configure check that runs each agent with a test message.",
+        ),
+    ] = False,
 ) -> None:
     """Configure workspace URL and AI Gateway."""
     if ctx.invoked_subcommand is not None:
@@ -630,26 +655,47 @@ def configure(
         workspace_entries = _parse_workspaces_option(workspaces) if workspaces is not None else None
         if agent is not None:
             tool = normalize_tool(agent)
-            install_tool_binary(tool, strict=True, update_existing=True)
+            if not skip_install:
+                install_tool_binary(tool, strict=True, update_existing=True)
             if workspace_entries is None:
-                configure_workspace_command(tool)
+                configure_workspace_command(
+                    tool, skip_install=skip_install, skip_validation=skip_validation
+                )
             else:
-                configure_workspace_command(tool, workspaces=workspace_entries)
+                configure_workspace_command(
+                    tool,
+                    workspaces=workspace_entries,
+                    skip_install=skip_install,
+                    skip_validation=skip_validation,
+                )
         elif agents is not None:
             selected_tools = _parse_agents_option(agents)
             if workspace_entries is None:
-                configure_workspace_command(selected_tools=selected_tools)
+                configure_workspace_command(
+                    selected_tools=selected_tools,
+                    skip_install=skip_install,
+                    skip_validation=skip_validation,
+                )
             else:
                 configure_workspace_command(
-                    selected_tools=selected_tools, workspaces=workspace_entries
+                    selected_tools=selected_tools,
+                    workspaces=workspace_entries,
+                    skip_install=skip_install,
+                    skip_validation=skip_validation,
                 )
         else:
             # Tool binaries are installed after the user picks which agents
             # they want, in configure_workspace_command.
             if workspace_entries is None:
-                configure_workspace_command()
+                configure_workspace_command(
+                    skip_install=skip_install, skip_validation=skip_validation
+                )
             else:
-                configure_workspace_command(workspaces=workspace_entries)
+                configure_workspace_command(
+                    workspaces=workspace_entries,
+                    skip_install=skip_install,
+                    skip_validation=skip_validation,
+                )
         if tracing:
             # The workspaces were just configured, so enable tracing for them
             # directly instead of re-prompting. Fall back to the workspace that

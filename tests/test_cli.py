@@ -380,7 +380,7 @@ class TestConfigureAgentFlag:
         ):
             result = runner.invoke(app, ["configure"])
         assert result.exit_code == 0, result.output
-        mock_cfg.assert_called_once_with()
+        mock_cfg.assert_called_once_with(skip_install=False, skip_validation=False)
 
     def test_agents_flag_calls_configure_with_tools(self):
         with (
@@ -391,7 +391,9 @@ class TestConfigureAgentFlag:
             result = runner.invoke(app, ["configure", "--agents", "claude,codex"])
         assert result.exit_code == 0, result.output
         mock_install.assert_not_called()
-        mock_cfg.assert_called_once_with(selected_tools=["claude", "codex"])
+        mock_cfg.assert_called_once_with(
+            selected_tools=["claude", "codex"], skip_install=False, skip_validation=False
+        )
 
     def test_agents_flag_normalizes_aliases_and_dedupes(self):
         with (
@@ -401,7 +403,9 @@ class TestConfigureAgentFlag:
         ):
             result = runner.invoke(app, ["configure", "--agents", " claude-code, codex,claude "])
         assert result.exit_code == 0, result.output
-        mock_cfg.assert_called_once_with(selected_tools=["claude", "codex"])
+        mock_cfg.assert_called_once_with(
+            selected_tools=["claude", "codex"], skip_install=False, skip_validation=False
+        )
 
     def test_workspaces_flag_calls_configure_with_workspaces(self):
         with (
@@ -422,7 +426,9 @@ class TestConfigureAgentFlag:
             workspaces=[
                 ("https://first.databricks.com", None),
                 ("https://second.databricks.com", None),
-            ]
+            ],
+            skip_install=False,
+            skip_validation=False,
         )
 
     def test_agents_and_workspaces_flags_call_configure_with_both(self):
@@ -437,7 +443,10 @@ class TestConfigureAgentFlag:
             )
         assert result.exit_code == 0, result.output
         mock_cfg.assert_called_once_with(
-            selected_tools=["claude", "codex"], workspaces=[("https://first.com", None)]
+            selected_tools=["claude", "codex"],
+            workspaces=[("https://first.com", None)],
+            skip_install=False,
+            skip_validation=False,
         )
 
     def test_agent_and_workspaces_flags_call_configure_with_both(self):
@@ -452,7 +461,12 @@ class TestConfigureAgentFlag:
             )
         assert result.exit_code == 0, result.output
         mock_install.assert_called_once_with("claude", strict=True, update_existing=True)
-        mock_cfg.assert_called_once_with("claude", workspaces=[("https://first.com", None)])
+        mock_cfg.assert_called_once_with(
+            "claude",
+            workspaces=[("https://first.com", None)],
+            skip_install=False,
+            skip_validation=False,
+        )
 
     def test_agent_flag_calls_configure_with_tool(self):
         with (
@@ -463,7 +477,7 @@ class TestConfigureAgentFlag:
             result = runner.invoke(app, ["configure", "--agent", "claude"])
         assert result.exit_code == 0, result.output
         mock_install.assert_called_once_with("claude", strict=True, update_existing=True)
-        mock_cfg.assert_called_once_with("claude")
+        mock_cfg.assert_called_once_with("claude", skip_install=False, skip_validation=False)
 
     def test_agent_flag_normalizes_alias(self):
         with (
@@ -473,7 +487,7 @@ class TestConfigureAgentFlag:
         ):
             result = runner.invoke(app, ["configure", "--agent", "claude-code"])
         assert result.exit_code == 0, result.output
-        mock_cfg.assert_called_once_with("claude")
+        mock_cfg.assert_called_once_with("claude", skip_install=False, skip_validation=False)
 
     def test_upgrade_runs_uv_tool_install(self):
         with patch("subprocess.run") as mock_run:
@@ -704,3 +718,98 @@ class TestConfigureSharedStateMcpCleanup:
         cli_mod.configure_shared_state("https://same.databricks.com")
 
         assert purge_calls == []
+
+
+class TestConfigureSkipFlags:
+    def test_skip_flags_forwarded_from_agents_invocation(self):
+        with (
+            patch("ucode.cli.install_databricks_cli"),
+            patch("ucode.cli.install_tool_binary") as mock_install,
+            patch("ucode.cli.configure_workspace_command") as mock_cfg,
+        ):
+            result = runner.invoke(
+                app,
+                [
+                    "configure",
+                    "--agents",
+                    "codex",
+                    "--workspaces",
+                    "https://x.databricks.com",
+                    "--skip-install",
+                    "--skip-validation",
+                ],
+            )
+        assert result.exit_code == 0, result.output
+        mock_install.assert_not_called()
+        mock_cfg.assert_called_once_with(
+            selected_tools=["codex"],
+            workspaces=[("https://x.databricks.com", None)],
+            skip_install=True,
+            skip_validation=True,
+        )
+
+    def test_skip_install_skips_eager_single_agent_install(self):
+        with (
+            patch("ucode.cli.install_databricks_cli"),
+            patch("ucode.cli.install_tool_binary") as mock_install,
+            patch("ucode.cli.configure_workspace_command") as mock_cfg,
+        ):
+            result = runner.invoke(app, ["configure", "--agent", "codex", "--skip-install"])
+        assert result.exit_code == 0, result.output
+        # The eager pre-configure install for --agent must be skipped...
+        mock_install.assert_not_called()
+        # ...and the flag forwarded so the inner command skips its install too.
+        mock_cfg.assert_called_once_with("codex", skip_install=True, skip_validation=False)
+
+    def test_configure_help_lists_skip_flags(self):
+        result = runner.invoke(app, ["configure", "--help"])
+        assert result.exit_code == 0
+        output = _strip_ansi(result.output)
+        assert "--skip-install" in output
+        assert "--skip-validation" in output
+
+    def test_skip_flags_avoid_install_and_validation(self):
+        from ucode.cli import configure_workspace_command
+
+        state = {"workspace": "https://x.databricks.com", "available_tools": []}
+        with (
+            patch("ucode.cli._configure_shared_workspace_states", return_value=[state]),
+            patch("ucode.cli.check_gateway_endpoint", return_value=True),
+            patch("ucode.cli.install_tool_binary") as mock_install,
+            patch("ucode.cli.configure_selected_tools", return_value=state) as mock_configure,
+            patch("ucode.cli.validate_all_tools") as mock_validate,
+        ):
+            rc = configure_workspace_command(
+                selected_tools=["codex"],
+                workspaces=[("https://x.databricks.com", None)],
+                skip_install=True,
+                skip_validation=True,
+            )
+        assert rc == 0
+        # The point of the flags: no agent binaries installed/updated and no
+        # test-message validation runs...
+        mock_install.assert_not_called()
+        mock_validate.assert_not_called()
+        # ...but workspace auth + Gateway routing config still happen.
+        mock_configure.assert_called_once_with(state, ["codex"])
+
+    def test_default_runs_install_and_validation(self):
+        from ucode.cli import configure_workspace_command
+
+        state = {"workspace": "https://x.databricks.com", "available_tools": []}
+        with (
+            patch("ucode.cli._configure_shared_workspace_states", return_value=[state]),
+            patch("ucode.cli.check_gateway_endpoint", return_value=True),
+            patch("ucode.cli.install_tool_binary") as mock_install,
+            patch("ucode.cli.configure_selected_tools", return_value=state),
+            patch("ucode.cli.validate_all_tools") as mock_validate,
+        ):
+            rc = configure_workspace_command(
+                selected_tools=["codex"],
+                workspaces=[("https://x.databricks.com", None)],
+            )
+        assert rc == 0
+        # Without the flags the existing behavior is unchanged — both the
+        # install and the validation run (proves the guards aren't always-skip).
+        mock_install.assert_called_once_with("codex", strict=False, update_existing=True)
+        mock_validate.assert_called_once()

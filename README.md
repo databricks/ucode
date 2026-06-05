@@ -90,6 +90,8 @@ Discovered external MCP connections are listed directly. MCP auth uses a Databri
 | `ucode configure --dry-run` | Preview config files without writing them |
 | `ucode configure --agents claude,codex` | Configure specific agents without the interactive picker |
 | `ucode configure --workspaces https://first.databricks.com,https://second.databricks.com` | Configure workspaces without the interactive picker |
+| `ucode configure --skip-install` | Configure workspace auth + Gateway routing only; don't install or update the agent CLIs (for callers that manage the binaries themselves) |
+| `ucode configure --skip-validation` | Skip the post-configure check that runs each agent with a test message |
 
 ## Managed Local Files
 
