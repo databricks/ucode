@@ -176,6 +176,38 @@ class TestSubcommandRouting:
         assert "Codex Sessions" in result.output
         assert "6" in result.output
 
+    def test_opencode_launch_shows_budget_panel(self):
+        patches = _patch_launch("opencode")
+        budget_status = {
+            "state": "ok",
+            "tool": "opencode",
+            "spend_usd": 12.4,
+            "limit_usd": 200,
+            "remaining_usd": 187.6,
+            "total_tokens": 456_000,
+            "sessions": 6,
+        }
+        with (
+            patches[0],
+            patches[1],
+            patches[2],
+            patches[3],
+            patch(
+                "ucode.cli.resolve_launch_model",
+                return_value=(MINIMAL_STATE, "databricks-claude-haiku-4-5"),
+            ),
+            patches[5],
+            patches[6],
+            patch("ucode.cli.local_budget_status", return_value=budget_status),
+        ):
+            result = runner.invoke(app, ["opencode"])
+
+        assert result.exit_code == 0, result.output
+        assert "ucode with OpenCode" in result.output
+        assert "$12.40 / $200.00" in result.output
+        assert "6% used" in result.output
+        assert "Opencode Tokens" in result.output
+
     def test_no_agent_flag(self):
         """--agent flag must no longer exist."""
         result = runner.invoke(app, ["--agent", "claude"])
@@ -690,6 +722,17 @@ class TestUsageCommands:
             result.output.strip()
             == '{"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": "warning text"}}'
         )
+
+    def test_usage_hook_opencode_outputs_json(self):
+        with patch("ucode.cli.opencode_usage_hook", return_value={"decision": "block"}):
+            result = runner.invoke(
+                app,
+                ["usage", "hook", "opencode", "chat-params", "--model", "databricks-claude"],
+                input="{}",
+            )
+
+        assert result.exit_code == 0, result.output
+        assert result.output.strip() == '{"decision": "block"}'
 
 
 class TestStatus:

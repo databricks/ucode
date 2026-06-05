@@ -644,3 +644,228 @@ def test_sync_codex_usage_from_state_ignores_old_threads_for_fresh_ledger(tmp_pa
 
     assert imported == 0
     assert recorded == []
+
+
+def test_sync_opencode_usage_from_state_imports_recent_sessions(tmp_path, monkeypatch):
+    state_db = tmp_path / "opencode.db"
+    with sqlite3.connect(state_db) as conn:
+        conn.execute(
+            """
+            CREATE TABLE session (
+              id TEXT,
+              model TEXT,
+              cost REAL,
+              tokens_input INTEGER,
+              tokens_output INTEGER,
+              tokens_reasoning INTEGER,
+              tokens_cache_read INTEGER,
+              tokens_cache_write INTEGER,
+              time_updated INTEGER
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO session VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "ses_1",
+                json.dumps(
+                    {"id": "databricks-claude-haiku-4-5", "providerID": "databricks-anthropic"}
+                ),
+                0.0,
+                100,
+                20,
+                5,
+                30,
+                40,
+                int(datetime.now(UTC).timestamp() * 1000),
+            ),
+        )
+    recorded: list[dict] = []
+    monkeypatch.setattr(
+        usage_hooks,
+        "record_local_usage_snapshot",
+        lambda **kwargs: recorded.append(kwargs) or {"total_tokens": kwargs["total_tokens"]},
+    )
+
+    imported = usage_hooks.sync_opencode_usage_from_state(
+        workspace="https://example.com",
+        state_db_path=state_db,
+        usage_db_path=tmp_path / "usage.sqlite",
+        updated_since=datetime.fromtimestamp(0, UTC),
+    )
+
+    assert imported == 1
+    assert recorded[0]["session_id"] == "ses_1"
+    assert recorded[0]["tool"] == "opencode"
+    assert recorded[0]["model"] == "databricks-anthropic/databricks-claude-haiku-4-5"
+    assert recorded[0]["input_tokens"] == 100
+    assert recorded[0]["output_tokens"] == 25
+    assert recorded[0]["cache_read_input_tokens"] == 30
+    assert recorded[0]["cache_creation_input_tokens"] == 40
+    assert recorded[0]["total_tokens"] == 195
+    assert recorded[0]["source"] == "opencode-state-sync"
+
+
+def test_sync_opencode_usage_from_messages_imports_assistant_tokens(tmp_path, monkeypatch):
+    state_db = tmp_path / "opencode.db"
+    now_ms = int(datetime.now(UTC).timestamp() * 1000)
+    with sqlite3.connect(state_db) as conn:
+        conn.execute(
+            """
+            CREATE TABLE message (
+              id TEXT,
+              session_id TEXT,
+              time_created INTEGER,
+              time_updated INTEGER,
+              data TEXT
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO message VALUES (?, ?, ?, ?, ?)",
+            (
+                "msg_user",
+                "ses_1",
+                now_ms,
+                now_ms,
+                json.dumps({"role": "user", "tokens": {"total": 999}}),
+            ),
+        )
+        conn.execute(
+            "INSERT INTO message VALUES (?, ?, ?, ?, ?)",
+            (
+                "msg_assistant_1",
+                "ses_1",
+                now_ms,
+                now_ms,
+                json.dumps(
+                    {
+                        "role": "assistant",
+                        "modelID": "databricks-claude-opus-4-8",
+                        "providerID": "databricks-anthropic",
+                        "tokens": {
+                            "total": 100,
+                            "input": 2,
+                            "output": 8,
+                            "reasoning": 1,
+                            "cache": {"read": 80, "write": 9},
+                        },
+                    }
+                ),
+            ),
+        )
+        conn.execute(
+            "INSERT INTO message VALUES (?, ?, ?, ?, ?)",
+            (
+                "msg_assistant_2",
+                "ses_1",
+                now_ms,
+                now_ms,
+                json.dumps(
+                    {
+                        "role": "assistant",
+                        "modelID": "databricks-claude-opus-4-8",
+                        "providerID": "databricks-anthropic",
+                        "tokens": {
+                            "total": 50,
+                            "input": 3,
+                            "output": 7,
+                            "reasoning": 0,
+                            "cache": {"read": 30, "write": 10},
+                        },
+                    }
+                ),
+            ),
+        )
+    recorded: list[dict] = []
+    monkeypatch.setattr(
+        usage_hooks,
+        "record_local_usage_snapshot",
+        lambda **kwargs: recorded.append(kwargs) or {"total_tokens": kwargs["total_tokens"]},
+    )
+
+    imported = usage_hooks.sync_opencode_usage_from_messages(
+        workspace="https://example.com",
+        state_db_path=state_db,
+        usage_db_path=tmp_path / "usage.sqlite",
+        updated_since=datetime.fromtimestamp(0, UTC),
+    )
+
+    assert imported == 1
+    assert recorded[0]["session_id"] == "ses_1"
+    assert recorded[0]["tool"] == "opencode"
+    assert recorded[0]["model"] == "databricks-anthropic/databricks-claude-opus-4-8"
+    assert recorded[0]["source"] == "opencode-message-sync"
+    assert recorded[0]["input_tokens"] == 5
+    assert recorded[0]["output_tokens"] == 16
+    assert recorded[0]["cache_read_input_tokens"] == 110
+    assert recorded[0]["cache_creation_input_tokens"] == 19
+    assert recorded[0]["total_tokens"] == 150
+
+
+def test_opencode_usage_hook_blocks_when_budget_exceeded(monkeypatch):
+    monkeypatch.setattr(usage_hooks, "sync_opencode_usage_from_messages", lambda **kwargs: 0)
+    monkeypatch.setattr(usage_hooks, "sync_opencode_usage_from_state", lambda **kwargs: 0)
+    monkeypatch.setattr(
+        usage_hooks,
+        "local_budget_status",
+        lambda tool: {
+            "configured": True,
+            "state": "exceeded",
+            "tool": tool,
+            "spend_usd": 2.0,
+            "limit_usd": 1.0,
+            "days": 1,
+            "remaining_usd": 0.0,
+            "total_tokens": 120,
+        },
+    )
+
+    response = usage_hooks.opencode_usage_hook(
+        model="databricks-anthropic/databricks-claude-haiku-4-5",
+        event="chat-params",
+        payload={"sessionID": "ses_1"},
+    )
+
+    assert response["decision"] == "block"
+    assert "⛔ Daily budget — limit exceeded" in response["reason"]
+
+
+def test_opencode_step_ended_syncs_messages_without_delta(monkeypatch):
+    message_syncs: list[dict] = []
+    monkeypatch.setattr(
+        usage_hooks,
+        "sync_opencode_usage_from_messages",
+        lambda **kwargs: message_syncs.append(kwargs) or 0,
+    )
+    monkeypatch.setattr(usage_hooks, "sync_opencode_usage_from_state", lambda **kwargs: 0)
+    monkeypatch.setattr(
+        usage_hooks,
+        "local_budget_status",
+        lambda tool: {
+            "configured": True,
+            "state": "ok",
+            "tool": tool,
+            "spend_usd": 0.1,
+            "limit_usd": 20.0,
+            "days": 1,
+            "total_tokens": 120,
+        },
+    )
+
+    response = usage_hooks.opencode_usage_hook(
+        model="databricks-anthropic/databricks-claude-opus-4-8",
+        event="step-ended",
+        payload={
+            "sessionID": "ses_2",
+            "tokens": {
+                "input": 100,
+                "output": 20,
+                "reasoning": 5,
+                "cache": {"read": 30, "write": 40},
+            },
+        },
+    )
+
+    assert message_syncs[0]["session_id"] == "ses_2"
+    assert response == {}

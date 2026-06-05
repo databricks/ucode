@@ -579,6 +579,16 @@ class TestLocalUsageLedger:
     def test_estimates_one_m_suffix(self):
         assert estimate_cost_usd("databricks-claude-opus-4-8[1m]", 1_000_000, 1_000_000) == 30.0
 
+    def test_estimates_opencode_provider_selector(self):
+        assert (
+            estimate_cost_usd(
+                "databricks-anthropic/databricks-claude-opus-4-8",
+                1_000_000,
+                1_000_000,
+            )
+            == 30.0
+        )
+
     def test_estimates_claude_cache_rates(self):
         assert (
             estimate_cost_usd(

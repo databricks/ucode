@@ -108,7 +108,13 @@ from ucode.usage import (
 from ucode.usage import (
     usage as usage_report,
 )
-from ucode.usage_hooks import claude_usage_hook, codex_usage_hook
+from ucode.usage_hooks import (
+    claude_usage_hook,
+    codex_usage_hook,
+    opencode_usage_hook,
+    sync_opencode_usage_from_messages,
+    sync_opencode_usage_from_state,
+)
 
 _DISCOVERY_CONSUMERS: dict[str, tuple[str, ...]] = {
     "claude": ("claude", "opencode", "copilot", "pi"),
@@ -117,7 +123,7 @@ _DISCOVERY_CONSUMERS: dict[str, tuple[str, ...]] = {
 }
 
 # Agents that record local spend and therefore have a daily budget to report.
-BUDGET_TRACKED_AGENTS: tuple[str, ...] = ("claude", "codex")
+BUDGET_TRACKED_AGENTS: tuple[str, ...] = ("claude", "codex", "opencode")
 
 
 def _tier_display(tier: dict) -> str:
@@ -1810,6 +1816,11 @@ def usage_budget_status_cmd() -> None:
 
     The daily budget is a single pool shared across all coding tools, so this
     renders one combined view."""
+    state = load_state()
+    workspace = state.get("workspace")
+    sync_workspace = workspace if isinstance(workspace, str) else None
+    sync_opencode_usage_from_messages(workspace=sync_workspace)
+    sync_opencode_usage_from_state(workspace=sync_workspace)
     console.print(
         render_local_budget_panel(local_budget_status(), title="Daily Budget · All Tools")
     )
@@ -1833,7 +1844,7 @@ def usage_budget_check_cmd(
 
 @usage_app.command("hook")
 def usage_hook_cmd(
-    agent: Annotated[str, typer.Argument(help="Hook adapter: claude or codex.")],
+    agent: Annotated[str, typer.Argument(help="Hook adapter: claude, codex, or opencode.")],
     event: Annotated[
         str,
         typer.Argument(help="Hook event: prompt-submit, post-tool, or notify."),
@@ -1847,8 +1858,10 @@ def usage_hook_cmd(
             response = claude_usage_hook(model=model, event=event, workspace=workspace)
         elif agent == "codex":
             response = codex_usage_hook(model=model, event=event, workspace=workspace)
+        elif agent == "opencode":
+            response = opencode_usage_hook(model=model, event=event, workspace=workspace)
         else:
-            raise RuntimeError("Unsupported usage hook. Use 'claude' or 'codex'.")
+            raise RuntimeError("Unsupported usage hook. Use 'claude', 'codex', or 'opencode'.")
     except RuntimeError as exc:
         typer.echo(json.dumps({"systemMessage": str(exc)}))
         raise typer.Exit(0) from None

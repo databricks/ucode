@@ -20,6 +20,8 @@ from ucode.usage import (
 
 CODEX_STATE_DB_PATH = Path.home() / ".codex" / "state_5.sqlite"
 CODEX_SYNC_STARTED_AT_KEY = "codex_sync_started_at"
+OPENCODE_STATE_DB_PATH = Path.home() / ".local" / "share" / "opencode" / "opencode.db"
+OPENCODE_SYNC_STARTED_AT_KEY = "opencode_sync_started_at"
 
 
 def _coerce_int(value: object) -> int:
@@ -115,6 +117,79 @@ def _codex_token_usage_from_mapping(value: object) -> dict[str, int]:
             usage["input_tokens"] + usage["cache_read_input_tokens"] + usage["output_tokens"]
         )
     return usage
+
+
+def _opencode_model_name(value: object) -> str:
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return value
+        value = parsed
+    if isinstance(value, Mapping):
+        mapping = cast(Mapping[str, object], value)
+        model_id = mapping.get("id") or mapping.get("modelID") or mapping.get("model")
+        provider_id = mapping.get("providerID") or mapping.get("provider")
+        if isinstance(model_id, str) and model_id:
+            if isinstance(provider_id, str) and provider_id:
+                return f"{provider_id}/{model_id}"
+            return model_id
+    return "opencode"
+
+
+def _opencode_usage_from_row(row: sqlite3.Row) -> dict[str, int]:
+    output_tokens = _coerce_int(row["tokens_output"]) + _coerce_int(row["tokens_reasoning"])
+    return {
+        "input_tokens": _coerce_int(row["tokens_input"]),
+        "output_tokens": output_tokens,
+        "cache_read_input_tokens": _coerce_int(row["tokens_cache_read"]),
+        "cache_creation_input_tokens": _coerce_int(row["tokens_cache_write"]),
+        "total_tokens": (
+            _coerce_int(row["tokens_input"])
+            + output_tokens
+            + _coerce_int(row["tokens_cache_read"])
+            + _coerce_int(row["tokens_cache_write"])
+        ),
+    }
+
+
+def _opencode_usage_from_step_tokens(value: object) -> dict[str, int]:
+    if not isinstance(value, Mapping):
+        return {}
+    mapping = cast(Mapping[str, object], value)
+    cache = mapping.get("cache")
+    cache_mapping = cast(Mapping[str, object], cache) if isinstance(cache, Mapping) else {}
+    input_tokens = _coerce_int(mapping.get("input"))
+    output_tokens = _coerce_int(mapping.get("output")) + _coerce_int(mapping.get("reasoning"))
+    cache_read_input_tokens = _coerce_int(cache_mapping.get("read"))
+    cache_creation_input_tokens = _coerce_int(cache_mapping.get("write"))
+    total_tokens = (
+        input_tokens + output_tokens + cache_read_input_tokens + cache_creation_input_tokens
+    )
+    return {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cache_read_input_tokens": cache_read_input_tokens,
+        "cache_creation_input_tokens": cache_creation_input_tokens,
+        "total_tokens": total_tokens,
+    }
+
+
+def _opencode_message_usage(value: object) -> tuple[str, dict[str, int]] | None:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            return None
+    if not isinstance(value, Mapping):
+        return None
+    data = cast(Mapping[str, object], value)
+    if data.get("role") != "assistant":
+        return None
+    usage = _opencode_usage_from_step_tokens(data.get("tokens"))
+    if not any(usage.values()):
+        return None
+    return _opencode_model_name(data), usage
 
 
 def codex_session_usage(session_path: Path) -> dict[str, int]:
@@ -241,6 +316,164 @@ def sync_codex_usage_from_state(
     return imported
 
 
+def sync_opencode_usage_from_state(
+    *,
+    workspace: str | None = None,
+    session_id: str | None = None,
+    state_db_path: Path = OPENCODE_STATE_DB_PATH,
+    usage_db_path: Path = LOCAL_USAGE_DB_PATH,
+    updated_since: datetime | None = None,
+) -> int:
+    """Import recent OpenCode session token snapshots from its local state DB."""
+    if not state_db_path.exists():
+        return 0
+    since = updated_since or ensure_local_usage_sync_started_at(
+        OPENCODE_SYNC_STARTED_AT_KEY,
+        db_path=usage_db_path,
+    )
+    since_ms = int(since.timestamp() * 1000)
+    session_filter = "AND id = ?" if session_id else ""
+    params: tuple[object, ...] = (since_ms, session_id) if session_id else (since_ms,)
+    try:
+        uri = f"file:{state_db_path}?mode=ro"
+        with sqlite3.connect(uri, timeout=5, uri=True) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                f"""
+                SELECT id, model, cost, tokens_input, tokens_output,
+                       tokens_reasoning, tokens_cache_read, tokens_cache_write,
+                       time_updated
+                FROM session
+                WHERE time_updated >= ?
+                  {session_filter}
+                  AND (
+                    COALESCE(tokens_input, 0) > 0
+                    OR COALESCE(tokens_output, 0) > 0
+                    OR COALESCE(tokens_reasoning, 0) > 0
+                    OR COALESCE(tokens_cache_read, 0) > 0
+                    OR COALESCE(tokens_cache_write, 0) > 0
+                  )
+                """,
+                params,
+            ).fetchall()
+    except sqlite3.Error:
+        return 0
+
+    imported = 0
+    for row in rows:
+        usage = _opencode_usage_from_row(row)
+        if not any(usage.values()):
+            continue
+        event = record_local_usage_snapshot(
+            session_id=str(row["id"]),
+            tool="opencode",
+            model=_opencode_model_name(row["model"]),
+            workspace=workspace,
+            source="opencode-state-sync",
+            db_path=usage_db_path,
+            input_tokens=usage["input_tokens"],
+            output_tokens=usage["output_tokens"],
+            cache_read_input_tokens=usage["cache_read_input_tokens"],
+            cache_creation_input_tokens=usage["cache_creation_input_tokens"],
+            total_tokens=usage["total_tokens"],
+        )
+        if event is not None:
+            imported += 1
+    return imported
+
+
+def sync_opencode_usage_from_messages(
+    *,
+    workspace: str | None = None,
+    session_id: str | None = None,
+    state_db_path: Path = OPENCODE_STATE_DB_PATH,
+    usage_db_path: Path = LOCAL_USAGE_DB_PATH,
+    updated_since: datetime | None = None,
+) -> int:
+    """Import OpenCode usage from assistant message token payloads.
+
+    OpenCode updates the session aggregate lazily, but assistant messages carry
+    token payloads as soon as they are persisted. Build cumulative per-session
+    snapshots from those message rows and let the normal snapshot ledger record
+    only new deltas.
+    """
+    if not state_db_path.exists():
+        return 0
+    since = updated_since or ensure_local_usage_sync_started_at(
+        OPENCODE_SYNC_STARTED_AT_KEY,
+        db_path=usage_db_path,
+    )
+    since_ms = int(since.timestamp() * 1000)
+    try:
+        uri = f"file:{state_db_path}?mode=ro"
+        with sqlite3.connect(uri, timeout=5, uri=True) as conn:
+            conn.row_factory = sqlite3.Row
+            if session_id:
+                session_ids = [session_id]
+            else:
+                session_rows = conn.execute(
+                    """
+                    SELECT DISTINCT session_id
+                    FROM message
+                    WHERE time_updated >= ?
+                    """,
+                    (since_ms,),
+                ).fetchall()
+                session_ids = [str(row["session_id"]) for row in session_rows if row["session_id"]]
+            if not session_ids:
+                return 0
+
+            placeholders = ",".join("?" for _ in session_ids)
+            rows = conn.execute(
+                f"""
+                SELECT session_id, data
+                FROM message
+                WHERE session_id IN ({placeholders})
+                """,
+                tuple(session_ids),
+            ).fetchall()
+    except sqlite3.Error:
+        return 0
+
+    totals: dict[tuple[str, str], dict[str, int]] = {}
+    for row in rows:
+        parsed = _opencode_message_usage(row["data"])
+        if parsed is None:
+            continue
+        model, usage = parsed
+        key = (str(row["session_id"]), model)
+        session_total = totals.setdefault(
+            key,
+            {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 0,
+                "total_tokens": 0,
+            },
+        )
+        _merge_usage(session_total, usage)
+
+    imported = 0
+    for (session_id, model), usage in totals.items():
+        event = record_local_usage_snapshot(
+            session_id=session_id,
+            tool="opencode",
+            model=model,
+            workspace=workspace,
+            source="opencode-message-sync",
+            db_path=usage_db_path,
+            input_tokens=usage["input_tokens"],
+            output_tokens=usage["output_tokens"],
+            cache_read_input_tokens=usage["cache_read_input_tokens"],
+            cache_creation_input_tokens=usage["cache_creation_input_tokens"],
+            total_tokens=usage["total_tokens"],
+        )
+        if event is not None:
+            imported += 1
+    return imported
+
+
 def _hook_response_for_budget(
     status: dict[str, object], *, can_block: bool = False, quiet_warn: bool = False
 ) -> dict[str, object]:
@@ -340,4 +573,25 @@ def codex_usage_hook(
     # The notify callback only records spend — it must not surface the budget
     # warning, or the message would appear twice (once here, once from the
     # UserPromptSubmit hook). Enforcement/warning is the prompt-submit hook's job.
+    return {}
+
+
+def opencode_usage_hook(
+    *,
+    model: str,
+    event: str = "event",
+    workspace: str | None = None,
+    payload: dict[str, object] | None = None,
+) -> dict[str, object]:
+    payload = payload if payload is not None else _read_json_stdin()
+    session_id = str(payload.get("session_id") or payload.get("sessionID") or "")
+    sync_opencode_usage_from_messages(workspace=workspace, session_id=session_id or None)
+    sync_opencode_usage_from_state(workspace=workspace, session_id=session_id or None)
+    if event in {
+        "prompt-submit",
+        "user-prompt-submit",
+        "chat-params",
+        "tool-execute-before",
+    }:
+        return _hook_response_for_budget(local_budget_status("opencode"), can_block=True)
     return {}
