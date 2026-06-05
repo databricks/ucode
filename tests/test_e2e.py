@@ -361,8 +361,19 @@ def _require_binary(binary: str):
 class TestCodexLaunch:
     """Run codex against every available codex model."""
 
+    # Substrings of model IDs that are known-incompatible with the codex CLI on
+    # Databricks today. Each entry should have a comment explaining why.
+    CODEX_INCOMPATIBLE_MODEL_FRAGMENTS = (
+        # nano endpoint is unreliably slow and times out past the 60s budget.
+        "gpt-5-4-nano",
+    )
+
     def _codex_models(self, e2e_state: dict) -> list[str]:
-        models = e2e_state.get("codex_models") or []
+        models = [
+            model
+            for model in (e2e_state.get("codex_models") or [])
+            if not any(frag in model for frag in self.CODEX_INCOMPATIBLE_MODEL_FRAGMENTS)
+        ]
         if not models:
             pytest.skip("No Codex models available on this workspace")
         return models
