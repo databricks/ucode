@@ -60,6 +60,7 @@ from ucode.ui import (
     print_success,
     prompt_for_tools,
     prompt_for_workspace,
+    set_verbosity,
     spinner,
     status_badge,
 )
@@ -252,6 +253,8 @@ def configure_workspace_command(
     tool: str | None = None,
     selected_tools: list[str] | None = None,
     workspaces: list[tuple[str, str | None]] | None = None,
+    *,
+    prompt_optional_updates: bool = True,
 ) -> int:
     if tool is not None and selected_tools is not None:
         raise RuntimeError("Use either --agent or --agents, not both.")
@@ -321,7 +324,12 @@ def configure_workspace_command(
         return 0
 
     for tool_name in picked:
-        install_tool_binary(tool_name, strict=False, update_existing=True)
+        install_tool_binary(
+            tool_name,
+            strict=False,
+            update_existing=True,
+            prompt_optional_updates=prompt_optional_updates,
+        )
 
     state = configure_selected_tools(state, picked)
 
@@ -618,11 +626,33 @@ def configure(
             help="Also enable MLflow tracing for the configured workspace(s).",
         ),
     ] = False,
+    skip_upgrade: Annotated[
+        bool,
+        typer.Option(
+            "--skip-upgrade",
+            help="Don't prompt to upgrade already-installed agent CLIs to a newer version. "
+            "Required updates (when an agent is below its minimum supported version) are "
+            "still applied.",
+        ),
+    ] = False,
+    verbose: Annotated[
+        str,
+        typer.Option(
+            "--verbose",
+            help="Output verbosity: 'normal' (default) renders decorative panels; "
+            "'low' prints terse single-line status instead.",
+        ),
+    ] = "normal",
 ) -> None:
     """Configure workspace URL and AI Gateway."""
     if ctx.invoked_subcommand is not None:
         return
+    if verbose not in ("normal", "low"):
+        print_err("--verbose must be one of: normal, low.")
+        raise typer.Exit(2)
     set_dry_run(dry_run)
+    set_verbosity(verbose)
+    prompt_optional_updates = not skip_upgrade
     try:
         install_databricks_cli()
         if agent is not None and agents is not None:
@@ -630,7 +660,12 @@ def configure(
         workspace_entries = _parse_workspaces_option(workspaces) if workspaces is not None else None
         if agent is not None:
             tool = normalize_tool(agent)
-            install_tool_binary(tool, strict=True, update_existing=True)
+            install_tool_binary(
+                tool,
+                strict=True,
+                update_existing=True,
+                prompt_optional_updates=prompt_optional_updates,
+            )
             if workspace_entries is None:
                 configure_workspace_command(tool)
             else:
@@ -638,18 +673,26 @@ def configure(
         elif agents is not None:
             selected_tools = _parse_agents_option(agents)
             if workspace_entries is None:
-                configure_workspace_command(selected_tools=selected_tools)
+                configure_workspace_command(
+                    selected_tools=selected_tools,
+                    prompt_optional_updates=prompt_optional_updates,
+                )
             else:
                 configure_workspace_command(
-                    selected_tools=selected_tools, workspaces=workspace_entries
+                    selected_tools=selected_tools,
+                    workspaces=workspace_entries,
+                    prompt_optional_updates=prompt_optional_updates,
                 )
         else:
             # Tool binaries are installed after the user picks which agents
             # they want, in configure_workspace_command.
             if workspace_entries is None:
-                configure_workspace_command()
+                configure_workspace_command(prompt_optional_updates=prompt_optional_updates)
             else:
-                configure_workspace_command(workspaces=workspace_entries)
+                configure_workspace_command(
+                    workspaces=workspace_entries,
+                    prompt_optional_updates=prompt_optional_updates,
+                )
         if tracing:
             # The workspaces were just configured, so enable tracing for them
             # directly instead of re-prompting. Fall back to the workspace that
