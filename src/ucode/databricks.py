@@ -1285,6 +1285,47 @@ def download_managed_policies(workspace: str, profile: str | None) -> str | None
     )
 
 
+def delete_managed_policies(workspace: str, profile: str | None) -> bool:
+    """Remove the published ``policies.yaml`` from the managed-config UC volume."""
+    probe = download_managed_text(
+        workspace,
+        profile,
+        MANAGED_POLICIES_VOLUME_PATH,
+        debug_label="delete_managed_policies.probe",
+    )
+    if probe is None:
+        return False
+
+    env = build_databricks_cli_env(workspace, profile)
+    try:
+        result = run(
+            [
+                "databricks",
+                "fs",
+                "rm",
+                MANAGED_POLICIES_VOLUME_PATH,
+                *_profile_args(profile),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError(
+            f"Failed to delete {MANAGED_POLICIES_VOLUME_PATH} from Unity Catalog."
+        ) from exc
+
+    if result.returncode != 0:
+        stderr = (result.stderr or "").strip()
+        detail = f": {stderr}" if stderr else ""
+        raise RuntimeError(
+            f"Failed to delete {MANAGED_POLICIES_VOLUME_PATH} from Unity Catalog{detail}"
+        )
+    return True
+
+
 def build_auth_shell_command(workspace: str, profile: str | None = None) -> str:
     workspace_arg = shlex.quote(workspace.rstrip("/"))
     if profile:

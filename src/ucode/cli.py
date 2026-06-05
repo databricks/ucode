@@ -33,6 +33,7 @@ from ucode.databricks import (
     MANAGED_CONFIG_VOLUME_PATH,
     MANAGED_POLICIES_VOLUME_PATH,
     build_shared_base_urls,
+    delete_managed_policies,
     discover_claude_models,
     discover_codex_models,
     discover_gemini_models,
@@ -52,6 +53,7 @@ from ucode.databricks import (
 )
 from ucode.mcp import (
     MCP_CLIENTS,
+    apply_mcp_server_changes,
     configure_mcp_command,
     purge_cross_workspace_mcp_residue,
     revert_mcp_configs,
@@ -75,7 +77,7 @@ from ucode.state import (
     save_state,
     slice_state_for_export,
 )
-from ucode.tracing import configure_tracing_command, install_tracing_runtime
+from ucode.tracing import configure_tracing_command, disable_tracing, install_tracing_runtime
 from ucode.ui import (
     console,
     heading,
@@ -544,6 +546,54 @@ def _render_policy_summary_lines(
                 f"→ {_harness_display(harness)} · [magenta]{model}[/magenta]"
             )
     return lines
+
+
+def _clear_managed_tracing(state: dict) -> bool:
+    """Disable tracing locally and drop the ``tracing`` block from state so the
+    next export publishes a state.json without any tracing section. Returns
+    ``True`` when a previously-enabled tracing block was removed."""
+    tracing = state.get("tracing")
+    was_enabled = bool(tracing.get("enabled")) if isinstance(tracing, dict) else False
+    if not was_enabled:
+        return False
+    disable_tracing(state)
+    cleared = load_state()
+    cleared.pop("tracing", None)
+    save_state(cleared)
+    return True
+
+
+def _clear_managed_mcps(state: dict) -> bool:
+    """Tear down every per-client MCP registration recorded in state and clear
+    ``mcp_servers`` so the next export publishes a state.json with no MCPs.
+    Returns ``True`` when entries were actually removed."""
+    original = list(state.get("mcp_servers") or [])
+    if not original:
+        return False
+    apply_mcp_server_changes(original, [], [])
+    cleared = load_state()
+    cleared["mcp_servers"] = []
+    save_state(cleared)
+    return True
+
+
+def _clear_managed_policy(workspace: str, profile: str | None) -> tuple[bool, bool]:
+    """Remove the workspace's local policies.yaml cache and, if present, the
+    published copy in Unity Catalog. Returns ``(local_removed, uc_removed)``.
+    UC failures are surfaced as warnings (not exceptions) so the rest of setup
+    can complete; the local file is always cleared so a subsequent export
+    won't republish a stale policy."""
+    policy_path = policy_cache_path(workspace)
+    local_existed = policy_path.is_file()
+    if local_existed:
+        delete_workspace_policy(workspace)
+    uc_removed = False
+    try:
+        with spinner("Removing published policies.yaml from Unity Catalog..."):
+            uc_removed = delete_managed_policies(workspace, profile)
+    except RuntimeError as exc:
+        print_warning(f"Could not remove {MANAGED_POLICIES_VOLUME_PATH} from Unity Catalog: {exc}")
+    return local_existed, uc_removed
 
 
 def _resolve_default_agent(workspace: str | None, configured_tools: list[str]) -> tuple[str, str]:
@@ -1619,12 +1669,27 @@ def setup_cmd(ctx: typer.Context) -> None:
 
         if prompt_yes_no("Set up MLflow tracing for this workspace?", default=uc_tracing_enabled):
             configure_tracing_command()
+        elif uc_tracing_enabled:
+            print_note("Clearing MLflow tracing for this workspace...")
+            if _clear_managed_tracing(load_state()):
+                print_success("MLflow tracing cleared (will be unset on next export)")
 
         if prompt_yes_no("Set up managed MCP servers for this workspace?", default=uc_mcps_present):
             configure_mcp_command()
+        elif uc_mcps_present:
+            print_note("Clearing managed MCP servers for this workspace...")
+            if _clear_managed_mcps(load_state()):
+                print_success("Managed MCP servers cleared (will be unset on next export)")
 
         if prompt_yes_no("Set up budget policies for this workspace?", default=uc_has_policy):
             _run_budget_setup(workspace)
+        elif uc_has_policy:
+            print_note("Clearing budget policy for this workspace...")
+            local_removed, uc_removed = _clear_managed_policy(workspace, profile)
+            if local_removed:
+                print_success("Local policies.yaml cleared")
+            if uc_removed:
+                print_success(f"Removed {MANAGED_POLICIES_VOLUME_PATH}")
         else:
             print_note("Skipping budget setup — run `ucode setup budget` anytime to set one.")
 
