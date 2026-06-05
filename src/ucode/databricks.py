@@ -1285,13 +1285,19 @@ def download_managed_policies(workspace: str, profile: str | None) -> str | None
     )
 
 
-def delete_managed_policies(workspace: str, profile: str | None) -> bool:
-    """Remove the published ``policies.yaml`` from the managed-config UC volume."""
+def _delete_managed_file(
+    workspace: str, profile: str | None, volume_path: str, *, debug_label: str
+) -> bool:
+    """Remove ``volume_path`` from the managed-config UC volume.
+
+    Returns ``True`` when a file was deleted, ``False`` when nothing was there
+    to begin with. Raises ``RuntimeError`` only when a present file fails to
+    delete."""
     probe = download_managed_text(
         workspace,
         profile,
-        MANAGED_POLICIES_VOLUME_PATH,
-        debug_label="delete_managed_policies.probe",
+        volume_path,
+        debug_label=f"{debug_label}.probe",
     )
     if probe is None:
         return False
@@ -1303,7 +1309,7 @@ def delete_managed_policies(workspace: str, profile: str | None) -> bool:
                 "databricks",
                 "fs",
                 "rm",
-                MANAGED_POLICIES_VOLUME_PATH,
+                volume_path,
                 *_profile_args(profile),
             ],
             check=False,
@@ -1313,17 +1319,33 @@ def delete_managed_policies(workspace: str, profile: str | None) -> bool:
             timeout=30,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        raise RuntimeError(
-            f"Failed to delete {MANAGED_POLICIES_VOLUME_PATH} from Unity Catalog."
-        ) from exc
+        raise RuntimeError(f"Failed to delete {volume_path} from Unity Catalog.") from exc
 
     if result.returncode != 0:
         stderr = (result.stderr or "").strip()
         detail = f": {stderr}" if stderr else ""
-        raise RuntimeError(
-            f"Failed to delete {MANAGED_POLICIES_VOLUME_PATH} from Unity Catalog{detail}"
-        )
+        raise RuntimeError(f"Failed to delete {volume_path} from Unity Catalog{detail}")
     return True
+
+
+def delete_managed_policies(workspace: str, profile: str | None) -> bool:
+    """Remove the published ``policies.yaml`` from the managed-config UC volume."""
+    return _delete_managed_file(
+        workspace,
+        profile,
+        MANAGED_POLICIES_VOLUME_PATH,
+        debug_label="delete_managed_policies",
+    )
+
+
+def delete_managed_config(workspace: str, profile: str | None) -> bool:
+    """Remove the published ``state.json`` from the managed-config UC volume."""
+    return _delete_managed_file(
+        workspace,
+        profile,
+        MANAGED_CONFIG_VOLUME_PATH,
+        debug_label="delete_managed_config",
+    )
 
 
 def build_auth_shell_command(workspace: str, profile: str | None = None) -> str:

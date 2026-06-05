@@ -492,6 +492,117 @@ policy:
         assert "Could not read policy file" in result.output
 
 
+class TestSetupPhaseFlags:
+    """`ucode setup` runs all phases by default; flags select a subset and
+    leave unselected phases untouched."""
+
+    @staticmethod
+    def _patch_preamble(stack, *, uc_tracing=False, uc_mcps=False, uc_policy=False):
+        """Stub everything up to (and around) the four phase blocks, returning a
+        dict of the phase-action mocks for the caller to assert against."""
+        pre_pulled = {
+            "workspace": "https://example.databricks.com",
+            "profile": "my-profile",
+            "available_tools": ["claude"],
+            "tracing": {"enabled": uc_tracing},
+            "mcp_servers": [{"name": "x"}] if uc_mcps else [],
+        }
+        stack.enter_context(patch("ucode.cli.install_databricks_cli"))
+        stack.enter_context(patch("ucode.cli.ensure_databricks_auth"))
+        stack.enter_context(patch("ucode.cli.get_databricks_token", return_value="tok"))
+        stack.enter_context(patch("ucode.cli.is_workspace_admin", return_value=True))
+        stack.enter_context(patch("ucode.cli.configure_shared_state", return_value=pre_pulled))
+        stack.enter_context(patch("ucode.cli._render_configuration_panel"))
+        stack.enter_context(
+            patch(
+                "ucode.cli.load_workspace_policy",
+                return_value={"policy": {}} if uc_policy else None,
+            )
+        )
+        stack.enter_context(patch("ucode.cli.load_state", return_value=MINIMAL_STATE))
+        # Agent phase internals.
+        stack.enter_context(patch("ucode.cli.prompt_for_tools", return_value=["claude"]))
+        mock_configure = stack.enter_context(
+            patch("ucode.cli.configure_workspace_command", return_value=0)
+        )
+        stack.enter_context(patch("ucode.cli.save_state"))
+        stack.enter_context(
+            patch("ucode.cli._resolve_default_agent", return_value=("claude", "first tool"))
+        )
+        # Phase actions (tracing/mcp/budget).
+        mock_tracing = stack.enter_context(patch("ucode.cli.configure_tracing_command"))
+        mock_mcp = stack.enter_context(patch("ucode.cli.configure_mcp_command"))
+        mock_budget = stack.enter_context(patch("ucode.cli._run_budget_setup"))
+        return {
+            "agents": mock_configure,
+            "tracing": mock_tracing,
+            "mcp": mock_mcp,
+            "budget": mock_budget,
+        }
+
+    def test_no_flags_runs_all_phases(self):
+        with contextlib.ExitStack() as stack:
+            mocks = self._patch_preamble(stack)
+            # Three "yes" answers for the tracing / mcp / budget prompts.
+            result = runner.invoke(app, ["setup"], input="y\ny\ny\n")
+
+        assert result.exit_code == 0, result.output
+        mocks["agents"].assert_called_once()
+        mocks["tracing"].assert_called_once()
+        mocks["mcp"].assert_called_once()
+        mocks["budget"].assert_called_once()
+
+    def test_single_flag_runs_only_that_phase(self):
+        with contextlib.ExitStack() as stack:
+            mocks = self._patch_preamble(stack)
+            result = runner.invoke(app, ["setup", "--budget"], input="y\n")
+
+        assert result.exit_code == 0, result.output
+        mocks["agents"].assert_not_called()
+        mocks["tracing"].assert_not_called()
+        mocks["mcp"].assert_not_called()
+        mocks["budget"].assert_called_once()
+
+    def test_multiple_flags_run_selected_phases(self):
+        with contextlib.ExitStack() as stack:
+            mocks = self._patch_preamble(stack)
+            # One "yes" for the mcp prompt; agents phase needs no yes/no.
+            result = runner.invoke(app, ["setup", "--agents", "--mcp"], input="y\n")
+
+        assert result.exit_code == 0, result.output
+        mocks["agents"].assert_called_once()
+        mocks["mcp"].assert_called_once()
+        mocks["tracing"].assert_not_called()
+        mocks["budget"].assert_not_called()
+
+    def test_unselected_phase_is_not_cleared(self):
+        """Passing --budget must not clear existing MCP config, even though a
+        full setup would offer to."""
+        with contextlib.ExitStack() as stack:
+            mocks = self._patch_preamble(stack, uc_mcps=True)
+            mock_clear = stack.enter_context(patch("ucode.cli._clear_managed_mcps"))
+            # Decline the budget prompt; MCP must stay untouched.
+            result = runner.invoke(app, ["setup", "--budget"], input="n\n")
+
+        assert result.exit_code == 0, result.output
+        mocks["mcp"].assert_not_called()
+        mock_clear.assert_not_called()
+
+    def test_blocks_non_admin(self):
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch("ucode.cli.install_databricks_cli"))
+            stack.enter_context(patch("ucode.cli.load_state", return_value=MINIMAL_STATE))
+            stack.enter_context(patch("ucode.cli.ensure_databricks_auth"))
+            stack.enter_context(patch("ucode.cli.get_databricks_token", return_value="tok"))
+            stack.enter_context(patch("ucode.cli.is_workspace_admin", return_value=False))
+            mock_budget = stack.enter_context(patch("ucode.cli._run_budget_setup"))
+            result = runner.invoke(app, ["setup", "--budget"])
+
+        assert result.exit_code == 1, result.output
+        assert "admin permissions" in result.output
+        mock_budget.assert_not_called()
+
+
 class TestDefaultLaunch:
     """Bare `ucode` launches the default agent, with budget-aware fallback."""
 
@@ -1161,6 +1272,148 @@ class TestExport:
         assert result.exit_code == 0, result.output
         assert "Export cancelled" in result.output
         mock_upload.assert_not_called()
+
+
+class TestDeleteConfiguration:
+    """`ucode delete-configuration` prompts for the target workspace, removes
+    both UC files, is admin-gated, and requires a double confirmation before
+    touching Unity Catalog."""
+
+    _WORKSPACE = "https://example.databricks.com"
+
+    @classmethod
+    def _full_state(cls, *extra_workspaces: str) -> dict:
+        workspaces = {cls._WORKSPACE: {"profile": "my-profile"}}
+        for ws in extra_workspaces:
+            workspaces[ws] = {"profile": None}
+        return {
+            "state_version": 3,
+            "current_workspace": cls._WORKSPACE,
+            "workspaces": workspaces,
+        }
+
+    @classmethod
+    def _patch_resolution(cls, stack, *, admin: bool | None = True, picked: str | None = None):
+        """Stub CLI install, full-state load, the workspace picker, auth, and the
+        admin check. The picker returns ``picked`` (defaults to the example
+        workspace) with a profile."""
+        stack.enter_context(patch("ucode.cli.install_databricks_cli"))
+        stack.enter_context(patch("ucode.cli.load_full_state", return_value=cls._full_state()))
+        stack.enter_context(
+            patch(
+                "ucode.cli.prompt_for_workspace",
+                return_value=(picked or cls._WORKSPACE, "my-profile"),
+            )
+        )
+        stack.enter_context(patch("ucode.cli.ensure_databricks_auth"))
+        stack.enter_context(patch("ucode.cli.get_databricks_token", return_value="tok"))
+        stack.enter_context(patch("ucode.cli.is_workspace_admin", return_value=admin))
+
+    def test_deletes_both_uc_files_after_double_confirmation(self):
+        with contextlib.ExitStack() as stack:
+            self._patch_resolution(stack)
+            mock_config = stack.enter_context(
+                patch("ucode.cli.delete_managed_config", return_value=True)
+            )
+            mock_policy = stack.enter_context(
+                patch("ucode.cli.delete_managed_policies", return_value=True)
+            )
+            result = runner.invoke(app, ["delete-configuration"], input="y\ny\n")
+
+        assert result.exit_code == 0, result.output
+        mock_config.assert_called_once_with(self._WORKSPACE, "my-profile")
+        mock_policy.assert_called_once_with(self._WORKSPACE, "my-profile")
+        assert MANAGED_CONFIG_VOLUME_PATH in result.output
+        assert MANAGED_POLICIES_VOLUME_PATH in result.output
+        assert "Managed configuration deleted" in result.output
+
+    def test_prompts_for_workspace_before_deleting(self):
+        """The chosen workspace — not necessarily current_workspace — is the
+        delete target."""
+        other = "https://other.databricks.com"
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch("ucode.cli.install_databricks_cli"))
+            stack.enter_context(
+                patch("ucode.cli.load_full_state", return_value=self._full_state(other))
+            )
+            mock_prompt = stack.enter_context(
+                patch("ucode.cli.prompt_for_workspace", return_value=(other, None))
+            )
+            stack.enter_context(patch("ucode.cli.ensure_databricks_auth"))
+            stack.enter_context(patch("ucode.cli.get_databricks_token", return_value="tok"))
+            stack.enter_context(patch("ucode.cli.is_workspace_admin", return_value=True))
+            mock_config = stack.enter_context(
+                patch("ucode.cli.delete_managed_config", return_value=True)
+            )
+            stack.enter_context(patch("ucode.cli.delete_managed_policies", return_value=True))
+            result = runner.invoke(app, ["delete-configuration"], input="y\ny\n")
+
+        assert result.exit_code == 0, result.output
+        mock_prompt.assert_called_once()
+        # Profile coerced from "" -> None for the chosen workspace.
+        mock_config.assert_called_once_with(other, None)
+
+    def test_cancel_at_first_prompt_deletes_nothing(self):
+        with contextlib.ExitStack() as stack:
+            self._patch_resolution(stack)
+            mock_config = stack.enter_context(patch("ucode.cli.delete_managed_config"))
+            mock_policy = stack.enter_context(patch("ucode.cli.delete_managed_policies"))
+            result = runner.invoke(app, ["delete-configuration"], input="n\n")
+
+        assert result.exit_code == 0, result.output
+        assert "Delete cancelled" in result.output
+        mock_config.assert_not_called()
+        mock_policy.assert_not_called()
+
+    def test_cancel_at_second_prompt_deletes_nothing(self):
+        with contextlib.ExitStack() as stack:
+            self._patch_resolution(stack)
+            mock_config = stack.enter_context(patch("ucode.cli.delete_managed_config"))
+            mock_policy = stack.enter_context(patch("ucode.cli.delete_managed_policies"))
+            result = runner.invoke(app, ["delete-configuration"], input="y\nn\n")
+
+        assert result.exit_code == 0, result.output
+        assert "Delete cancelled" in result.output
+        mock_config.assert_not_called()
+        mock_policy.assert_not_called()
+
+    def test_blocks_non_admin(self):
+        with contextlib.ExitStack() as stack:
+            self._patch_resolution(stack, admin=False)
+            mock_config = stack.enter_context(patch("ucode.cli.delete_managed_config"))
+            result = runner.invoke(app, ["delete-configuration"], input="y\ny\n")
+
+        assert result.exit_code == 1, result.output
+        assert "admin permissions" in result.output
+        mock_config.assert_not_called()
+
+    def test_errors_when_no_workspace_configured(self):
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch("ucode.cli.install_databricks_cli"))
+            stack.enter_context(
+                patch(
+                    "ucode.cli.load_full_state",
+                    return_value={"state_version": 3, "current_workspace": None, "workspaces": {}},
+                )
+            )
+            mock_prompt = stack.enter_context(patch("ucode.cli.prompt_for_workspace"))
+            mock_config = stack.enter_context(patch("ucode.cli.delete_managed_config"))
+            result = runner.invoke(app, ["delete-configuration"])
+
+        assert result.exit_code == 1
+        assert "No workspace is configured" in result.output
+        mock_prompt.assert_not_called()
+        mock_config.assert_not_called()
+
+    def test_reports_when_nothing_to_delete(self):
+        with contextlib.ExitStack() as stack:
+            self._patch_resolution(stack)
+            stack.enter_context(patch("ucode.cli.delete_managed_config", return_value=False))
+            stack.enter_context(patch("ucode.cli.delete_managed_policies", return_value=False))
+            result = runner.invoke(app, ["delete-configuration"], input="y\ny\n")
+
+        assert result.exit_code == 0, result.output
+        assert "Nothing to delete" in result.output
 
 
 class TestAutoConfigureOnFirstRun:

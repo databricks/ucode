@@ -34,6 +34,7 @@ from ucode.databricks import (
     MANAGED_CONFIG_VOLUME_PATH,
     MANAGED_POLICIES_VOLUME_PATH,
     build_shared_base_urls,
+    delete_managed_config,
     delete_managed_policies,
     discover_claude_models,
     discover_codex_models,
@@ -1641,11 +1642,37 @@ def usage_cmd(
 
 
 @setup_app.callback(invoke_without_command=True)
-def setup_cmd(ctx: typer.Context) -> None:
-    """Interactively build the managed ucode config for a workspace (admin-only)."""
+def setup_cmd(
+    ctx: typer.Context,
+    agents: Annotated[
+        bool,
+        typer.Option("--agents", help="Run the agent/model setup phase."),
+    ] = False,
+    tracing: Annotated[
+        bool,
+        typer.Option("--tracing", help="Run the Tracing setup phase."),
+    ] = False,
+    mcp: Annotated[
+        bool,
+        typer.Option("--mcp", help="Run the managed MCP servers setup phase."),
+    ] = False,
+    budget: Annotated[
+        bool,
+        typer.Option("--budget", help="Run the budget policy setup phase."),
+    ] = False,
+) -> None:
+    """Interactively build the managed ucode config for a workspace (admin-only).
+
+    With no phase flags, runs all phases (agents, tracing, MCP, budget). Pass any
+    of ``--agents``, ``--tracing``, ``--mcp``, ``--budget`` to run only those
+    phases; phases you don't select are left untouched in Unity Catalog.
+    """
     # Let subcommands (e.g. `ucode setup budget`) handle themselves.
     if ctx.invoked_subcommand is not None:
         return
+    # No flags = run every phase (preserves the original all-in-one behavior).
+    if not (agents or tracing or mcp or budget):
+        agents = tracing = mcp = budget = True
     try:
         install_databricks_cli()
         console.print(
@@ -1702,67 +1729,75 @@ def setup_cmd(ctx: typer.Context) -> None:
         uc_mcps_present = bool(pre_pulled.get("mcp_servers"))
         uc_has_policy = load_workspace_policy(workspace) is not None
 
-        picked_tools = prompt_for_tools(
-            [(tool, TOOL_SPECS[tool]["display"]) for tool in TOOL_SPECS],
-            preselected=uc_available_tools or None,
-        )
-        if not picked_tools:
-            print_note("No coding agents selected — nothing to configure.")
-            return
-
-        configure_rc = configure_workspace_command(
-            workspaces=[(workspace, profile)],
-            selected_tools=picked_tools,
-            update_existing=False,
-            validate=False,
-            panel_title=None,
-            pre_pulled_state=pre_pulled,
-        )
-        if configure_rc != 0:
-            raise typer.Exit(configure_rc)
-
-        post_configure_state = load_state()
-        configured_tools = [
-            tool
-            for tool in (post_configure_state.get("available_tools") or [])
-            if isinstance(tool, str) and tool in TOOL_SPECS
-        ]
-        if configured_tools:
-            # Default agent comes from the policy's tier-1 harness when one is
-            # both published and configured. Otherwise fall back to the first
-            # configured tool (mirrors `available_tools` ordering in UC).
-            default_agent, default_reason = _resolve_default_agent(workspace, configured_tools)
-            post_configure_state["default_agent"] = default_agent
-            save_state(post_configure_state)
-            print_success(
-                f"Default agent set to {TOOL_SPECS[default_agent]['display']} ({default_reason})"
+        if agents:
+            picked_tools = prompt_for_tools(
+                [(tool, TOOL_SPECS[tool]["display"]) for tool in TOOL_SPECS],
+                preselected=uc_available_tools or None,
             )
+            if not picked_tools:
+                print_note("No coding agents selected — skipping agent setup.")
+            else:
+                configure_rc = configure_workspace_command(
+                    workspaces=[(workspace, profile)],
+                    selected_tools=picked_tools,
+                    update_existing=False,
+                    validate=False,
+                    panel_title=None,
+                    pre_pulled_state=pre_pulled,
+                )
+                if configure_rc != 0:
+                    raise typer.Exit(configure_rc)
 
-        if prompt_yes_no("Set up Tracing for this workspace?", default=uc_tracing_enabled):
-            configure_tracing_command()
-        elif uc_tracing_enabled:
-            print_note("Clearing Tracing for this workspace...")
-            if _clear_managed_tracing(load_state()):
-                print_success("Tracing cleared (will be unset on next export)")
+                post_configure_state = load_state()
+                configured_tools = [
+                    tool
+                    for tool in (post_configure_state.get("available_tools") or [])
+                    if isinstance(tool, str) and tool in TOOL_SPECS
+                ]
+                if configured_tools:
+                    # Default agent comes from the policy's tier-1 harness when one
+                    # is both published and configured. Otherwise fall back to the
+                    # first configured tool (mirrors `available_tools` ordering in UC).
+                    default_agent, default_reason = _resolve_default_agent(
+                        workspace, configured_tools
+                    )
+                    post_configure_state["default_agent"] = default_agent
+                    save_state(post_configure_state)
+                    print_success(
+                        f"Default agent set to {TOOL_SPECS[default_agent]['display']} "
+                        f"({default_reason})"
+                    )
 
-        if prompt_yes_no("Set up managed MCP servers for this workspace?", default=uc_mcps_present):
-            configure_mcp_command()
-        elif uc_mcps_present:
-            print_note("Clearing managed MCP servers for this workspace...")
-            if _clear_managed_mcps(load_state()):
-                print_success("Managed MCP servers cleared (will be unset on next export)")
+        if tracing:
+            if prompt_yes_no("Set up Tracing for this workspace?", default=uc_tracing_enabled):
+                configure_tracing_command()
+            elif uc_tracing_enabled:
+                print_note("Clearing Tracing for this workspace...")
+                if _clear_managed_tracing(load_state()):
+                    print_success("Tracing cleared (will be unset on next export)")
 
-        if prompt_yes_no("Set up budget policies for this workspace?", default=uc_has_policy):
-            _run_budget_setup(workspace)
-        elif uc_has_policy:
-            print_note("Clearing budget policy for this workspace...")
-            local_removed, uc_removed = _clear_managed_policy(workspace, profile)
-            if local_removed:
-                print_success("Local policies.yaml cleared")
-            if uc_removed:
-                print_success(f"Removed {MANAGED_POLICIES_VOLUME_PATH}")
-        else:
-            print_note("Skipping budget setup — run `ucode setup budget` anytime to set one.")
+        if mcp:
+            if prompt_yes_no(
+                "Set up managed MCP servers for this workspace?", default=uc_mcps_present
+            ):
+                configure_mcp_command()
+            elif uc_mcps_present:
+                print_note("Clearing managed MCP servers for this workspace...")
+                if _clear_managed_mcps(load_state()):
+                    print_success("Managed MCP servers cleared (will be unset on next export)")
+
+        if budget:
+            if prompt_yes_no("Set up budget policies for this workspace?", default=uc_has_policy):
+                _run_budget_setup(workspace)
+            elif uc_has_policy:
+                print_note("Clearing budget policy for this workspace...")
+                local_removed, uc_removed = _clear_managed_policy(workspace, profile)
+                if local_removed:
+                    print_success("Local policies.yaml cleared")
+                if uc_removed:
+                    print_success(f"Removed {MANAGED_POLICIES_VOLUME_PATH}")
+            else:
+                print_note("Skipping budget setup — run `ucode setup budget` anytime to set one.")
 
         final_state = load_state()
         summary_default = final_state.get("default_agent")
@@ -1866,6 +1901,101 @@ def export_cmd() -> None:
                 print_note("No local policies.yaml found — run `ucode setup budget` to create one.")
         finally:
             tmp_path.unlink(missing_ok=True)
+    except RuntimeError as exc:
+        print_err(str(exc))
+        raise typer.Exit(1) from None
+    except KeyboardInterrupt:
+        print_err("Interrupted.")
+        raise typer.Exit(130) from None
+
+
+@app.command("delete-configuration")
+def delete_configuration_cmd() -> None:
+    """Delete the published managed config (state.json) and budget policy
+    (policies.yaml) from Unity Catalog for a selected workspace (admin-only).
+
+    Prompts for which configured workspace to delete — unlike `ucode export`,
+    it never assumes the current workspace, since the delete is destructive."""
+    try:
+        install_databricks_cli()
+        full = load_full_state()
+        workspaces = full.get("workspaces") or {}
+        configured = [ws for ws in workspaces if isinstance(ws, str) and ws]
+        if not configured:
+            raise RuntimeError(
+                "No workspace is configured. Run `ucode configure` before "
+                "`ucode delete-configuration`."
+            )
+
+        # Always make the admin choose which workspace's published config to
+        # delete — this is destructive and org-wide, so we never assume the
+        # current workspace the way `ucode export` does.
+        current = full.get("current_workspace")
+        configured.sort(key=lambda ws: (ws != current, ws))
+        profiles = [(ws, (workspaces.get(ws) or {}).get("profile") or "") for ws in configured]
+        workspace, profile = prompt_for_workspace(
+            "Select the workspace whose published config to delete", profiles
+        )
+        profile = profile or None
+        ensure_databricks_auth(workspace, profile)
+
+        with spinner("Checking workspace admin permissions..."):
+            token = get_databricks_token(workspace, profile)
+            admin = is_workspace_admin(workspace, token)
+        if admin is False:
+            raise RuntimeError(
+                f"You do not have admin permissions to delete the managed config "
+                f"for {workspace}. `ucode delete-configuration` is restricted to "
+                f"workspace admins."
+            )
+        if admin is None:
+            print_warning(
+                "Could not verify workspace admin permissions (SCIM `Me` call failed). "
+                "Proceeding optimistically — the UC delete will fail if you "
+                "lack the required role."
+            )
+        else:
+            print_success("Admin permissions verified")
+
+        print_section("Delete configuration")
+        print_kv("Workspace", workspace)
+        print_kv("Config file", MANAGED_CONFIG_VOLUME_PATH)
+        print_kv("Policy file", MANAGED_POLICIES_VOLUME_PATH)
+        print_warning(
+            "This removes the published config from Unity Catalog. Developers in "
+            "this workspace will no longer pull it on `ucode configure`."
+        )
+
+        if not prompt_yes_no(
+            "Delete the published config and policy from Unity Catalog?", default=False
+        ):
+            print_note("Delete cancelled — no changes written.")
+            return
+        if not prompt_yes_no("Are you sure? This cannot be undone.", default=False):
+            print_note("Delete cancelled — no changes written.")
+            return
+
+        config_removed = False
+        policy_removed = False
+        with spinner("Deleting published config from Unity Catalog..."):
+            config_removed = delete_managed_config(workspace, profile)
+            policy_removed = delete_managed_policies(workspace, profile)
+
+        if config_removed:
+            print_success(f"Removed {MANAGED_CONFIG_VOLUME_PATH}")
+        else:
+            print_note(f"No published config found at {MANAGED_CONFIG_VOLUME_PATH}")
+        if policy_removed:
+            print_success(f"Removed {MANAGED_POLICIES_VOLUME_PATH}")
+        else:
+            print_note(f"No published policy found at {MANAGED_POLICIES_VOLUME_PATH}")
+
+        if not config_removed and not policy_removed:
+            print_note(
+                "Nothing to delete — Unity Catalog had no managed config for this workspace."
+            )
+        else:
+            print_success("Managed configuration deleted")
     except RuntimeError as exc:
         print_err(str(exc))
         raise typer.Exit(1) from None
