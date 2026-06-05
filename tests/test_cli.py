@@ -368,6 +368,129 @@ class TestSetupBudgetCommand:
         assert result.exit_code == 1
         assert "No workspace is configured" in result.output
 
+    _VALID_POLICY_YAML = """
+policy:
+  name: coding-agents-default
+  daily_budget_usd: 300
+  tiers:
+    - name: premium
+      activates_at_pct: 0
+      harness: claude
+      model: databricks-claude-opus-4
+  on_budget_exhausted: warn
+"""
+
+    def test_applies_policy_from_file(self, tmp_path):
+        state = {
+            "workspace": "https://example.databricks.com",
+            "claude_models": {"opus": "databricks-claude-opus-4"},
+        }
+        policy_file = tmp_path / "policy.yaml"
+        policy_file.write_text(self._VALID_POLICY_YAML, encoding="utf-8")
+
+        with contextlib.ExitStack() as stack:
+            self._admin_patches(stack)
+            stack.enter_context(patch("ucode.cli.load_state", return_value=state))
+            mock_save_policy = stack.enter_context(patch("ucode.cli.save_workspace_policy"))
+            # No interactive input is supplied; the file path must bypass prompts.
+            result = runner.invoke(app, ["setup", "budget", "-f", str(policy_file)])
+
+        assert result.exit_code == 0, result.output
+        workspace, policy = mock_save_policy.call_args[0]
+        assert workspace == state["workspace"]
+        assert policy["policy"]["daily_budget_usd"] == 300.0
+        assert policy["policy"]["on_budget_exhausted"] == "warn"
+        assert "Budget policy updated" in result.output
+
+    def test_rejects_unsupported_harness_in_file(self, tmp_path):
+        state = {"workspace": "https://example.databricks.com"}
+        policy_file = tmp_path / "policy.yaml"
+        policy_file.write_text(
+            "policy:\n  daily_budget_usd: 100\n  tiers:\n    - name: t1\n      "
+            "activates_at_pct: 0\n      harness: cursor\n      model: whatever\n",
+            encoding="utf-8",
+        )
+
+        with contextlib.ExitStack() as stack:
+            self._admin_patches(stack)
+            stack.enter_context(patch("ucode.cli.load_state", return_value=state))
+            mock_save_policy = stack.enter_context(patch("ucode.cli.save_workspace_policy"))
+            result = runner.invoke(app, ["setup", "budget", "-f", str(policy_file)])
+
+        assert result.exit_code == 1
+        assert "Policy file is invalid" in result.output
+        assert "cursor" in result.output
+        mock_save_policy.assert_not_called()
+
+    def test_rejects_unknown_model_when_inventory_known(self, tmp_path):
+        state = {
+            "workspace": "https://example.databricks.com",
+            "claude_models": {"opus": "databricks-claude-opus-4"},
+        }
+        policy_file = tmp_path / "policy.yaml"
+        policy_file.write_text(
+            "policy:\n  daily_budget_usd: 100\n  tiers:\n    - name: t1\n      "
+            "activates_at_pct: 0\n      harness: claude\n      model: made-up-model\n",
+            encoding="utf-8",
+        )
+
+        with contextlib.ExitStack() as stack:
+            self._admin_patches(stack)
+            stack.enter_context(patch("ucode.cli.load_state", return_value=state))
+            mock_save_policy = stack.enter_context(patch("ucode.cli.save_workspace_policy"))
+            result = runner.invoke(app, ["setup", "budget", "-f", str(policy_file)])
+
+        assert result.exit_code == 1
+        assert "made-up-model" in result.output
+        mock_save_policy.assert_not_called()
+
+    def test_allows_free_text_model_when_inventory_empty(self, tmp_path):
+        # No discovered inventory for the harness -> model is not constrained,
+        # matching the interactive flow's free-text fallback.
+        state = {"workspace": "https://example.databricks.com"}
+        policy_file = tmp_path / "policy.yaml"
+        policy_file.write_text(self._VALID_POLICY_YAML, encoding="utf-8")
+
+        with contextlib.ExitStack() as stack:
+            self._admin_patches(stack)
+            stack.enter_context(patch("ucode.cli.load_state", return_value=state))
+            mock_save_policy = stack.enter_context(patch("ucode.cli.save_workspace_policy"))
+            result = runner.invoke(app, ["setup", "budget", "-f", str(policy_file)])
+
+        assert result.exit_code == 0, result.output
+        mock_save_policy.assert_called_once()
+
+    def test_rejects_invalid_policy_file(self, tmp_path):
+        state = {"workspace": "https://example.databricks.com"}
+        policy_file = tmp_path / "policy.yaml"
+        policy_file.write_text(
+            "policy:\n  daily_budget_usd: 0\n  tiers:\n    - name: a\n      "
+            "activates_at_pct: 60\n      harness: claude\n      model: m\n",
+            encoding="utf-8",
+        )
+
+        with contextlib.ExitStack() as stack:
+            self._admin_patches(stack)
+            stack.enter_context(patch("ucode.cli.load_state", return_value=state))
+            mock_save_policy = stack.enter_context(patch("ucode.cli.save_workspace_policy"))
+            result = runner.invoke(app, ["setup", "budget", "-f", str(policy_file)])
+
+        assert result.exit_code == 1
+        assert "Policy file is invalid" in result.output
+        mock_save_policy.assert_not_called()
+
+    def test_errors_when_policy_file_missing(self, tmp_path):
+        state = {"workspace": "https://example.databricks.com"}
+        missing = tmp_path / "nope.yaml"
+
+        with contextlib.ExitStack() as stack:
+            self._admin_patches(stack)
+            stack.enter_context(patch("ucode.cli.load_state", return_value=state))
+            result = runner.invoke(app, ["setup", "budget", "-f", str(missing)])
+
+        assert result.exit_code == 1
+        assert "Could not read policy file" in result.output
+
 
 class TestDefaultLaunch:
     """Bare `ucode` launches the default agent, with budget-aware fallback."""
@@ -597,11 +720,11 @@ class TestBudgetGate:
         with patch("ucode.ui.questionary.select", side_effect=fake_select):
             prompt_budget_warn_choice(
                 default_agent_display="Claude Code",
-                switch_display="economy (OpenCode / kimi-k2)",
+                switch_display="OpenCode / kimi-k2",
             )
-        assert captured["values"] == ["default", "switch"]
-        assert captured["titles"][0] == "Continue with Claude Code"
-        assert captured["titles"][1] == "Switch to economy (OpenCode / kimi-k2)"
+        assert captured["values"] == ["switch", "default"]
+        assert captured["titles"][0] == "Switch to OpenCode / kimi-k2 [Recommended]"
+        assert captured["titles"][1] == "Continue with Claude Code"
 
 
 class TestMcpSubcommands:

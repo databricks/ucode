@@ -98,12 +98,90 @@ def normalize_policy(raw: object) -> dict | None:
     }
 
 
+def validate_policy(raw: object) -> list[str]:
+    """Return human-readable problems with ``raw``; an empty list means valid.
+
+    Mirrors the constraints enforced by :func:`normalize_policy`, but reports a
+    message per failure instead of collapsing everything to ``None``.
+    """
+    errors: list[str] = []
+    if not isinstance(raw, dict):
+        return ["Top-level YAML must be a mapping with a `policy:` key."]
+    raw_dict = cast("dict[str, object]", raw)
+    root = raw_dict.get("policy")
+    if not isinstance(root, dict):
+        return ["Missing `policy:` mapping at the top level."]
+    root = cast("dict[str, object]", root)
+
+    budget = root.get("daily_budget_usd")
+    if not isinstance(budget, (int, float)) or isinstance(budget, bool):
+        errors.append("`daily_budget_usd` is required and must be a number.")
+    elif budget <= 0:
+        errors.append("`daily_budget_usd` must be greater than 0.")
+
+    exhausted = root.get("on_budget_exhausted")
+    if exhausted is not None and (
+        not isinstance(exhausted, str) or exhausted not in VALID_ON_BUDGET_EXHAUSTED
+    ):
+        allowed = ", ".join(sorted(VALID_ON_BUDGET_EXHAUSTED))
+        errors.append(f"`on_budget_exhausted` must be one of: {allowed}.")
+
+    tiers_raw = root.get("tiers")
+    if not isinstance(tiers_raw, list) or not tiers_raw:
+        errors.append("`tiers` is required and must be a non-empty list.")
+        return errors
+
+    pcts: list[float] = []
+    for index, item in enumerate(tiers_raw, start=1):
+        if not isinstance(item, dict):
+            errors.append(f"tier {index}: must be a mapping.")
+            continue
+        item = cast("dict[str, object]", item)
+        name = item.get("name")
+        if not isinstance(name, str) or not name.strip():
+            errors.append(f"tier {index}: `name` is required.")
+        pct = item.get("activates_at_pct")
+        if not isinstance(pct, (int, float)) or isinstance(pct, bool):
+            errors.append(f"tier {index}: `activates_at_pct` is required and must be a number.")
+        elif pct < 0 or pct > 100:
+            errors.append(f"tier {index}: `activates_at_pct` must be between 0 and 100.")
+        else:
+            pcts.append(float(pct))
+        harness = item.get("harness")
+        if not isinstance(harness, str) or not harness.strip():
+            errors.append(f"tier {index}: `harness` is required.")
+        model = item.get("model")
+        if not isinstance(model, str) or not model.strip():
+            errors.append(f"tier {index}: `model` is required.")
+
+    if pcts and min(pcts) != 0:
+        errors.append("The first tier must activate at 0% (one tier needs `activates_at_pct: 0`).")
+
+    return errors
+
+
 def parse_policy_yaml(text: str) -> dict | None:
     try:
         raw = yaml.safe_load(text)
     except yaml.YAMLError:
         return None
     return normalize_policy(raw)
+
+
+def parse_and_validate_policy_yaml(text: str) -> tuple[dict | None, list[str]]:
+    """Parse and validate ``text``, returning ``(policy, errors)``.
+
+    On success ``errors`` is empty and ``policy`` is the normalized dict. On
+    failure ``policy`` is ``None`` and ``errors`` lists what went wrong.
+    """
+    try:
+        raw = yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        return None, [f"Invalid YAML: {exc}"]
+    errors = validate_policy(raw)
+    if errors:
+        return None, errors
+    return normalize_policy(raw), []
 
 
 def policy_to_yaml(policy: dict) -> str:

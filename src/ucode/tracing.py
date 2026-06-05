@@ -214,7 +214,7 @@ def _select_tracing_workspace(*, only_enabled: bool = False) -> dict:
         prompt = (
             "Tracing is enabled on multiple workspaces — pick which to disable"
             if only_enabled
-            else "Select the workspace to configure MLflow tracing for"
+            else "Select the workspace to configure Tracing for"
         )
         workspace, profile = prompt_for_workspace(prompt, profiles)
 
@@ -290,7 +290,7 @@ def _enable_tracing_for_workspaces(workspaces: list[tuple[str, str | None]]) -> 
     for workspace, profile in workspaces:
         state = _hydrate_workspace_entry(full, workspace, profile)
         if not _configured_tracing_agents(state):
-            print_section("MLflow Tracing")
+            print_section("Tracing")
             print_note(f"{workspace}: no tracing-capable agents configured — skipping.")
             continue
         _enable_tracing_for_state(state)
@@ -315,7 +315,7 @@ def _enable_tracing_for_state(state: dict) -> dict:
     profile = state.get("profile")
     ensure_databricks_auth(workspace, profile)
 
-    print_section("MLflow Tracing")
+    print_section("Tracing")
     print_kv("Workspace", workspace)
 
     # Running `ucode configure tracing` is itself the opt-in, so there's no
@@ -370,7 +370,7 @@ def _disable_tracing_command() -> int:
     enabled, then strip the tracing config from its agent files."""
     state = _select_tracing_workspace(only_enabled=True)
     if not state:
-        print_section("MLflow Tracing")
+        print_section("Tracing")
         print_note("Tracing is not enabled on any configured workspace — nothing to do.")
         return 0
 
@@ -378,7 +378,7 @@ def _disable_tracing_command() -> int:
     profile = state.get("profile")
     ensure_databricks_auth(workspace, profile)
 
-    print_section("MLflow Tracing")
+    print_section("Tracing")
     print_kv("Workspace", workspace)
     disable_tracing(state)
     print_success("Tracing disabled")

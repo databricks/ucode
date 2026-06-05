@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Annotated, cast
 
 import typer
@@ -64,6 +65,7 @@ from ucode.policies import (
     delete_workspace_policy,
     load_workspace_policy,
     normalize_policy,
+    parse_and_validate_policy_yaml,
     parse_policy_yaml,
     policy_cache_path,
     save_workspace_policy,
@@ -129,11 +131,10 @@ BUDGET_TRACKED_AGENTS: tuple[str, ...] = ("claude", "codex", "opencode")
 
 
 def _tier_display(tier: dict) -> str:
-    name = str(tier.get("name") or "policy tier")
     harness = str(tier.get("harness") or "agent")
     model = str(tier.get("model") or "model")
     display = TOOL_SPECS.get(harness, {}).get("display", harness)
-    return f"{name} ({display} / {model})"
+    return f"{display} / {model}"
 
 
 def _print_discovery_diagnostics(state: dict) -> None:
@@ -643,7 +644,7 @@ def _render_configuration_panel(
     tracing = state.get("tracing") or {}
     tracing_enabled = bool(tracing.get("enabled")) if isinstance(tracing, dict) else False
     summary_lines.append(
-        f"[bold]MLflow tracing:[/bold] "
+        f"[bold]Tracing:[/bold] "
         f"{'[green]enabled[/green]' if tracing_enabled else '[dim]disabled[/dim]'}"
     )
 
@@ -726,7 +727,7 @@ def status() -> int:
     print_heading("Tracing")
     tracing = state.get("tracing") or {}
     if tracing.get("enabled"):
-        print_kv("MLflow tracing", "enabled")
+        print_kv("Tracing", "enabled")
         print_kv("Tracking URI", str(tracing.get("tracking_uri") or "unknown"))
         print_kv(
             "Experiment",
@@ -739,7 +740,7 @@ def status() -> int:
         if sql_warehouse_id:
             print_kv("SQL warehouse", str(sql_warehouse_id))
     else:
-        print_kv("MLflow tracing", "disabled")
+        print_kv("Tracing", "disabled")
 
     print_heading("Policy")
     workspace_str = workspace if isinstance(workspace, str) else None
@@ -1128,7 +1129,7 @@ def configure(
         bool,
         typer.Option(
             "--tracing",
-            help="Also enable MLflow tracing for the configured workspace(s).",
+            help="Also enable Tracing for the configured workspace(s).",
         ),
     ] = False,
 ) -> None:
@@ -1197,7 +1198,7 @@ def configure_mcp() -> None:
 @configure_app.command("tracing")
 def configure_tracing(
     disable: Annotated[
-        bool, typer.Option("--disable", help="Turn off MLflow tracing for configured agents.")
+        bool, typer.Option("--disable", help="Turn off Tracing for configured agents.")
     ] = False,
 ) -> None:
     """Send coding-session traces to an MLflow experiment in your workspace."""
@@ -1447,8 +1448,75 @@ def _run_budget_setup(workspace: str) -> None:
     print_success("Budget policy updated")
 
 
+def _validate_policy_harnesses_and_models(policy: dict, state: dict) -> list[str]:
+    """Check each tier's harness/model against ucode's known agents and the
+    workspace's discovered model inventory in ``state.json`` (no network call).
+
+    Structural validity is assumed (caller runs ``parse_and_validate_policy_yaml``
+    first). A model is only rejected when state has a non-empty inventory for that
+    harness to check against — mirroring the interactive flow, which falls back to
+    free-text model entry when discovery returned nothing.
+    """
+    errors: list[str] = []
+    tiers = policy.get("policy", {}).get("tiers", [])
+    for index, tier in enumerate(tiers, start=1):
+        harness = tier.get("harness")
+        if harness not in TOOL_SPECS:
+            valid = ", ".join(sorted(TOOL_SPECS))
+            errors.append(
+                f"tier {index}: harness '{harness}' is not a supported ucode agent "
+                f"(valid: {valid})."
+            )
+            continue
+        model = tier.get("model")
+        known_models = {value for value, _label in _policy_model_options(harness, state)}
+        if known_models and model not in known_models:
+            display = TOOL_SPECS[harness].get("display", harness)
+            errors.append(
+                f"tier {index}: model '{model}' is not available for {display} on this "
+                f"workspace (known: {', '.join(sorted(known_models))})."
+            )
+    return errors
+
+
+def _apply_budget_file(workspace: str, file: Path, state: dict) -> None:
+    """Validate ``file`` and save it as the workspace policy."""
+    print_section("Budget")
+    print_kv("Workspace", workspace)
+    try:
+        text = file.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise RuntimeError(f"Could not read policy file: {file}") from exc
+
+    policy, errors = parse_and_validate_policy_yaml(text)
+    if not errors:
+        assert policy is not None  # structurally validated above
+        errors = _validate_policy_harnesses_and_models(policy, state)
+    if errors:
+        print_err("Policy file is invalid:")
+        for reason in errors:
+            print_note(reason)
+        raise typer.Exit(1)
+    assert policy is not None
+
+    save_workspace_policy(workspace, policy)
+    daily_limit = float(policy["policy"]["daily_budget_usd"])
+    print_kv("Daily limit", f"${daily_limit:.2f}")
+    print_kv("Policy file", str(policy_cache_path(workspace)))
+    print_success("Budget policy updated")
+
+
 @setup_app.command("budget")
-def setup_budget_cmd() -> None:
+def setup_budget_cmd(
+    file: Annotated[
+        Path | None,
+        typer.Option(
+            "-f",
+            "--file",
+            help="Apply a policy YAML file instead of the interactive flow.",
+        ),
+    ] = None,
+) -> None:
     """Set the shared daily spend budget for the current workspace."""
     try:
         state = load_state()
@@ -1475,7 +1543,10 @@ def setup_budget_cmd() -> None:
         else:
             print_success("Admin permissions verified")
 
-        _run_budget_setup(workspace)
+        if file is not None:
+            _apply_budget_file(workspace, file, state)
+        else:
+            _run_budget_setup(workspace)
     except RuntimeError as exc:
         print_err(str(exc))
         raise typer.Exit(1) from None
@@ -1667,12 +1738,12 @@ def setup_cmd(ctx: typer.Context) -> None:
                 f"Default agent set to {TOOL_SPECS[default_agent]['display']} ({default_reason})"
             )
 
-        if prompt_yes_no("Set up MLflow tracing for this workspace?", default=uc_tracing_enabled):
+        if prompt_yes_no("Set up Tracing for this workspace?", default=uc_tracing_enabled):
             configure_tracing_command()
         elif uc_tracing_enabled:
-            print_note("Clearing MLflow tracing for this workspace...")
+            print_note("Clearing Tracing for this workspace...")
             if _clear_managed_tracing(load_state()):
-                print_success("MLflow tracing cleared (will be unset on next export)")
+                print_success("Tracing cleared (will be unset on next export)")
 
         if prompt_yes_no("Set up managed MCP servers for this workspace?", default=uc_mcps_present):
             configure_mcp_command()
@@ -1705,10 +1776,12 @@ def setup_cmd(ctx: typer.Context) -> None:
                 f"[bold]Workspace:[/bold] [cyan]{workspace}[/cyan]\n"
                 f"[bold]Default agent:[/bold] [cyan]{default_display}[/cyan]\n"
                 "\n"
-                "[bold]Next steps[/bold]\n"
-                "  • Update MCP servers:        [bold]ucode setup mcp[/bold]\n"
-                "  • Update budget policy:      [bold]ucode setup budget[/bold]\n"
-                "  • Publish to Unity Catalog:  [bold]ucode export[/bold]",
+                "[bold]Next step[/bold]\n"
+                "  • Publish to Unity Catalog:  [bold cyan]ucode export[/bold cyan] [green][Recommended][/green]\n"
+                "\n"
+                "[dim]Optional[/dim]\n"
+                "  [dim]• Update MCP servers:    ucode setup mcp[/dim]\n"
+                "  [dim]• Update budget policy:  ucode setup budget[/dim]",
                 title="Setup Complete",
                 style="green",
                 expand=False,

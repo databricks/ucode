@@ -365,11 +365,14 @@ def prompt_budget_warn_choice(
             ("answer", "fg:cyan"),
         ]
     )
-    choices = [
-        questionary.Choice(title=f"Continue with {default_agent_display}", value="default"),
-    ]
+    choices = []
     if switch_display:
-        choices.append(questionary.Choice(title=f"Switch to {switch_display}", value="switch"))
+        choices.append(
+            questionary.Choice(title=f"Switch to {switch_display} [Recommended]", value="switch")
+        )
+    choices.append(
+        questionary.Choice(title=f"Continue with {default_agent_display}", value="default")
+    )
     return questionary.select(
         "Daily budget is nearing its limit — how would you like to continue?",
         choices=choices,
