@@ -521,14 +521,24 @@ def _render_policy_summary_lines(
         if isinstance(daily, (int, float)) and not isinstance(daily, bool)
         else "no daily cap"
     )
-    on_exhausted = root.get("on_budget_exhausted")
-    if not isinstance(on_exhausted, str) or on_exhausted not in VALID_ON_BUDGET_EXHAUSTED:
-        on_exhausted = "block"
+    on_exhausted_raw = root.get("on_budget_exhausted")
+    if isinstance(on_exhausted_raw, dict) and on_exhausted_raw.get("action") == "switch":
+        target = on_exhausted_raw.get("target") or {}
+        target_harness = str(target.get("harness") or "") if isinstance(target, dict) else ""
+        target_model = str(target.get("model") or "") if isinstance(target, dict) else ""
+        on_exhausted_line = (
+            f"  [dim]·[/dim] [bold]at 100%[/bold] "
+            f"→ {_harness_display(target_harness)} · [magenta]{target_model}[/magenta]"
+        )
+    elif isinstance(on_exhausted_raw, str) and on_exhausted_raw in VALID_ON_BUDGET_EXHAUSTED:
+        on_exhausted_line = (
+            f"  [dim]·[/dim] [bold]at 100%[/bold] → [magenta]{on_exhausted_raw}[/magenta]"
+        )
+    else:
+        on_exhausted_line = "  [dim]·[/dim] [bold]at 100%[/bold] → [magenta]block[/magenta]"
 
-    lines = [
-        f"[bold]Policy:[/bold] [cyan]{name}[/cyan]  "
-        f"[dim]({daily_display}, {on_exhausted} on exhaust)[/dim]"
-    ]
+    lines = [f"[bold]Policy:[/bold] [cyan]{name}[/cyan]"]
+    lines.append(f"  [dim]·[/dim] [bold]budget[/bold] → [magenta]{daily_display}[/magenta]")
     tiers = root.get("tiers") if isinstance(root, dict) else None
     if isinstance(tiers, list):
         for tier in tiers:
@@ -547,6 +557,7 @@ def _render_policy_summary_lines(
                 f"  [dim]·[/dim] [bold]{tier_name}[/bold] [dim]({pct})[/dim] "
                 f"→ {_harness_display(harness)} · [magenta]{model}[/magenta]"
             )
+    lines.append(on_exhausted_line)
     return lines
 
 
@@ -757,10 +768,16 @@ def status() -> int:
             else "not set",
         )
         on_exhausted = policy_root.get("on_budget_exhausted")
-        print_kv(
-            "On budget exhausted",
-            on_exhausted if isinstance(on_exhausted, str) else "block",
-        )
+        if isinstance(on_exhausted, dict) and on_exhausted.get("action") == "switch":
+            target = on_exhausted.get("target") or {}
+            target_harness = target.get("harness", "") if isinstance(target, dict) else ""
+            target_model = target.get("model", "") if isinstance(target, dict) else ""
+            on_exhausted_display = f"switch → {target_harness} ({target_model})"
+        elif isinstance(on_exhausted, str) and on_exhausted in VALID_ON_BUDGET_EXHAUSTED:
+            on_exhausted_display = on_exhausted
+        else:
+            on_exhausted_display = "block"
+        print_kv("On budget exhausted", on_exhausted_display)
         tiers = policy_root.get("tiers")
         if isinstance(tiers, list) and tiers:
             for tier in tiers:
@@ -966,7 +983,23 @@ def _apply_budget_gate(
     status = local_budget_status()
     budget_state = status.get("state")
     if budget_state == "exceeded":
-        behavior = str(status.get("on_budget_exhausted") or "block")
+        behavior = status.get("on_budget_exhausted") or "block"
+        if (
+            isinstance(behavior, dict)
+            and cast("dict[str, object]", behavior).get("action") == "switch"
+        ):
+            behavior_dict = cast("dict[str, object]", behavior)
+            target = behavior_dict.get("target") or {}
+            target_dict = cast("dict[str, object]", target) if isinstance(target, dict) else {}
+            harness = target_dict.get("harness")
+            model = target_dict.get("model")
+            if isinstance(harness, str) and harness and isinstance(model, str) and model:
+                console.print(render_local_budget_panel(status, title="Daily budget exhausted"))
+                print_warning(
+                    f"Daily budget exhausted — switching to"
+                    f" {TOOL_SPECS.get(harness, {}).get('display', harness)} ({model})."
+                )
+                return "switch", harness, model
         if behavior == "block":
             console.print(render_local_budget_panel(status, title="Daily budget exhausted"))
             print_err("Daily budget exhausted — no agents can be launched until it resets.")
@@ -994,7 +1027,13 @@ def _apply_budget_gate(
     return "default", None, None
 
 
-def _launch_tool(tool_name: str, ctx: typer.Context, *, explicit_model: str | None = None) -> None:
+def _launch_tool(
+    tool_name: str,
+    ctx: typer.Context,
+    *,
+    explicit_model: str | None = None,
+    _budget_redirected: bool = False,
+) -> None:
     try:
         tool = normalize_tool(tool_name)
         existing = load_state()
@@ -1013,13 +1052,16 @@ def _launch_tool(tool_name: str, ctx: typer.Context, *, explicit_model: str | No
             state["workspace"], profile=state.get("profile"), tools=[tool]
         )
         # Gate on the global daily budget before configuring/launching.
-        # Switching re-dispatches through `_launch_tool`, which auto-configures
-        # the target agent if needed and skips the selector on the second pass.
-        decision, target_tool, target_model = _apply_budget_gate(
-            tool, offer_warn_selector=tool in BUDGET_TRACKED_AGENTS and explicit_model is None
-        )
-        if decision == "switch" and target_tool:
-            return _launch_tool(target_tool, ctx, explicit_model=target_model)
+        # Skip the gate on budget-redirect calls — the switch already fired and
+        # re-gating would loop forever since the budget is still exceeded.
+        if not _budget_redirected:
+            decision, target_tool, target_model = _apply_budget_gate(
+                tool, offer_warn_selector=tool in BUDGET_TRACKED_AGENTS and explicit_model is None
+            )
+            if decision == "switch" and target_tool:
+                return _launch_tool(
+                    target_tool, ctx, explicit_model=target_model, _budget_redirected=True
+                )
         state, resolved_model = resolve_launch_model(tool, state, explicit_model)
         state = configure_tool(tool, state, resolved_model)
         display = TOOL_SPECS[tool]["display"]
@@ -1385,13 +1427,26 @@ def _run_budget_setup(workspace: str) -> None:
     daily_limit = _prompt_float("Daily budget in USD", default=daily_default, minimum=0.01)
     current_exhausted = existing_root.get("on_budget_exhausted")
     exhausted_default = (
-        current_exhausted if isinstance(current_exhausted, str) and current_exhausted else "block"
+        current_exhausted
+        if isinstance(current_exhausted, (str, dict)) and current_exhausted
+        else "block"
     )
-    exhausted = prompt_for_choice(
+    exhausted_action = prompt_for_choice(
         "At 100% of budget",
-        [(value, value) for value in sorted(VALID_ON_BUDGET_EXHAUSTED)],
+        [(value, value) for value in sorted(VALID_ON_BUDGET_EXHAUSTED)]
+        + [("switch", "switch to another harness/model")],
     )
-    if exhausted not in VALID_ON_BUDGET_EXHAUSTED:
+    if exhausted_action == "switch":
+        harness_options = [(tool, TOOL_SPECS[tool]["display"]) for tool in TOOL_SPECS]
+        switch_harness = prompt_for_choice("Switch to harness", harness_options)
+        switch_model = _prompt_policy_model(switch_harness, state, default=None)
+        exhausted: str | dict = {
+            "action": "switch",
+            "target": {"harness": switch_harness, "model": switch_model},
+        }
+    elif exhausted_action in VALID_ON_BUDGET_EXHAUSTED:
+        exhausted = exhausted_action
+    else:
         exhausted = exhausted_default
 
     defaults = _existing_policy_tiers(existing_policy) or _default_policy_tiers(state)

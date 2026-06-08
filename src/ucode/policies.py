@@ -18,6 +18,39 @@ DEFAULT_ON_BUDGET_EXHAUSTED: OnBudgetExhausted = "block"
 VALID_ON_BUDGET_EXHAUSTED: frozenset[str] = frozenset({"block", "warn", "allow"})
 
 
+def _parse_on_budget_exhausted(raw: object) -> str | dict:
+    """Parse on_budget_exhausted into a normalized string or switch dict.
+    Accepts a simple action string (``block``, ``warn``, ``allow``) or::
+        on_budget_exhausted:
+          action: switch
+          target:
+            harness: opencode
+            model: databricks-claude-haiku-4-5
+    """
+    if isinstance(raw, str) and raw in VALID_ON_BUDGET_EXHAUSTED:
+        return raw
+    if isinstance(raw, dict):
+        raw_dict = cast("dict[str, object]", raw)
+        action = raw_dict.get("action")
+        if action == "switch":
+            target = raw_dict.get("target")
+            if isinstance(target, dict):
+                target_dict = cast("dict[str, object]", target)
+                harness = target_dict.get("harness")
+                model = target_dict.get("model")
+                if (
+                    isinstance(harness, str)
+                    and harness.strip()
+                    and isinstance(model, str)
+                    and model.strip()
+                ):
+                    return {
+                        "action": "switch",
+                        "target": {"harness": harness.strip(), "model": model.strip()},
+                    }
+    return DEFAULT_ON_BUDGET_EXHAUSTED
+
+
 def _policy_cache_dir() -> Path:
     return config_io.APP_DIR / POLICY_CACHE_DIRNAME
 
@@ -45,9 +78,7 @@ def normalize_policy(raw: object) -> dict | None:
     if not isinstance(name, str) or not name.strip():
         name = DEFAULT_POLICY_NAME
 
-    exhausted = policy_raw.get("on_budget_exhausted")
-    if not isinstance(exhausted, str) or exhausted not in VALID_ON_BUDGET_EXHAUSTED:
-        exhausted = DEFAULT_ON_BUDGET_EXHAUSTED
+    exhausted = _parse_on_budget_exhausted(policy_raw.get("on_budget_exhausted"))
 
     tiers_raw = policy_raw.get("tiers")
     if not isinstance(tiers_raw, list) or not tiers_raw:
@@ -120,11 +151,15 @@ def validate_policy(raw: object) -> list[str]:
         errors.append("`daily_budget_usd` must be greater than 0.")
 
     exhausted = root.get("on_budget_exhausted")
-    if exhausted is not None and (
-        not isinstance(exhausted, str) or exhausted not in VALID_ON_BUDGET_EXHAUSTED
+    if (
+        exhausted is not None
+        and _parse_on_budget_exhausted(exhausted) == DEFAULT_ON_BUDGET_EXHAUSTED
     ):
         allowed = ", ".join(sorted(VALID_ON_BUDGET_EXHAUSTED))
-        errors.append(f"`on_budget_exhausted` must be one of: {allowed}.")
+        errors.append(
+            f"`on_budget_exhausted` must be one of: {allowed},"
+            " or a switch mapping with `action: switch` and `target.harness`/`target.model`."
+        )
 
     tiers_raw = root.get("tiers")
     if not isinstance(tiers_raw, list) or not tiers_raw:
@@ -232,12 +267,10 @@ def daily_budget_usd(policy: dict | None) -> float | None:
     return None
 
 
-def on_budget_exhausted(policy: dict | None) -> OnBudgetExhausted:
+def on_budget_exhausted(policy: dict | None) -> str | dict:
     root = (policy or {}).get("policy") if isinstance(policy, dict) else None
     value = root.get("on_budget_exhausted") if isinstance(root, dict) else None
-    if isinstance(value, str) and value in VALID_ON_BUDGET_EXHAUSTED:
-        return cast("OnBudgetExhausted", value)
-    return DEFAULT_ON_BUDGET_EXHAUSTED
+    return _parse_on_budget_exhausted(value)
 
 
 def active_tier(policy: dict | None, spend_usd: float) -> dict | None:

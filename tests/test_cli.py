@@ -657,6 +657,43 @@ class TestDefaultLaunch:
         mock_launch.assert_not_called()
         assert "exhausted" in result.output
 
+    def test_bare_launch_switches_agent_when_budget_exhausted_with_switch_policy(self):
+        """When on_budget_exhausted is a switch dict, exhausted budget redirects to
+        the target harness/model instead of blocking."""
+        from contextlib import ExitStack
+
+        state = {
+            **MINIMAL_STATE,
+            "default_agent": "claude",
+            "available_tools": ["claude", "opencode"],
+        }
+        switch_policy = {
+            "action": "switch",
+            "target": {"harness": "opencode", "model": "databricks-claude-haiku-4-5"},
+        }
+        # First call returns exceeded+switch; all subsequent calls return ok so the
+        # redirected opencode launch passes the gate without looping.
+        call_count: list[int] = [0]
+
+        def budget_side_effect():
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return {"state": "exceeded", "on_budget_exhausted": switch_policy}
+            return {"state": "ok"}
+
+        with ExitStack() as stack:
+            mock_launch = self._launch_patches(stack)
+            stack.enter_context(patch("ucode.cli.load_state", return_value=state))
+            stack.enter_context(
+                patch("ucode.cli.local_budget_status", side_effect=budget_side_effect)
+            )
+            result = runner.invoke(app, [])
+        assert result.exit_code == 0, result.output
+        assert "switching" in result.output.lower()
+        mock_launch.assert_called()
+        launched_tool = mock_launch.call_args[0][0]
+        assert launched_tool == "opencode"
+
     def test_auto_configures_when_no_workspace(self):
         """Bare `ucode` with no workspace runs configure first, then launches."""
         from contextlib import ExitStack

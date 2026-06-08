@@ -990,10 +990,20 @@ def format_local_budget_hook_status(status: dict[str, object]) -> str:
     percent = _budget_usage_percent(spend_usd, limit_usd)
     bar = _budget_progress_bar(percent)
     if state == "exceeded":
-        behavior = str(status.get("on_budget_exhausted") or "block")
+        behavior = status.get("on_budget_exhausted") or "block"
         headline = "⛔ Daily budget — limit exceeded"
         action = "further tool use blocked today"
-        if behavior == "warn":
+        if (
+            isinstance(behavior, dict)
+            and cast("dict[str, object]", behavior).get("action") == "switch"
+        ):
+            behavior_dict = cast("dict[str, object]", behavior)
+            target = behavior_dict.get("target") or {}
+            target_dict = cast("dict[str, object]", target) if isinstance(target, dict) else {}
+            harness = str(target_dict.get("harness") or "")
+            headline = "⚠️ Daily budget — limit exceeded"
+            action = f"switching to {harness}"
+        elif behavior == "warn":
             headline = "⚠️ Daily budget — limit exceeded"
             action = "continuing because policy is warn"
         elif behavior == "allow":

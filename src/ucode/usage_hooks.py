@@ -478,7 +478,7 @@ def _hook_response_for_budget(
     status: dict[str, object], *, can_block: bool = False, quiet_warn: bool = False
 ) -> dict[str, object]:
     state = str(status.get("state") or "ok")
-    behavior = str(status.get("on_budget_exhausted") or "block")
+    behavior = status.get("on_budget_exhausted") or "block"
     message = format_local_budget_hook_status(status)
     if state in {"warn", "exceeded"} and (state == "warn" or behavior == "warn"):
         if quiet_warn:
