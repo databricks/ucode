@@ -13,6 +13,7 @@ from ucode.databricks import (
     AI_GATEWAY_V2_DOCS_URL,
     _format_subprocess_result,
     _parse_databricks_cli_version,
+    _run_databricks_cli_installer,
     _scrub_databrickscfg,
     _scrub_json,
     build_auth_shell_command,
@@ -802,6 +803,22 @@ class TestEnsureDatabricksCliVersion:
         monkeypatch.setattr("os.environ", env)
         with pytest.raises(RuntimeError, match="Could not parse"):
             ensure_databricks_cli_version()
+
+
+class TestRunDatabricksCliInstaller:
+    @pytest.mark.parametrize("brew_subcommand", ["install", "upgrade"])
+    def test_macos_uses_fully_qualified_tap_formula(self, monkeypatch, brew_subcommand):
+        calls = []
+        monkeypatch.setattr(db_mod.platform, "system", lambda: "Darwin")
+        monkeypatch.setattr(db_mod.shutil, "which", lambda cmd: "/opt/homebrew/bin/brew")
+        monkeypatch.setattr(db_mod, "run", lambda cmd, **kw: calls.append(cmd))
+
+        _run_databricks_cli_installer(brew_subcommand=brew_subcommand)
+
+        # The fully-qualified formula forces Homebrew to the Databricks CLI in
+        # databricks/tap and fails if absent, rather than falling back to the
+        # unrelated `databricks` cask.
+        assert calls == [["brew", brew_subcommand, "databricks/tap/databricks"]]
 
 
 class TestIsUsageTableAccessError:
