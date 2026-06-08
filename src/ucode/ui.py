@@ -18,6 +18,35 @@ from rich.text import Text
 console = Console(highlight=False)
 err_console = Console(stderr=True, highlight=False)
 
+# Output verbosity. "normal" (default) renders decorative panels; "low" trades
+# them for terse single-line output. Set once at CLI entry via set_verbosity.
+_verbosity = "normal"
+
+
+def set_verbosity(value: str) -> None:
+    global _verbosity
+    _verbosity = value or "normal"
+
+
+def get_verbosity() -> str:
+    return _verbosity
+
+
+def is_low_verbosity() -> bool:
+    return _verbosity == "low"
+
+
+_skip_update = False
+
+
+def set_skip_update(value: bool) -> None:
+    global _skip_update
+    _skip_update = bool(value)
+
+
+def is_skip_update() -> bool:
+    return _skip_update
+
 
 def print_section(title: str) -> None:
     console.print()

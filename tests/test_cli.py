@@ -700,7 +700,7 @@ class TestDefaultLaunch:
 
         configured: list[bool] = []
 
-        def fake_configure():
+        def fake_configure(**_kwargs):
             configured.append(True)
             return 0
 
@@ -1476,7 +1476,9 @@ class TestAutoConfigureOnFirstRun:
         ):
             result = runner.invoke(app, ["claude"])
         assert result.exit_code == 0, result.output
-        mock_bootstrap.assert_called_once_with("claude", update_existing=True)
+        mock_bootstrap.assert_called_once_with(
+            "claude", update_existing=True, prompt_optional_updates=True
+        )
         mock_auto.assert_called_once_with("claude")
 
     def test_triggers_when_tool_not_in_available_tools(self):
@@ -1500,7 +1502,9 @@ class TestAutoConfigureOnFirstRun:
         ):
             result = runner.invoke(app, ["claude"])
         assert result.exit_code == 0, result.output
-        mock_bootstrap.assert_called_once_with("claude", update_existing=True)
+        mock_bootstrap.assert_called_once_with(
+            "claude", update_existing=True, prompt_optional_updates=True
+        )
         mock_auto.assert_called_once_with("claude")
 
     def test_skipped_when_already_configured(self):
@@ -1522,7 +1526,9 @@ class TestAutoConfigureOnFirstRun:
             patch("ucode.cli.launch_agent"),
         ):
             runner.invoke(app, ["claude"])
-        mock_bootstrap.assert_called_once_with("claude", update_existing=False)
+        mock_bootstrap.assert_called_once_with(
+            "claude", update_existing=False, prompt_optional_updates=True
+        )
         mock_auto.assert_not_called()
 
 
@@ -1579,7 +1585,7 @@ class TestConfigureAgentFlag:
         ):
             result = runner.invoke(app, ["configure"])
         assert result.exit_code == 0, result.output
-        mock_cfg.assert_called_once_with()
+        mock_cfg.assert_called_once_with(prompt_optional_updates=True)
 
     def test_agents_flag_calls_configure_with_tools(self):
         with (
@@ -1590,7 +1596,9 @@ class TestConfigureAgentFlag:
             result = runner.invoke(app, ["configure", "--agents", "claude,codex"])
         assert result.exit_code == 0, result.output
         mock_install.assert_not_called()
-        mock_cfg.assert_called_once_with(selected_tools=["claude", "codex"])
+        mock_cfg.assert_called_once_with(
+            selected_tools=["claude", "codex"], prompt_optional_updates=True
+        )
 
     def test_agents_flag_normalizes_aliases_and_dedupes(self):
         with (
@@ -1600,7 +1608,9 @@ class TestConfigureAgentFlag:
         ):
             result = runner.invoke(app, ["configure", "--agents", " claude-code, codex,claude "])
         assert result.exit_code == 0, result.output
-        mock_cfg.assert_called_once_with(selected_tools=["claude", "codex"])
+        mock_cfg.assert_called_once_with(
+            selected_tools=["claude", "codex"], prompt_optional_updates=True
+        )
 
     def test_workspaces_flag_calls_configure_with_workspaces(self):
         with (
@@ -1621,7 +1631,8 @@ class TestConfigureAgentFlag:
             workspaces=[
                 ("https://first.databricks.com", None),
                 ("https://second.databricks.com", None),
-            ]
+            ],
+            prompt_optional_updates=True,
         )
 
     def test_agents_and_workspaces_flags_call_configure_with_both(self):
@@ -1636,7 +1647,9 @@ class TestConfigureAgentFlag:
             )
         assert result.exit_code == 0, result.output
         mock_cfg.assert_called_once_with(
-            selected_tools=["claude", "codex"], workspaces=[("https://first.com", None)]
+            selected_tools=["claude", "codex"],
+            workspaces=[("https://first.com", None)],
+            prompt_optional_updates=True,
         )
 
     def test_agent_and_workspaces_flags_call_configure_with_both(self):
@@ -1650,7 +1663,9 @@ class TestConfigureAgentFlag:
                 ["configure", "--agent", "claude", "--workspaces", "https://first.com"],
             )
         assert result.exit_code == 0, result.output
-        mock_install.assert_called_once_with("claude", strict=True, update_existing=True)
+        mock_install.assert_called_once_with(
+            "claude", strict=True, update_existing=True, prompt_optional_updates=True
+        )
         mock_cfg.assert_called_once_with("claude", workspaces=[("https://first.com", None)])
 
     def test_agent_flag_calls_configure_with_tool(self):
@@ -1661,8 +1676,44 @@ class TestConfigureAgentFlag:
         ):
             result = runner.invoke(app, ["configure", "--agent", "claude"])
         assert result.exit_code == 0, result.output
-        mock_install.assert_called_once_with("claude", strict=True, update_existing=True)
+        mock_install.assert_called_once_with(
+            "claude", strict=True, update_existing=True, prompt_optional_updates=True
+        )
         mock_cfg.assert_called_once_with("claude")
+
+    def test_skip_update_flag_disables_optional_update_prompt(self):
+        with (
+            patch("ucode.cli.install_databricks_cli"),
+            patch("ucode.cli.install_tool_binary"),
+            patch("ucode.cli.configure_workspace_command") as mock_cfg,
+        ):
+            result = runner.invoke(app, ["--skip-update", "configure"])
+        assert result.exit_code == 0, result.output
+        mock_cfg.assert_called_once_with(prompt_optional_updates=False)
+
+    def test_skip_update_flag_with_agent_skips_optional_update(self):
+        with (
+            patch("ucode.cli.install_databricks_cli"),
+            patch("ucode.cli.install_tool_binary") as mock_install,
+            patch("ucode.cli.configure_workspace_command"),
+        ):
+            result = runner.invoke(app, ["--skip-update", "configure", "--agent", "claude"])
+        assert result.exit_code == 0, result.output
+        mock_install.assert_called_once_with(
+            "claude", strict=True, update_existing=True, prompt_optional_updates=False
+        )
+
+    def test_skip_update_flag_with_agents_forwards_to_configure(self):
+        with (
+            patch("ucode.cli.install_databricks_cli"),
+            patch("ucode.cli.install_tool_binary"),
+            patch("ucode.cli.configure_workspace_command") as mock_cfg,
+        ):
+            result = runner.invoke(app, ["--skip-update", "configure", "--agents", "claude,codex"])
+        assert result.exit_code == 0, result.output
+        mock_cfg.assert_called_once_with(
+            selected_tools=["claude", "codex"], prompt_optional_updates=False
+        )
 
     def test_agent_flag_normalizes_alias(self):
         with (
@@ -1773,7 +1824,9 @@ class TestConfigureAgentsSelection:
         monkeypatch.setattr(
             cli_mod,
             "install_tool_binary",
-            lambda tool, strict=False, update_existing=False: install_calls.append(tool) or True,
+            lambda tool, strict=False, update_existing=False, prompt_optional_updates=True: (
+                install_calls.append(tool) or True
+            ),
         )
         configured: list[list[str]] = []
         monkeypatch.setattr(
@@ -1886,7 +1939,9 @@ class TestConfigureAgentsSelection:
         monkeypatch.setattr(
             cli_mod,
             "install_tool_binary",
-            lambda tool, strict=False, update_existing=False: install_calls.append(tool) or True,
+            lambda tool, strict=False, update_existing=False, prompt_optional_updates=True: (
+                install_calls.append(tool) or True
+            ),
         )
         configured: list[list[str]] = []
         monkeypatch.setattr(

@@ -84,6 +84,7 @@ from ucode.tracing import configure_tracing_command, disable_tracing, install_tr
 from ucode.ui import (
     console,
     heading,
+    is_skip_update,
     print_err,
     print_err_panel,
     print_heading,
@@ -97,6 +98,8 @@ from ucode.ui import (
     prompt_for_tools,
     prompt_for_workspace,
     prompt_yes_no,
+    set_skip_update,
+    set_verbosity,
     spinner,
     status_badge,
 )
@@ -392,6 +395,7 @@ def configure_workspace_command(
     validate: bool = True,
     panel_title: str | None = "Configuration Complete",
     pre_pulled_state: dict | None = None,
+    prompt_optional_updates: bool = True,
 ) -> int:
     """Configure one or more coding agents for the current/selected workspace."""
     if tool is not None and selected_tools is not None:
@@ -487,7 +491,12 @@ def configure_workspace_command(
         return 0
 
     for tool_name in picked:
-        install_tool_binary(tool_name, strict=False, update_existing=update_existing)
+        install_tool_binary(
+            tool_name,
+            strict=False,
+            update_existing=update_existing,
+            prompt_optional_updates=prompt_optional_updates,
+        )
 
     state = configure_selected_tools(_persistable_state(state), picked)
 
@@ -879,18 +888,48 @@ app.add_typer(usage_app, name="usage", help="Show or record coding-agent usage."
 
 
 @app.callback(invoke_without_command=True)
-def default_launch(ctx: typer.Context) -> None:
+def default_launch(
+    ctx: typer.Context,
+    skip_update: Annotated[
+        bool,
+        typer.Option(
+            "--skip-update",
+            help="Don't prompt to upgrade already-installed agent CLIs to a newer version. "
+            "Required updates (when an agent is below its minimum supported version) are "
+            "still applied. Applies to configure and to every agent launch.",
+        ),
+    ] = False,
+    verbose: Annotated[
+        str,
+        typer.Option(
+            "--verbose",
+            help="Output verbosity: 'normal' (default) renders decorative panels; "
+            "'low' prints terse single-line status instead.",
+        ),
+    ] = "normal",
+) -> None:
     """Launch the configured default agent when ``ucode`` is run with no subcommand.
 
     Runs `ucode configure` first if the workspace isn't set up yet, then launches
     `default_agent` — falling back to another configured agent when the default's
-    daily budget is exhausted."""
+    daily budget is exhausted.
+
+    The ``--skip-update`` and ``--verbose`` flags live on this top-level callback
+    (not on individual subcommands), so they must appear before any subcommand:
+    ``ucode --skip-update``, ``ucode --skip-update configure``, ``ucode --verbose
+    low codex``. They're set unconditionally so subcommands pick them up too."""
+    if verbose not in ("normal", "low"):
+        print_err("--verbose must be one of: normal, low.")
+        raise typer.Exit(2)
+    set_verbosity(verbose)
+    set_skip_update(skip_update)
     if ctx.invoked_subcommand is not None:
         return
+    prompt_optional_updates = not skip_update
     try:
         install_databricks_cli()
         if not load_state().get("workspace"):
-            configure_workspace_command()
+            configure_workspace_command(prompt_optional_updates=prompt_optional_updates)
         state = load_state()
         if not state.get("workspace"):
             return
@@ -901,7 +940,7 @@ def default_launch(ctx: typer.Context) -> None:
     except KeyboardInterrupt:
         print_err("Interrupted.")
         raise typer.Exit(130) from None
-    _launch_tool(tool, ctx, explicit_tool=False)
+    _launch_tool(tool, ctx, explicit_tool=False, prompt_optional_updates=prompt_optional_updates)
 
 
 @mcp_app.command("web-search")
@@ -1062,14 +1101,21 @@ def _launch_tool(
     explicit_model: str | None = None,
     explicit_tool: bool = True,
     _budget_redirected: bool = False,
+    prompt_optional_updates: bool | None = None,
 ) -> None:
+    if prompt_optional_updates is None:
+        prompt_optional_updates = not is_skip_update()
     try:
         tool = normalize_tool(tool_name)
         existing = load_state()
         needs_auto_configure = not existing.get("workspace") or tool not in (
             existing.get("available_tools") or []
         )
-        ensure_bootstrap_dependencies(tool, update_existing=needs_auto_configure)
+        ensure_bootstrap_dependencies(
+            tool,
+            update_existing=needs_auto_configure or not prompt_optional_updates,
+            prompt_optional_updates=prompt_optional_updates,
+        )
         if needs_auto_configure:
             _auto_configure_tool(tool)
         state = ensure_provider_state(tool)
@@ -1092,7 +1138,11 @@ def _launch_tool(
             )
             if decision == "switch" and target_tool:
                 return _launch_tool(
-                    target_tool, ctx, explicit_model=target_model, _budget_redirected=True
+                    target_tool,
+                    ctx,
+                    explicit_model=target_model,
+                    _budget_redirected=True,
+                    prompt_optional_updates=prompt_optional_updates,
                 )
         state, resolved_model = resolve_launch_model(tool, state, explicit_model)
         state = configure_tool(tool, state, resolved_model)
@@ -1213,10 +1263,15 @@ def configure(
         ),
     ] = False,
 ) -> None:
-    """Configure workspace URL and AI Gateway."""
+    """Configure workspace URL and AI Gateway.
+
+    ``--skip-update`` and ``--verbose`` live on the top-level ``ucode`` callback,
+    not on this subcommand: use ``ucode --skip-update configure …`` /
+    ``ucode --verbose low configure …``."""
     if ctx.invoked_subcommand is not None:
         return
     set_dry_run(dry_run)
+    prompt_optional_updates = not is_skip_update()
     try:
         install_databricks_cli()
         if agent is not None and agents is not None:
@@ -1224,7 +1279,12 @@ def configure(
         workspace_entries = _parse_workspaces_option(workspaces) if workspaces is not None else None
         if agent is not None:
             tool = normalize_tool(agent)
-            install_tool_binary(tool, strict=True, update_existing=True)
+            install_tool_binary(
+                tool,
+                strict=True,
+                update_existing=True,
+                prompt_optional_updates=prompt_optional_updates,
+            )
             if workspace_entries is None:
                 configure_workspace_command(tool)
             else:
@@ -1232,18 +1292,26 @@ def configure(
         elif agents is not None:
             selected_tools = _parse_agents_option(agents)
             if workspace_entries is None:
-                configure_workspace_command(selected_tools=selected_tools)
+                configure_workspace_command(
+                    selected_tools=selected_tools,
+                    prompt_optional_updates=prompt_optional_updates,
+                )
             else:
                 configure_workspace_command(
-                    selected_tools=selected_tools, workspaces=workspace_entries
+                    selected_tools=selected_tools,
+                    workspaces=workspace_entries,
+                    prompt_optional_updates=prompt_optional_updates,
                 )
         else:
             # Tool binaries are installed after the user picks which agents
             # they want, in configure_workspace_command.
             if workspace_entries is None:
-                configure_workspace_command()
+                configure_workspace_command(prompt_optional_updates=prompt_optional_updates)
             else:
-                configure_workspace_command(workspaces=workspace_entries)
+                configure_workspace_command(
+                    workspaces=workspace_entries,
+                    prompt_optional_updates=prompt_optional_updates,
+                )
         if tracing:
             # The workspaces were just configured, so enable tracing for them
             # directly instead of re-prompting. Fall back to the workspace that

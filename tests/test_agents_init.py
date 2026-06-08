@@ -314,6 +314,60 @@ class TestInstallToolBinary:
         assert calls == []
         assert "Updating OpenCode..." not in capsys.readouterr().out
 
+    def test_optional_update_prompt_suppressed_when_disabled(self, monkeypatch):
+        """prompt_optional_updates=False must skip the optional update check
+        entirely — the confirm prompt should never be reached."""
+
+        def fake_which(binary: str) -> str | None:
+            return f"/usr/bin/{binary}"
+
+        monkeypatch.setattr("ucode.agents.shutil.which", fake_which)
+        monkeypatch.setattr("ucode.agents._minimum_version_error", lambda _: None)
+        monkeypatch.setattr("ucode.agents._required_update_message", lambda _: None)
+
+        def boom(_tool: str) -> bool:
+            raise AssertionError("optional update prompt should not be reached")
+
+        monkeypatch.setattr("ucode.agents._confirm_update_installed_tool_binary", boom)
+
+        assert (
+            install_tool_binary(
+                "opencode",
+                strict=False,
+                update_existing=True,
+                prompt_optional_updates=False,
+            )
+            is True
+        )
+
+    def test_required_update_runs_even_when_optional_prompt_disabled(self, monkeypatch):
+        """A required (minimum-version) update is forced regardless of the
+        prompt_optional_updates preference."""
+        calls: list[list[str]] = []
+
+        def fake_which(binary: str) -> str | None:
+            return f"/usr/bin/{binary}"
+
+        def fake_run(args, **kwargs):
+            calls.append(args)
+            return subprocess.CompletedProcess(args, 0)
+
+        monkeypatch.setattr("ucode.agents.shutil.which", fake_which)
+        monkeypatch.setattr("ucode.agents.subprocess.run", fake_run)
+        monkeypatch.setattr("ucode.agents._required_update_message", lambda _: "must upgrade")
+        monkeypatch.setattr("ucode.agents._minimum_version_error", lambda _: None)
+
+        assert (
+            install_tool_binary(
+                "opencode",
+                strict=True,
+                update_existing=True,
+                prompt_optional_updates=False,
+            )
+            is True
+        )
+        assert calls and calls[0][:3] == ["npm", "install", "-g"]
+
     def test_update_failure_keeps_existing_binary_available(self, monkeypatch):
         def fake_which(binary: str) -> str | None:
             return f"/usr/bin/{binary}"
@@ -368,3 +422,34 @@ class TestConfigureSelectedTools:
         state = {"workspace": "https://x.databricks.com", "available_tools": ["codex"]}
         result = configure_selected_tools(state, [])
         assert result["available_tools"] == ["codex"]
+
+
+class TestValidateAllToolsVerbosity:
+    def _run(self, monkeypatch, capsys):
+        from contextlib import nullcontext
+
+        monkeypatch.setattr(agents_mod, "validate_tool", lambda tool: (True, ""))
+        monkeypatch.setattr(agents_mod, "save_state", lambda s: None)
+        monkeypatch.setattr(agents_mod, "spinner", lambda *_a, **_kw: nullcontext())
+        agents_mod.validate_all_tools({"available_tools": ["codex"], "managed_configs": {}})
+        return capsys.readouterr().out
+
+    def test_normal_verbosity_renders_panels(self, monkeypatch, capsys):
+        import ucode.ui as ui_mod
+
+        monkeypatch.setattr(ui_mod, "_verbosity", "normal")
+        out = self._run(monkeypatch, capsys)
+        assert "Testing each tool with a quick message" in out
+        assert "Ready" in out
+        assert "Codex is working" in out
+
+    def test_low_verbosity_omits_panels(self, monkeypatch, capsys):
+        import ucode.ui as ui_mod
+
+        monkeypatch.setattr(ui_mod, "_verbosity", "low")
+        out = self._run(monkeypatch, capsys)
+        assert "Validating..." in out
+        assert "Testing each tool with a quick message" not in out
+        assert "Ready" not in out
+        # Per-tool success line is still printed.
+        assert "Codex is working" in out

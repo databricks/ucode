@@ -25,6 +25,7 @@ from ucode.state import load_state, save_state
 from ucode.telemetry import agent_version
 from ucode.ui import (
     console,
+    is_low_verbosity,
     print_err,
     print_note,
     print_section,
@@ -116,7 +117,13 @@ def _confirm_update_installed_tool_binary(tool: str) -> bool:
     return prompt_yes_no(f"(Optional) Update {spec['display']} from {current} to {latest}?")
 
 
-def install_tool_binary(tool: str, *, strict: bool = True, update_existing: bool = False) -> bool:
+def install_tool_binary(
+    tool: str,
+    *,
+    strict: bool = True,
+    update_existing: bool = False,
+    prompt_optional_updates: bool = True,
+) -> bool:
     spec = TOOL_SPECS[tool]
     binary = spec["binary"]
     package = spec["package"]
@@ -125,10 +132,12 @@ def install_tool_binary(tool: str, *, strict: bool = True, update_existing: bool
         if update_existing:
             required_update = _required_update_message(tool)
             if required_update:
+                # Required updates are forced regardless of prompt preference;
+                # the tool won't function on an unsupported version.
                 print_warning(required_update)
                 if not _update_installed_tool_binary(tool):
                     raise RuntimeError(_minimum_version_error(tool) or required_update)
-            elif _confirm_update_installed_tool_binary(tool):
+            elif prompt_optional_updates and _confirm_update_installed_tool_binary(tool):
                 _update_installed_tool_binary(tool)
 
         version_error = _minimum_version_error(tool)
@@ -176,9 +185,19 @@ def ensure_tool_binary_available(tool: str) -> None:
     )
 
 
-def ensure_bootstrap_dependencies(tool: str, *, update_existing: bool = False) -> None:
+def ensure_bootstrap_dependencies(
+    tool: str,
+    *,
+    update_existing: bool = False,
+    prompt_optional_updates: bool = True,
+) -> None:
     install_databricks_cli()
-    install_tool_binary(tool, strict=True, update_existing=update_existing)
+    install_tool_binary(
+        tool,
+        strict=True,
+        update_existing=update_existing,
+        prompt_optional_updates=prompt_optional_updates,
+    )
 
 
 def _ensure_default_agent(state: dict) -> None:
@@ -406,15 +425,19 @@ def validate_all_tools(state: dict) -> None:
     from ucode.agents.pi import PI_SETTINGS_BACKUP_PATH, PI_SETTINGS_PATH
     from ucode.config_io import restore_file
 
+    low_verbosity = is_low_verbosity()
     console.print()
-    console.print(
-        Panel(
-            "Testing each tool with a quick message...",
-            title="Validating",
-            style="bold blue",
-            expand=False,
+    if low_verbosity:
+        console.print("[bold blue]Validating...[/bold blue]")
+    else:
+        console.print(
+            Panel(
+                "Testing each tool with a quick message...",
+                title="Validating",
+                style="bold blue",
+                expand=False,
+            )
         )
-    )
     results: list[tuple[str, bool]] = []
     available_tools = list(state.get("available_tools") or [])
     for tool, spec in TOOL_SPECS.items():
@@ -436,9 +459,9 @@ def validate_all_tools(state: dict) -> None:
     state["available_tools"] = available_tools
     save_state(state)
 
-    console.print()
     success_tools = [(t, s) for t, s in results if s]
-    if success_tools:
+    if success_tools and not low_verbosity:
+        console.print()
         lines = []
         for tool, _ in success_tools:
             spec = TOOL_SPECS[tool]
