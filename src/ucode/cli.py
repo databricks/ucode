@@ -106,9 +106,8 @@ from ucode.ui import (
 from ucode.usage import (
     format_local_budget_status,
     local_budget_status,
-    record_local_usage_delta,
-    record_local_usage_snapshot,
     render_local_budget_panel,
+    set_local_daily_spend,
 )
 from ucode.usage import (
     local_usage as local_usage_report,
@@ -2166,76 +2165,20 @@ def delete_configuration_cmd() -> None:
 
 @usage_app.command("record")
 def usage_record_cmd(
-    tool: Annotated[str, typer.Option("--tool", help="Agent name, e.g. claude or codex.")],
-    model: Annotated[str, typer.Option("--model", help="Model or endpoint name.")],
-    session_id: Annotated[
-        str,
-        typer.Option("--session-id", help="Stable ID for the running agent session."),
-    ],
-    mode: Annotated[
-        str,
-        typer.Option(
-            "--mode",
-            help="Use 'delta' for incremental events or 'snapshot' for cumulative totals.",
+    cost: Annotated[
+        float,
+        typer.Argument(
+            help="Dollar amount to set today's local spend to (e.g. 50 for $50.00).",
         ),
-    ] = "snapshot",
-    input_tokens: Annotated[int, typer.Option("--input-tokens", min=0)] = 0,
-    output_tokens: Annotated[int, typer.Option("--output-tokens", min=0)] = 0,
-    cache_read_input_tokens: Annotated[
-        int,
-        typer.Option("--cache-read-input-tokens", min=0),
-    ] = 0,
-    cache_creation_input_tokens: Annotated[
-        int,
-        typer.Option("--cache-creation-input-tokens", min=0),
-    ] = 0,
-    total_tokens: Annotated[int, typer.Option("--total-tokens", min=0)] = 0,
-    workspace: Annotated[str | None, typer.Option("--workspace")] = None,
-    source: Annotated[str, typer.Option("--source")] = "hook",
+    ],
 ) -> None:
-    """Record local token usage for budget checks and local aggregation."""
+    """Overwrite today's local spend to ``COST`` dollars."""
     try:
-        if mode == "delta":
-            event = record_local_usage_delta(
-                session_id=session_id,
-                tool=tool,
-                model=model,
-                input_tokens=input_tokens,
-                output_tokens=output_tokens,
-                cache_read_input_tokens=cache_read_input_tokens,
-                cache_creation_input_tokens=cache_creation_input_tokens,
-                total_tokens=total_tokens,
-                workspace=workspace,
-                source=source,
-            )
-        elif mode == "snapshot":
-            event = record_local_usage_snapshot(
-                session_id=session_id,
-                tool=tool,
-                model=model,
-                input_tokens=input_tokens,
-                output_tokens=output_tokens,
-                cache_read_input_tokens=cache_read_input_tokens,
-                cache_creation_input_tokens=cache_creation_input_tokens,
-                total_tokens=total_tokens,
-                workspace=workspace,
-                source=source,
-            )
-        else:
-            raise RuntimeError("Invalid --mode. Use 'delta' or 'snapshot'.")
+        set_local_daily_spend(cost)
     except RuntimeError as exc:
         print_err(str(exc))
-        raise typer.Exit(1) from None
-
-    if event is None:
-        print_note("No new tokens recorded for this snapshot.")
-        return
-    cost_usd = event.get("cost_usd")
-    if not isinstance(cost_usd, int | float | str):
-        cost_usd = 0.0
-    print_success(
-        f"Recorded {event['total_tokens']} tokens for {tool} ({model}, ${float(cost_usd):.4f})."
-    )
+        raise typer.Exit(2) from None
+    print_success(f"Today's local spend overwritten to ${cost:.2f}.")
 
 
 @usage_app.command("budget-status")

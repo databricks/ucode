@@ -524,6 +524,51 @@ def record_local_usage_delta(
     return event
 
 
+MANUAL_OVERRIDE_SOURCE = "manual-override"
+
+
+def set_local_daily_spend(
+    cost_usd: float,
+    db_path: Path = LOCAL_USAGE_DB_PATH,
+) -> dict[str, object]:
+    """Overwrite today's local spend to exactly ``cost_usd`` dollars."""
+    if cost_usd < 0:
+        raise RuntimeError("cost_usd must be non-negative.")
+    ensure_local_usage_schema(db_path)
+    event: dict[str, object] = {
+        "event_id": str(uuid.uuid4()),
+        "created_at": utc_now_iso(),
+        "session_id": "manual-override",
+        "tool": "manual",
+        "model": "manual",
+        "workspace": None,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "total_tokens": 0,
+        "cost_usd": float(cost_usd),
+        "source": MANUAL_OVERRIDE_SOURCE,
+    }
+    with _connect_local_usage_db(db_path) as conn:
+        conn.execute("DELETE FROM usage_events WHERE created_at >= datetime('now', '-1 days')")
+        conn.execute(
+            """
+            INSERT INTO usage_events (
+              event_id, created_at, session_id, tool, model, workspace,
+              input_tokens, output_tokens, cache_read_input_tokens,
+              cache_creation_input_tokens, total_tokens, cost_usd, source
+            ) VALUES (
+              :event_id, :created_at, :session_id, :tool, :model, :workspace,
+              :input_tokens, :output_tokens, :cache_read_input_tokens,
+              :cache_creation_input_tokens, :total_tokens, :cost_usd, :source
+            )
+            """,
+            event,
+        )
+    return event
+
+
 def record_local_usage_snapshot(
     *,
     session_id: str,

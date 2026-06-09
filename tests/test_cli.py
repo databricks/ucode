@@ -907,38 +907,29 @@ class TestUsageCommands:
         assert result.exit_code == 0, result.output
         assert calls == [3]
 
-    def test_usage_record_snapshot(self):
-        calls: list[dict] = []
-        event = {"total_tokens": 123, "cost_usd": 0.001}
+    def test_usage_record_overwrites_daily_spend(self):
+        calls: list[float] = []
         with patch(
-            "ucode.cli.record_local_usage_snapshot",
-            side_effect=lambda **kwargs: calls.append(kwargs) or event,
+            "ucode.cli.set_local_daily_spend",
+            side_effect=lambda cost_usd: calls.append(cost_usd) or {"cost_usd": cost_usd},
         ):
-            result = runner.invoke(
-                app,
-                [
-                    "usage",
-                    "record",
-                    "--tool",
-                    "claude",
-                    "--model",
-                    "databricks-claude-sonnet-4",
-                    "--session-id",
-                    "s1",
-                    "--input-tokens",
-                    "100",
-                    "--output-tokens",
-                    "23",
-                ],
-            )
+            result = runner.invoke(app, ["usage", "record", "50"])
 
         assert result.exit_code == 0, result.output
-        assert calls[0]["tool"] == "claude"
-        assert calls[0]["model"] == "databricks-claude-sonnet-4"
-        assert calls[0]["session_id"] == "s1"
-        assert calls[0]["input_tokens"] == 100
-        assert calls[0]["output_tokens"] == 23
-        assert "Recorded 123 tokens" in result.output
+        assert calls == [50.0]
+        assert "Today's local spend overwritten to $50.00" in result.output
+
+    def test_usage_record_rejects_negative(self):
+        # `--` ends typer/click's option parsing so the `-5` is forwarded as the
+        # positional `cost` argument instead of being mistaken for a flag.
+        with patch(
+            "ucode.cli.set_local_daily_spend",
+            side_effect=RuntimeError("cost_usd must be non-negative."),
+        ):
+            result = runner.invoke(app, ["usage", "record", "--", "-5"])
+
+        assert result.exit_code == 2
+        assert "non-negative" in result.output.lower()
 
     def test_budget_check_exits_nonzero_when_exceeded(self):
         message = "⛔ [UCODE USAGE BUDGET] Codex daily budget exceeded.\nBudget: $2.00 / $1.00"
