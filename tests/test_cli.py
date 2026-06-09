@@ -492,9 +492,9 @@ policy:
         assert "Could not read policy file" in result.output
 
 
-class TestSetupPhaseFlags:
-    """`ucode setup` runs all phases by default; flags select a subset and
-    leave unselected phases untouched."""
+class TestSetupCommand:
+    """`ucode setup` runs all four phases (agents, tracing, MCP, budget) and
+    is admin-gated."""
 
     @staticmethod
     def _patch_preamble(stack, *, uc_tracing=False, uc_mcps=False, uc_policy=False):
@@ -508,6 +508,12 @@ class TestSetupPhaseFlags:
             "mcp_servers": [{"name": "x"}] if uc_mcps else [],
         }
         stack.enter_context(patch("ucode.cli.install_databricks_cli"))
+        stack.enter_context(
+            patch(
+                "ucode.cli._prompt_for_configuration",
+                return_value=("https://example.databricks.com", "my-profile"),
+            )
+        )
         stack.enter_context(patch("ucode.cli.ensure_databricks_auth"))
         stack.enter_context(patch("ucode.cli.get_databricks_token", return_value="tok"))
         stack.enter_context(patch("ucode.cli.is_workspace_admin", return_value=True))
@@ -540,7 +546,7 @@ class TestSetupPhaseFlags:
             "budget": mock_budget,
         }
 
-    def test_no_flags_runs_all_phases(self):
+    def test_runs_all_phases(self):
         with contextlib.ExitStack() as stack:
             mocks = self._patch_preamble(stack)
             # Three "yes" answers for the tracing / mcp / budget prompts.
@@ -552,51 +558,21 @@ class TestSetupPhaseFlags:
         mocks["mcp"].assert_called_once()
         mocks["budget"].assert_called_once()
 
-    def test_single_flag_runs_only_that_phase(self):
-        with contextlib.ExitStack() as stack:
-            mocks = self._patch_preamble(stack)
-            result = runner.invoke(app, ["setup", "--budget"], input="y\n")
-
-        assert result.exit_code == 0, result.output
-        mocks["agents"].assert_not_called()
-        mocks["tracing"].assert_not_called()
-        mocks["mcp"].assert_not_called()
-        mocks["budget"].assert_called_once()
-
-    def test_multiple_flags_run_selected_phases(self):
-        with contextlib.ExitStack() as stack:
-            mocks = self._patch_preamble(stack)
-            # One "yes" for the mcp prompt; agents phase needs no yes/no.
-            result = runner.invoke(app, ["setup", "--agents", "--mcp"], input="y\n")
-
-        assert result.exit_code == 0, result.output
-        mocks["agents"].assert_called_once()
-        mocks["mcp"].assert_called_once()
-        mocks["tracing"].assert_not_called()
-        mocks["budget"].assert_not_called()
-
-    def test_unselected_phase_is_not_cleared(self):
-        """Passing --budget must not clear existing MCP config, even though a
-        full setup would offer to."""
-        with contextlib.ExitStack() as stack:
-            mocks = self._patch_preamble(stack, uc_mcps=True)
-            mock_clear = stack.enter_context(patch("ucode.cli._clear_managed_mcps"))
-            # Decline the budget prompt; MCP must stay untouched.
-            result = runner.invoke(app, ["setup", "--budget"], input="n\n")
-
-        assert result.exit_code == 0, result.output
-        mocks["mcp"].assert_not_called()
-        mock_clear.assert_not_called()
-
     def test_blocks_non_admin(self):
         with contextlib.ExitStack() as stack:
             stack.enter_context(patch("ucode.cli.install_databricks_cli"))
+            stack.enter_context(
+                patch(
+                    "ucode.cli._prompt_for_configuration",
+                    return_value=("https://example.databricks.com", "my-profile"),
+                )
+            )
             stack.enter_context(patch("ucode.cli.load_state", return_value=MINIMAL_STATE))
             stack.enter_context(patch("ucode.cli.ensure_databricks_auth"))
             stack.enter_context(patch("ucode.cli.get_databricks_token", return_value="tok"))
             stack.enter_context(patch("ucode.cli.is_workspace_admin", return_value=False))
             mock_budget = stack.enter_context(patch("ucode.cli._run_budget_setup"))
-            result = runner.invoke(app, ["setup", "--budget"])
+            result = runner.invoke(app, ["setup"])
 
         assert result.exit_code == 1, result.output
         assert "admin permissions" in result.output

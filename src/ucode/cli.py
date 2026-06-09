@@ -1803,35 +1803,12 @@ def usage_cmd(
 @setup_app.callback(invoke_without_command=True)
 def setup_cmd(
     ctx: typer.Context,
-    agents: Annotated[
-        bool,
-        typer.Option("--agents", help="Run the agent/model setup phase."),
-    ] = False,
-    tracing: Annotated[
-        bool,
-        typer.Option("--tracing", help="Run the Tracing setup phase."),
-    ] = False,
-    mcp: Annotated[
-        bool,
-        typer.Option("--mcp", help="Run the managed MCP servers setup phase."),
-    ] = False,
-    budget: Annotated[
-        bool,
-        typer.Option("--budget", help="Run the budget policy setup phase."),
-    ] = False,
 ) -> None:
-    """Interactively build the managed ucode config for a workspace (admin-only).
-
-    With no phase flags, runs all phases (agents, tracing, MCP, budget). Pass any
-    of ``--agents``, ``--tracing``, ``--mcp``, ``--budget`` to run only those
-    phases; phases you don't select are left untouched in Unity Catalog.
-    """
+    """Interactively build the managed ucode config for a workspace (admin-only)."""
     # Let subcommands (e.g. `ucode setup budget`) handle themselves.
     if ctx.invoked_subcommand is not None:
         return
-    # No flags = run every phase (preserves the original all-in-one behavior).
-    if not (agents or tracing or mcp or budget):
-        agents = tracing = mcp = budget = True
+    agents = tracing = mcp = budget = True
     try:
         install_databricks_cli()
         console.print(
@@ -1844,11 +1821,8 @@ def setup_cmd(
             )
         )
 
-        state = load_state()
-        workspace = state.get("workspace")
-        profile = state.get("profile")
-        if not workspace:
-            workspace, profile = _prompt_for_configuration()
+        # Always re-prompt for the target workspace
+        workspace, profile = _prompt_for_configuration()
         ensure_databricks_auth(workspace, profile)
 
         with spinner("Checking workspace admin permissions..."):
