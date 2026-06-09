@@ -7,6 +7,7 @@ import re
 import shlex
 import shutil
 import subprocess
+from functools import cache
 from pathlib import Path
 from typing import cast
 
@@ -430,6 +431,7 @@ def _parse_mlflow_version(text: str) -> tuple[int, int] | None:
     return int(match.group(1)), int(match.group(2))
 
 
+@cache
 def _uv_tool_mlflow_path() -> str | None:
     """Absolute path to the `mlflow` installed by `uv tool`, or None.
 
@@ -455,6 +457,7 @@ def _uv_tool_mlflow_path() -> str | None:
     return str(candidate) if candidate.exists() else None
 
 
+@cache
 def _installed_mlflow_version() -> tuple[int, int] | None:
     """The (major, minor) of the uv-tool `mlflow`, or None if absent."""
     path = _uv_tool_mlflow_path()
@@ -508,6 +511,10 @@ def _ensure_mlflow_cli() -> bool:
     except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
         print_warning(f"Could not install the mlflow CLI automatically: {exc}")
         return False
+
+    # Clear caches so the newly installed binary is detected on the next call.
+    getattr(_uv_tool_mlflow_path, "cache_clear", lambda: None)()
+    getattr(_installed_mlflow_version, "cache_clear", lambda: None)()
 
     if not _uv_tool_mlflow_path():
         print_warning(

@@ -373,8 +373,8 @@ def validate_tool(tool: str) -> tuple[bool, str]:
     if hasattr(module, "validate_env"):
         try:
             env = module.validate_env(load_state())
-        except RuntimeError:
-            env = None
+        except RuntimeError as exc:
+            return False, str(exc)
     try:
         result = subprocess.run(
             cmd, check=False, capture_output=True, text=True, timeout=60, env=env

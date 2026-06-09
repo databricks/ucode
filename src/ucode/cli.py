@@ -318,9 +318,12 @@ def configure_shared_state(
     with spinner("Pulling managed config from your org..."):
         remote = download_managed_config(workspace, profile)
         remote_policy_yaml = download_managed_policies(workspace, profile)
+    config_applied = False
+    policy_applied = False
+
     if remote is not None:
         state = merge_managed_workspace(state, remote, profile=profile)
-        print_success("Managed config applied (set by your account admin)")
+        config_applied = True
     else:
         print_note("No managed config published for this workspace — using local defaults.")
 
@@ -328,12 +331,19 @@ def configure_shared_state(
         remote_policy = parse_policy_yaml(remote_policy_yaml)
         if remote_policy is not None:
             save_workspace_policy(workspace, remote_policy)
-            print_success("Managed policy applied (set by your account admin)")
+            policy_applied = True
         else:
             delete_workspace_policy(workspace)
             print_warning("Managed policies.yaml is malformed — ignoring budget policy.")
     elif remote is not None:
         delete_workspace_policy(workspace)
+
+    if config_applied and policy_applied:
+        print_success("Managed config and policy applied (set by your account admin)")
+    elif config_applied:
+        print_success("Managed config applied (set by your account admin)")
+    elif policy_applied:
+        print_success("Managed policy applied (set by your account admin)")
 
     save_state(state)
     if remote is not None:
@@ -1024,6 +1034,23 @@ def _apply_budget_gate(
         if choice == "switch" and target is not None:
             target_tool, target_model = target
             return "switch", target_tool, target_model
+        # User chose to continue with their tool despite warn+tier mismatch.
+        return "default", None, None
+    # For ok state: auto-enforce the active policy tier when it specifies a
+    # different tool. Only applies to budget-tracked tools without an explicit
+    # model (offer_warn_selector=True means the user didn't pin a tool/model).
+    if offer_warn_selector:
+        target = _budget_switch_target(tool, status)
+        if target is not None:
+            target_tool, target_model = target
+            tier = status.get("active_tier")
+            tier_display = (
+                _tier_display(tier)
+                if isinstance(tier, dict)
+                else TOOL_SPECS.get(target_tool, {}).get("display", target_tool)
+            )
+            print_note(f"Active policy tier — launching {tier_display}.")
+            return "switch", target_tool, target_model
     return "default", None, None
 
 
@@ -1044,13 +1071,14 @@ def _launch_tool(
         if needs_auto_configure:
             _auto_configure_tool(tool)
         state = ensure_provider_state(tool)
-        # Re-fetch model lists on every launch so newly-added Databricks
-        # endpoints show up without a manual `ucode configure` (and so that
-        # tools like pi which read multiple model bundles never run on
-        # stale state from before a tool added a new bundle).
-        state = configure_shared_state(
-            state["workspace"], profile=state.get("profile"), tools=[tool]
-        )
+        if not _budget_redirected:
+            # Re-fetch model lists on every launch so newly-added Databricks
+            # endpoints show up without a manual `ucode configure` (and so that
+            # tools like pi which read multiple model bundles never run on
+            # stale state from before a tool added a new bundle).
+            state = configure_shared_state(
+                state["workspace"], profile=state.get("profile"), tools=[tool]
+            )
         # Gate on the global daily budget before configuring/launching.
         # Skip the gate on budget-redirect calls — the switch already fired and
         # re-gating would loop forever since the budget is still exceeded.
@@ -1065,20 +1093,25 @@ def _launch_tool(
         state, resolved_model = resolve_launch_model(tool, state, explicit_model)
         state = configure_tool(tool, state, resolved_model)
         display = TOOL_SPECS[tool]["display"]
-        _render_configuration_panel(state)
-        if tool in BUDGET_TRACKED_AGENTS:
-            # The daily budget is a single global pool shared across all tools,
-            # so render it tool-agnostically (no per-tool label in the callout).
-            # The panel title still names the tool being launched. The exceeded
-            # state is already handled by `_apply_budget_gate` above, so this
-            # panel only reports ok/warn spend here.
-            console.print(
-                render_local_budget_panel(
-                    local_budget_status(),
-                    title=f"ucode with {display}",
+        if not _budget_redirected:
+            _render_configuration_panel(state)
+            if tool in BUDGET_TRACKED_AGENTS:
+                # The daily budget is a single global pool shared across all tools,
+                # so render it tool-agnostically (no per-tool label in the callout).
+                # The panel title still names the tool being launched. The exceeded
+                # state is already handled by `_apply_budget_gate` above, so this
+                # panel only reports ok/warn spend here.
+                console.print(
+                    render_local_budget_panel(
+                        local_budget_status(),
+                        title=f"ucode with {display}",
+                    )
                 )
-            )
-        else:
+            else:
+                print_section(f"ucode with {display}")
+                if resolved_model:
+                    print_kv("Model", resolved_model)
+        elif tool not in BUDGET_TRACKED_AGENTS:
             print_section(f"ucode with {display}")
             if resolved_model:
                 print_kv("Model", resolved_model)
