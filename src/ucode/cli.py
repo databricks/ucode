@@ -901,7 +901,7 @@ def default_launch(ctx: typer.Context) -> None:
     except KeyboardInterrupt:
         print_err("Interrupted.")
         raise typer.Exit(130) from None
-    _launch_tool(tool, ctx)
+    _launch_tool(tool, ctx, explicit_tool=False)
 
 
 @mcp_app.command("web-search")
@@ -978,6 +978,7 @@ def _apply_budget_gate(
     tool: str,
     *,
     offer_warn_selector: bool,
+    explicit_tool: bool = True,
 ) -> tuple[str, str | None, str | None]:
     """Gate launch on the global daily budget, returning a decision string.
 
@@ -1037,9 +1038,9 @@ def _apply_budget_gate(
         # User chose to continue with their tool despite warn+tier mismatch.
         return "default", None, None
     # For ok state: auto-enforce the active policy tier when it specifies a
-    # different tool. Only applies to budget-tracked tools without an explicit
-    # model (offer_warn_selector=True means the user didn't pin a tool/model).
-    if offer_warn_selector:
+    # different tool. Only applies when the user didn't pin a tool or model
+    # (i.e. bare `ucode` with no explicit tool or model selection).
+    if offer_warn_selector and not explicit_tool:
         target = _budget_switch_target(tool, status)
         if target is not None:
             target_tool, target_model = target
@@ -1059,6 +1060,7 @@ def _launch_tool(
     ctx: typer.Context,
     *,
     explicit_model: str | None = None,
+    explicit_tool: bool = True,
     _budget_redirected: bool = False,
 ) -> None:
     try:
@@ -1084,7 +1086,9 @@ def _launch_tool(
         # re-gating would loop forever since the budget is still exceeded.
         if not _budget_redirected:
             decision, target_tool, target_model = _apply_budget_gate(
-                tool, offer_warn_selector=tool in BUDGET_TRACKED_AGENTS and explicit_model is None
+                tool,
+                offer_warn_selector=tool in BUDGET_TRACKED_AGENTS and explicit_model is None,
+                explicit_tool=explicit_tool,
             )
             if decision == "switch" and target_tool:
                 return _launch_tool(
