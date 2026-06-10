@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import os
+import re
 import signal
 import subprocess
 import threading
 from pathlib import Path
 
-from ucode.agent_updates import available_npm_package_update
+from ucode.agent_updates import latest_version_below
 from ucode.config_io import (
     APP_DIR,
     ToolSpec,
@@ -51,8 +52,78 @@ MANAGED_KEYS: list[str] = [
 ]
 
 
+# Gemini CLI 0.45 introduced a "Gemini 3.5 Flash GA" router that rewrites any
+# forced flash model id (e.g. `databricks-gemini-3-5-flash`) to Google's
+# canonical `gemini-3.5-flash`, which the Databricks AI Gateway rejects as an
+# invalid Unity Catalog endpoint name. Until that regression is fixed upstream
+# we cap the supported version below 0.45 and steer clients onto the newest
+# release that still passes the configured model through verbatim.
+MAX_GEMINI_VERSION = (0, 45, 0)
+MAX_GEMINI_VERSION_TEXT = "0.45.0"
+
+
+def _parse_version(value: str) -> tuple[int, int, int] | None:
+    match = re.search(r"(\d+)\.(\d+)\.(\d+)", value)
+    if not match:
+        return None
+    major, minor, patch = match.groups()
+    return int(major), int(minor), int(patch)
+
+
+def latest_working_version() -> str | None:
+    """Newest published Gemini CLI release below the broken-version ceiling."""
+    return latest_version_below(SPEC["package"], MAX_GEMINI_VERSION)
+
+
 def is_update_available() -> tuple[str, str] | None:
-    return available_npm_package_update(SPEC["package"])
+    """Offer an update only toward a known-working version.
+
+    The npm `latest` tag points at the broken >= 0.45 line, so the generic
+    "outdated" check would steer clients onto the regression. Instead we
+    compare the installed build against the latest working release and only
+    surface an upgrade when it is genuinely newer (and still safe).
+    """
+    installed = _parse_version(agent_version(SPEC["binary"]))
+    if installed is None:
+        return None
+    target = latest_working_version()
+    if target is None:
+        return None
+    target_base = _parse_version(target)
+    if target_base is None or target_base <= installed:
+        return None
+    return f"{installed[0]}.{installed[1]}.{installed[2]}", target
+
+
+def too_new_version() -> str | None:
+    """Return the installed version string when it exceeds the safe ceiling.
+
+    Used by the install flow to warn the client and offer a downgrade.
+    Returns None when the version is safe or cannot be determined.
+    """
+    raw = agent_version(SPEC["binary"])
+    parsed = _parse_version(raw)
+    if parsed is None:
+        return None
+    if parsed >= MAX_GEMINI_VERSION:
+        return raw
+    return None
+
+
+def too_new_downgrade() -> tuple[str, str] | None:
+    """Return (installed_version, downgrade_target) when a downgrade is needed.
+
+    `downgrade_target` is the newest published release below the broken
+    ceiling. Returns None when the installed version is safe, npm is
+    unavailable, or no working release can be resolved.
+    """
+    installed = too_new_version()
+    if installed is None:
+        return None
+    target = latest_working_version()
+    if target is None:
+        return None
+    return installed, target
 
 
 def _ensure_local_settings_selected_type() -> None:

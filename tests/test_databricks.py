@@ -13,6 +13,7 @@ from ucode.databricks import (
     AI_GATEWAY_V2_DOCS_URL,
     _format_subprocess_result,
     _parse_databricks_cli_version,
+    _run_databricks_cli_installer,
     _scrub_databrickscfg,
     _scrub_json,
     build_auth_shell_command,
@@ -129,6 +130,102 @@ class TestDiscoverClaudeModels:
 
         assert reason is None
         assert models["opus"] == "databricks-claude-opus-4-8"
+
+
+def _foundation_models_payload(names):
+    return {
+        "endpoints": [
+            {
+                "name": name,
+                "config": {
+                    "served_entities": [
+                        {
+                            "foundation_model": {
+                                "ai_gateway_v2_supported": True,
+                                "api_types": ["gemini/v1/generateContent"],
+                            }
+                        }
+                    ]
+                },
+            }
+            for name in names
+        ]
+    }
+
+
+class TestModelVersionSortKey:
+    def test_orders_newest_version_first(self):
+        names = [
+            "databricks-gemini-2-5-flash",
+            "databricks-gemini-2-5-pro",
+            "databricks-gemini-3-1-flash-lite",
+            "databricks-gemini-3-1-pro",
+            "databricks-gemini-3-5-flash",
+            "databricks-gemini-3-flash",
+            "databricks-gemini-3-pro",
+        ]
+        ordered = sorted(names, key=db_mod.model_version_sort_key)
+        assert ordered[0] == "databricks-gemini-3-5-flash"
+
+    def test_treats_bare_major_as_dot_zero(self):
+        # 3-flash is 3.0, so 3-5-flash (3.5) must sort ahead of it.
+        names = ["databricks-gemini-3-flash", "databricks-gemini-3-5-flash"]
+        ordered = sorted(names, key=db_mod.model_version_sort_key)
+        assert ordered == [
+            "databricks-gemini-3-5-flash",
+            "databricks-gemini-3-flash",
+        ]
+
+    def test_unversioned_names_sort_last_alphabetically(self):
+        names = ["databricks-gemini-2-5-flash", "custom-endpoint", "another-endpoint"]
+        ordered = sorted(names, key=db_mod.model_version_sort_key)
+        assert ordered[0] == "databricks-gemini-2-5-flash"
+        assert ordered[1:] == ["another-endpoint", "custom-endpoint"]
+
+
+class TestDiscoverGeminiModels:
+    def test_returns_newest_flash_first(self, monkeypatch):
+        payload = _foundation_models_payload(
+            [
+                "databricks-gemini-2-5-flash",
+                "databricks-gemini-3-5-flash",
+                "databricks-gemini-3-flash",
+            ]
+        )
+        monkeypatch.setattr(db_mod, "_http_get_json", lambda url, token: (payload, None))
+
+        models, reason = db_mod.discover_gemini_models(WS, "token")
+
+        assert reason is None
+        assert models[0] == "databricks-gemini-3-5-flash"
+
+    def test_codex_discovery_keeps_alphabetical_order(self, monkeypatch):
+        # Codex passes no sort_key, so ordering must stay the plain alphabetical
+        # default — guarding against the gemini change leaking across tools.
+        payload = {
+            "endpoints": [
+                {
+                    "name": name,
+                    "config": {
+                        "served_entities": [
+                            {
+                                "foundation_model": {
+                                    "ai_gateway_v2_supported": True,
+                                    "api_types": ["openai/v1/responses"],
+                                }
+                            }
+                        ]
+                    },
+                }
+                for name in ["databricks-gpt-5-2-codex", "databricks-gpt-4-1"]
+            ]
+        }
+        monkeypatch.setattr(db_mod, "_http_get_json", lambda url, token: (payload, None))
+
+        models, reason = db_mod.discover_codex_models(WS, "token")
+
+        assert reason is None
+        assert models == ["databricks-gpt-4-1", "databricks-gpt-5-2-codex"]
 
 
 class TestBuildAuthShellCommand:
@@ -802,6 +899,22 @@ class TestEnsureDatabricksCliVersion:
         monkeypatch.setattr("os.environ", env)
         with pytest.raises(RuntimeError, match="Could not parse"):
             ensure_databricks_cli_version()
+
+
+class TestRunDatabricksCliInstaller:
+    @pytest.mark.parametrize("brew_subcommand", ["install", "upgrade"])
+    def test_macos_uses_fully_qualified_tap_formula(self, monkeypatch, brew_subcommand):
+        calls = []
+        monkeypatch.setattr(db_mod.platform, "system", lambda: "Darwin")
+        monkeypatch.setattr(db_mod.shutil, "which", lambda cmd: "/opt/homebrew/bin/brew")
+        monkeypatch.setattr(db_mod, "run", lambda cmd, **kw: calls.append(cmd))
+
+        _run_databricks_cli_installer(brew_subcommand=brew_subcommand)
+
+        # The fully-qualified formula forces Homebrew to the Databricks CLI in
+        # databricks/tap and fails if absent, rather than falling back to the
+        # unrelated `databricks` cask.
+        assert calls == [["brew", brew_subcommand, "databricks/tap/databricks"]]
 
 
 class TestIsUsageTableAccessError:
