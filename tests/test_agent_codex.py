@@ -219,6 +219,83 @@ class TestCodexLegacyLayoutDetection:
         assert codex._use_legacy_layout() is False
 
 
+class TestCodexRemoveLegacyProfile:
+    def test_drops_provider_block_on_modern_path(self, tmp_path, monkeypatch):
+        config_dir = tmp_path / ".codex"
+        config_dir.mkdir()
+        profile_path = config_dir / "ucode.config.toml"
+        legacy_path = config_dir / "config.toml"
+        legacy_path.write_text(
+            'profile = "ucode"\n\n'
+            "[profiles.ucode]\n"
+            'model_provider = "ucode-databricks"\n\n'
+            "[model_providers.ucode-databricks]\n"
+            'name = "Databricks AI Gateway"\n\n'
+            "[model_providers.other]\n"
+            'name = "keep"\n',
+            encoding="utf-8",
+        )
+        backup_path = tmp_path / "codex-ucode-config.backup.toml"
+        monkeypatch.setattr(codex, "CODEX_CONFIG_PATH", profile_path)
+        monkeypatch.setattr(codex, "CODEX_BACKUP_PATH", backup_path)
+        monkeypatch.setattr(codex, "agent_version", lambda binary: "0.134.0")
+        monkeypatch.setattr(codex, "save_state", lambda state: None)
+
+        codex.write_tool_config({"workspace": WS, "codex_models": ["gpt-5"]})
+
+        doc = read_toml_safe(legacy_path)
+        assert "profile" not in doc
+        assert "ucode" not in doc.get("profiles", {})
+        assert "ucode-databricks" not in doc["model_providers"]
+        assert doc["model_providers"]["other"]["name"] == "keep"
+
+
+class TestCodexRevertLegacySharedConfig:
+    def test_strips_all_ucode_entries(self, tmp_path, monkeypatch):
+        config_dir = tmp_path / ".codex"
+        config_dir.mkdir()
+        profile_path = config_dir / "ucode.config.toml"
+        legacy_path = config_dir / "config.toml"
+        legacy_path.write_text(
+            'profile = "ucode"\n\n'
+            "[profiles.ucode]\n"
+            'model_provider = "ucode-databricks"\n\n'
+            "[profiles.other]\n"
+            'model_provider = "keep"\n\n'
+            "[model_providers.ucode-databricks]\n"
+            'name = "Databricks AI Gateway"\n',
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(codex, "CODEX_CONFIG_PATH", profile_path)
+
+        assert codex.revert_legacy_shared_config() is True
+
+        doc = read_toml_safe(legacy_path)
+        assert "profile" not in doc
+        assert "ucode" not in doc["profiles"]
+        assert doc["profiles"]["other"]["model_provider"] == "keep"
+        assert "model_providers" not in doc
+
+    def test_returns_false_when_no_ucode_entries(self, tmp_path, monkeypatch):
+        config_dir = tmp_path / ".codex"
+        config_dir.mkdir()
+        profile_path = config_dir / "ucode.config.toml"
+        legacy_path = config_dir / "config.toml"
+        legacy_path.write_text('[profiles.other]\nmodel_provider = "keep"\n', encoding="utf-8")
+        monkeypatch.setattr(codex, "CODEX_CONFIG_PATH", profile_path)
+
+        assert codex.revert_legacy_shared_config() is False
+
+        doc = read_toml_safe(legacy_path)
+        assert doc["profiles"]["other"]["model_provider"] == "keep"
+
+    def test_returns_false_when_no_shared_config(self, tmp_path, monkeypatch):
+        profile_path = tmp_path / ".codex" / "ucode.config.toml"
+        monkeypatch.setattr(codex, "CODEX_CONFIG_PATH", profile_path)
+
+        assert codex.revert_legacy_shared_config() is False
+
+
 class TestCodexDefaultModel:
     def test_picks_highest_semver_over_alpha(self):
         state = {"codex_models": ["databricks-gpt-5", "databricks-gpt-5-5"]}
@@ -227,6 +304,18 @@ class TestCodexDefaultModel:
 
     def test_none_when_no_models(self):
         assert codex.default_model({}) is None
+
+    def test_none_when_no_gpt_parseable_models(self):
+        # A workspace whose responses-capable models aren't GPT (e.g. kimi)
+        # must not pin an unroutable id as the Codex model.
+        state = {"codex_models": ["moonshotai/kimi-k2.5", "claude-sonnet-4"]}
+
+        assert codex.default_model(state) is None
+
+    def test_ignores_non_gpt_candidates(self):
+        state = {"codex_models": ["moonshotai/kimi-k2.5", "databricks-gpt-5-5"]}
+
+        assert codex.default_model(state) == "databricks-gpt-5-5"
 
     def test_prefers_base_over_suffixed_same_version(self):
         models = ["gpt-5-5-mini", "gpt-5-5", "gpt-5"]

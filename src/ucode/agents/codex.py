@@ -160,30 +160,84 @@ def _legacy_backup_path() -> Path:
     return CODEX_BACKUP_PATH.with_name("codex-legacy-config.backup.toml")
 
 
-def _remove_legacy_ucode_profile() -> None:
-    """Remove ucode's old [profiles.ucode] entry from shared Codex config."""
-    path = _legacy_config_path()
-    if path == CODEX_CONFIG_PATH or not path.exists():
-        return
+def _has_legacy_ucode_entries(doc: dict) -> bool:
+    profiles = doc.get("profiles")
+    providers = doc.get("model_providers")
+    return (
+        doc.get("profile") == CODEX_PROFILE_NAME
+        or (isinstance(profiles, dict) and CODEX_PROFILE_NAME in profiles)
+        or (isinstance(providers, dict) and CODEX_MODEL_PROVIDER_NAME in providers)
+    )
+
+
+def _strip_legacy_ucode_entries(path: Path) -> bool:
+    """Surgically remove ucode's keys from a shared Codex config.
+
+    Drops the top-level ``profile = "ucode"`` selector, ``[profiles.ucode]``,
+    and ``[model_providers.ucode-databricks]`` while leaving everything else the
+    user has in the file untouched. Returns True if anything was removed.
+
+    Surgical removal beats restoring the backup: ``backup_existing_file`` only
+    keeps the first-ever snapshot, so a whole-file restore would clobber edits
+    made since ucode first ran.
+    """
+    if not path.exists():
+        return False
 
     doc = read_toml_safe(path)
     changed = False
 
+    if doc.get("profile") == CODEX_PROFILE_NAME:
+        doc.pop("profile", None)
+        changed = True
+
     profiles = doc.get("profiles")
     if isinstance(profiles, dict) and CODEX_PROFILE_NAME in profiles:
-        backup_existing_file(path, _legacy_backup_path())
         profiles.pop(CODEX_PROFILE_NAME, None)
         if not profiles:
             doc.pop("profiles", None)
         changed = True
 
-    if doc.get("profile") == CODEX_PROFILE_NAME:
-        backup_existing_file(path, _legacy_backup_path())
-        doc.pop("profile", None)
+    providers = doc.get("model_providers")
+    if isinstance(providers, dict) and CODEX_MODEL_PROVIDER_NAME in providers:
+        providers.pop(CODEX_MODEL_PROVIDER_NAME, None)
+        if not providers:
+            doc.pop("model_providers", None)
         changed = True
 
     if changed:
         write_toml_file(path, doc)
+    return changed
+
+
+def _remove_legacy_ucode_profile() -> None:
+    """Remove ucode's old shared-config entries when configuring modern Codex.
+
+    Strips the legacy ``profile``/``[profiles.ucode]`` selector and the
+    ``[model_providers.ucode-databricks]`` provider block that older ucode
+    versions deep-merged into ``~/.codex/config.toml``.
+    """
+    path = _legacy_config_path()
+    if path == CODEX_CONFIG_PATH or not path.exists():
+        return
+
+    if _has_legacy_ucode_entries(read_toml_safe(path)):
+        backup_existing_file(path, _legacy_backup_path())
+        _strip_legacy_ucode_entries(path)
+
+
+def revert_legacy_shared_config() -> bool:
+    """Undo legacy in-place edits to ``~/.codex/config.toml`` on revert.
+
+    Codex CLI < 0.134.0 had ucode deep-merge ``profile = "ucode"``,
+    ``[profiles.ucode]``, and ``[model_providers.ucode-databricks]`` into the
+    user's real shared config, which routes every bare ``codex`` invocation
+    through the workspace gateway. ``ucode revert`` only restored the
+    per-profile file, leaving those edits in place. Surgically strip them here.
+
+    Returns True if anything was removed.
+    """
+    return _strip_legacy_ucode_entries(_legacy_config_path())
 
 
 def _openai_model_id(model: str | None) -> str | None:
@@ -256,22 +310,26 @@ def default_model(state: dict) -> str | None:
 
     The discovery list is alphabetically sorted, which can put
     "databricks-gpt-5" ahead of "databricks-gpt-5-5". Prefer the
-    highest semantic version instead. Falls back to the first
-    discovered entry when parsing fails.
+    highest semantic version instead.
+
+    Only GPT-parseable ids are considered. Codex routes the chosen ``model``
+    through the gateway as-is, so a non-GPT entry (e.g. ``moonshotai/kimi-k2.5``)
+    would be rejected with a Unity Catalog endpoint-name error. When no
+    candidate parses as GPT we return None rather than pinning an unroutable id.
     """
     codex_models = state.get("codex_models") or []
-    if not codex_models:
+    parsed: list[tuple[str, tuple[int, int | None, int | None, str]]] = [
+        (mid, gpt) for mid in codex_models if (gpt := _parse_gpt(mid)) is not None
+    ]
+    if not parsed:
         return None
 
-    def _gpt_version_key(mid: str) -> tuple[int, int, int, int]:
-        parsed = _parse_gpt(mid)
-        if parsed is None:
-            return (0, 0, 0, 0)
-        major, minor, patch, suffix = parsed
+    def _gpt_version_key(entry: tuple[str, tuple[int, int | None, int | None, str]]):
+        major, minor, patch, suffix = entry[1]
         base_bonus = 1 if not suffix else 0
         return (major, minor or 0, patch or 0, base_bonus)
 
-    return max(codex_models, key=_gpt_version_key)
+    return max(parsed, key=_gpt_version_key)[0]
 
 
 def launch(state: dict, tool_args: list[str]) -> None:
