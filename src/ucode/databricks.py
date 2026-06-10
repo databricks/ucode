@@ -483,7 +483,7 @@ def _run_databricks_cli_installer(brew_subcommand: str = "install") -> None:
                 timeout=240,
             )
         elif system == "Darwin" and shutil.which("brew"):
-            run(["brew", brew_subcommand, "databricks"], timeout=240)
+            run(["brew", brew_subcommand, "databricks/tap/databricks"], timeout=240)
         elif shutil.which("curl"):
             run(["sh", "-c", f"curl -fsSL {UNIX_DATABRICKS_INSTALL_URL} | sudo sh"], timeout=240)
         elif shutil.which("wget"):
