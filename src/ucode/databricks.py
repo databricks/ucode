@@ -1021,13 +1021,45 @@ def fetch_ai_gateway_claude_models(workspace: str, token: str) -> dict[str, str]
     return models
 
 
+def model_version_sort_key(name: str) -> tuple:
+    """Sort endpoint names so newer model versions come first.
+
+    Endpoint names embed a dotted version as dash-separated digits, e.g.
+    `databricks-gemini-3-5-flash` (3.5) or `databricks-gemini-3-flash` (3.0).
+    Plain alphabetical sorting buries `3-5-flash` below `2-5-flash`; this key
+    groups by the non-numeric prefix, orders by version descending, then falls
+    back to the remaining text so ties stay stable and deterministic.
+    """
+    tokens = name.split("-")
+    start = next((i for i, tok in enumerate(tokens) if tok.isdigit()), None)
+    if start is None:
+        # No version segment — sort these after versioned ones, alphabetically.
+        # The leading 1 keeps the whole group below every versioned name (0).
+        return (1, name, (), "")
+    end = start
+    while end < len(tokens) and tokens[end].isdigit():
+        end += 1
+    version = tuple(int(tok) for tok in tokens[start:end])
+    # Pad to a fixed width so (3,) compares as (3, 0) — i.e. 3.0 < 3.5.
+    padded = (version + (0, 0, 0))[:3]
+    prefix = "-".join(tokens[:start])
+    suffix = "-".join(tokens[end:])
+    # Negate version components for descending order within a prefix group.
+    return (0, prefix, tuple(-v for v in padded), suffix)
+
+
 def discover_endpoints_with_api_type(
-    workspace: str, token: str, api_type: str
+    workspace: str,
+    token: str,
+    api_type: str,
+    *,
+    sort_key=None,
 ) -> tuple[list[str], str | None]:
     """List endpoint names whose served_entities expose api_type with v2 support.
 
     Returns (endpoints, reason). reason is None on success; otherwise it
-    describes why the list is empty.
+    describes why the list is empty. `sort_key` overrides the default
+    alphabetical ordering of the returned names.
     """
     hostname = workspace_hostname(workspace)
     payload, reason = _http_get_json(
@@ -1055,7 +1087,7 @@ def discover_endpoints_with_api_type(
         if api_type in api_types:
             out.append(name)
     if out:
-        return sorted(out), None
+        return sorted(out, key=sort_key), None
     if not endpoints:
         return [], "foundation-models listing returned no endpoints"
     if saw_endpoint_without_v2:
@@ -1073,7 +1105,11 @@ def _fetch_endpoints_with_api_type(workspace: str, token: str, api_type: str) ->
 
 
 def discover_gemini_models(workspace: str, token: str) -> tuple[list[str], str | None]:
-    return discover_endpoints_with_api_type(workspace, token, "gemini/v1/generateContent")
+    # Order newest model version first so `default_model()` (which picks the
+    # first entry) launches e.g. gemini-3.5-flash rather than gemini-2.5-flash.
+    return discover_endpoints_with_api_type(
+        workspace, token, "gemini/v1/generateContent", sort_key=model_version_sort_key
+    )
 
 
 def discover_codex_models(workspace: str, token: str) -> tuple[list[str], str | None]:
