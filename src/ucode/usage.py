@@ -977,12 +977,16 @@ def render_local_budget_panel(
     status: dict[str, object],
     *,
     title: str | None = None,
+    extra_lines: list[str] | None = None,
 ) -> Panel:
     """Render a budget status as a bordered Rich panel with a color-coded fill
     bar. Used by `ucode usage budget-status` and the launch budget summary.
 
     Pass ``title`` to override the default ``"<Tool> · Daily Budget"`` panel
-    title."""
+    title. Pass ``extra_lines`` to inject Rich-markup lines into the body
+    between the progress bar and the Remaining/Tokens/Sessions footer — used
+    by the warn-state switch prompt to surface a "currently X, recommend Y"
+    sentence inside the same panel."""
     state = str(status.get("state") or "ok")
     raw_tool = status.get("tool")
     tool = str(raw_tool) if raw_tool else ""
@@ -1007,6 +1011,10 @@ def render_local_budget_panel(
     )
     lines.append(_budget_bar_markup(percent, color))
     lines.append("")
+    if extra_lines:
+        for extra in extra_lines:
+            lines.append(extra)
+        lines.append("")
     lines.append(f"[bold]Remaining[/bold]   ${remaining_usd:,.2f}")
     lines.append(f"[bold]{tokens_label}[/bold]   {format_token_count(tokens)}")
     lines.append(f"[bold]{sessions_label}[/bold]   {sessions}")

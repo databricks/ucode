@@ -9,6 +9,7 @@ from typing import Annotated, cast
 
 import typer
 from rich.panel import Panel
+from rich.text import Text
 
 from ucode.agents import (
     TOOL_SPECS,
@@ -1138,9 +1139,30 @@ def _apply_budget_gate(
         target = _budget_switch_target(tool, status)
         if target is None:
             return "default", None, None
-        switch_display = None
         tier = status.get("active_tier")
         switch_display = _tier_display(tier) if isinstance(tier, dict) else target[0]
+        current_display = TOOL_SPECS.get(tool, {}).get("display", tool)
+        target_harness, target_model = target
+        target_display = TOOL_SPECS.get(target_harness, {}).get("display", target_harness)
+        tier_name = tier.get("name") if isinstance(tier, dict) else None
+        tier_label = (
+            f"with your admin's {tier_name} policy"
+            if isinstance(tier_name, str) and tier_name
+            else "with the active tier's policy"
+        )
+        suggestion = (
+            f"[yellow]Currently launching[/yellow] [bold]{current_display}[/bold] "
+            f"[yellow]— policy recommends switching to[/yellow] "
+            f"[bold]{target_display}[/bold] ([italic]{target_model}[/italic]) "
+            f"[yellow]{tier_label}.[/yellow]"
+        )
+        console.print(
+            render_local_budget_panel(
+                status,
+                title="Daily budget — switch recommended",
+                extra_lines=[suggestion],
+            )
+        )
         choice = prompt_budget_warn_choice(
             default_agent_display=TOOL_SPECS[tool]["display"],
             switch_display=switch_display,
@@ -1232,10 +1254,34 @@ def _launch_tool(
                 # The panel title still names the tool being launched. The exceeded
                 # state is already handled by `_apply_budget_gate` above, so this
                 # panel only reports ok/warn spend here.
+                budget_status = local_budget_status()
+                extra_panel_lines: list[str] = []
+                active = budget_status.get("active_tier")
+                if isinstance(active, dict):
+                    active_name = active.get("name")
+                    active_harness = active.get("harness")
+                    active_model = active.get("model")
+                    if (
+                        isinstance(active_name, str)
+                        and active_name
+                        and isinstance(active_harness, str)
+                        and active_harness
+                        and isinstance(active_model, str)
+                        and active_model
+                    ):
+                        active_display = TOOL_SPECS.get(active_harness, {}).get(
+                            "display", active_harness
+                        )
+                        extra_panel_lines.append(
+                            f"Invoking [bold]{active_name}[/bold] policy which is "
+                            f"[bold]{active_display}[/bold] with model "
+                            f"[bold]{active_model}[/bold]"
+                        )
                 console.print(
                     render_local_budget_panel(
-                        local_budget_status(),
+                        budget_status,
                         title=f"ucode with {display}",
+                        extra_lines=extra_panel_lines or None,
                     )
                 )
             else:
@@ -2235,18 +2281,53 @@ def usage_record_cmd(
 
 @usage_app.command("budget-status")
 def usage_budget_status_cmd() -> None:
-    """Show the current local spend budget state.
+    """Show the current local spend budget state and the active policy.
 
     The daily budget is a single pool shared across all coding tools, so this
-    renders one combined view."""
+    renders one combined view. A second panel summarises the policy (budget,
+    tiers, on-exhausted action) and the tier the current spend has activated."""
     state = load_state()
     workspace = state.get("workspace")
     sync_workspace = workspace if isinstance(workspace, str) else None
     sync_opencode_usage_from_messages(workspace=sync_workspace)
     sync_opencode_usage_from_state(workspace=sync_workspace)
-    console.print(
-        render_local_budget_panel(local_budget_status(), title="Daily Budget · All Tools")
-    )
+    status = local_budget_status()
+    console.print(render_local_budget_panel(status, title="Daily Budget · All Tools"))
+    policy_lines = _render_policy_summary_lines(sync_workspace)
+    if policy_lines:
+        name_line = policy_lines[0].replace("[bold]Policy:[/bold] ", "[bold]")
+        if name_line == policy_lines[0]:
+            body_lines = list(policy_lines[1:])
+        else:
+            body_lines = [name_line + "[/bold]"] + list(policy_lines[1:])
+        active = status.get("active_tier")
+        if isinstance(active, dict):
+            active_name = active.get("name")
+            active_harness = active.get("harness")
+            active_model = active.get("model")
+            if (
+                isinstance(active_name, str)
+                and active_name
+                and isinstance(active_harness, str)
+                and active_harness
+                and isinstance(active_model, str)
+                and active_model
+            ):
+                active_display = TOOL_SPECS.get(active_harness, {}).get("display", active_harness)
+                body_lines.append("")
+                body_lines.append(
+                    f"[bold]Invoking {active_name} policy which is "
+                    f"{active_display} with model {active_model}[/bold]"
+                )
+        console.print(
+            Panel(
+                Text.from_markup("\n".join(body_lines)),
+                title=Text("Policy", style="bold cyan"),
+                border_style="cyan",
+                expand=False,
+                padding=(1, 2, 0, 2),
+            )
+        )
 
 
 @usage_app.command("budget-check")
