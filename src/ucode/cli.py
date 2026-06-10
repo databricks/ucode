@@ -246,6 +246,55 @@ def _parse_workspaces_option(workspaces: str) -> list[tuple[str, str | None]]:
     return workspace_entries
 
 
+def _union_into(managed: list | None, discovered: list) -> list:
+    """Return ``managed`` followed by any ``discovered`` entries it is missing.
+
+    Managed order wins (the admin may deliberately order/prefer models); newly
+    deployed endpoints the managed blob omits are appended so they remain
+    selectable.
+    """
+    base = list(managed) if isinstance(managed, list) else []
+    seen = set(base)
+    for item in discovered:
+        if item not in seen:
+            base.append(item)
+            seen.add(item)
+    return base
+
+
+def _union_discovered_models(
+    state: dict,
+    claude_models: dict[str, str] | None,
+    gemini_models: list[str] | None,
+    codex_models: list[str] | None,
+    opencode_models: dict[str, list[str]] | None,
+) -> None:
+    """Re-add locally-discovered models the managed merge dropped, in place.
+
+    The managed config never narrows what is selectable — it can reorder and set
+    defaults, but a deployed endpoint it forgot to list is still offered."""
+    if claude_models:
+        # claude_models maps display tier -> model id; union on the id values.
+        managed_claude = state.get("claude_models")
+        merged = dict(managed_claude) if isinstance(managed_claude, dict) else {}
+        existing_ids = set(merged.values())
+        for tier, model_id in claude_models.items():
+            if model_id not in existing_ids:
+                merged[tier] = model_id
+                existing_ids.add(model_id)
+        state["claude_models"] = merged
+    if gemini_models:
+        state["gemini_models"] = _union_into(state.get("gemini_models"), gemini_models)
+    if codex_models:
+        state["codex_models"] = _union_into(state.get("codex_models"), codex_models)
+    if opencode_models:
+        managed_oc = state.get("opencode_models")
+        merged_oc = dict(managed_oc) if isinstance(managed_oc, dict) else {}
+        for provider, models in opencode_models.items():
+            merged_oc[provider] = _union_into(merged_oc.get(provider), models)
+        state["opencode_models"] = merged_oc
+
+
 def configure_shared_state(
     workspace: str,
     profile: str | None = None,
@@ -340,6 +389,19 @@ def configure_shared_state(
 
     if remote is not None:
         state = merge_managed_workspace(state, remote, profile=profile)
+        # The managed blob is authoritative for org settings (default model,
+        # tier, base URLs, policies), but it must not be able to HIDE a model
+        # that is actually deployed: discovery reflects what exists right now,
+        # so an admin updating their config can still see — and therefore add —
+        # newly-deployed endpoints. Union live discovery back into the model
+        # lists the managed merge replaced.
+        _union_discovered_models(
+            state,
+            claude_models if want_claude else None,
+            gemini_models if want_gemini else None,
+            codex_models if want_codex else None,
+            opencode_models if (fetch_all or "opencode" in tools) else None,
+        )
         config_applied = True
     else:
         print_note("No managed config published for this workspace — using local defaults.")

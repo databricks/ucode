@@ -1075,6 +1075,56 @@ class TestRevert:
         assert "Claude Code MCP config: restored" in result.output
 
 
+class TestUnionDiscoveredModels:
+    """The managed config must not be able to HIDE a deployed model: live
+    discovery is unioned back in after the managed merge so an admin can still
+    see (and add) newly-deployed endpoints."""
+
+    def test_appends_discovered_open_responses_missing_from_managed(self):
+        from ucode.cli import _union_discovered_models
+
+        # Managed blob lists only -colo; discovery found both.
+        state = {"opencode_models": {"open-responses": ["databricks-kimi-k2-6-colo"]}}
+        discovered = {"open-responses": ["databricks-kimi-k2-6", "databricks-kimi-k2-6-colo"]}
+        _union_discovered_models(state, None, None, None, discovered)
+        # Managed order preserved, missing endpoint appended (no duplicates).
+        assert state["opencode_models"]["open-responses"] == [
+            "databricks-kimi-k2-6-colo",
+            "databricks-kimi-k2-6",
+        ]
+
+    def test_preserves_managed_order_and_dedupes(self):
+        from ucode.cli import _union_into
+
+        assert _union_into(["b", "a"], ["a", "b", "c"]) == ["b", "a", "c"]
+
+    def test_unions_gemini_and_codex_lists(self):
+        from ucode.cli import _union_discovered_models
+
+        state = {"gemini_models": ["g1"], "codex_models": ["c1"]}
+        _union_discovered_models(state, None, ["g1", "g2"], ["c1", "c2"], None)
+        assert state["gemini_models"] == ["g1", "g2"]
+        assert state["codex_models"] == ["c1", "c2"]
+
+    def test_unions_claude_models_by_id(self):
+        from ucode.cli import _union_discovered_models
+
+        # claude_models maps tier -> model id; union on ids, keep managed entries.
+        state = {"claude_models": {"opus": "claude-opus"}}
+        discovered = {"opus": "claude-opus", "haiku": "claude-haiku"}
+        _union_discovered_models(state, discovered, None, None, None)
+        assert state["claude_models"] == {"opus": "claude-opus", "haiku": "claude-haiku"}
+
+    def test_seeds_lists_when_managed_blob_has_none(self):
+        from ucode.cli import _union_discovered_models
+
+        state: dict = {}
+        _union_discovered_models(
+            state, None, None, None, {"open-responses": ["databricks-kimi-k2-6"]}
+        )
+        assert state["opencode_models"]["open-responses"] == ["databricks-kimi-k2-6"]
+
+
 class TestExport:
     """`ucode export` must upload a flat single-workspace splice to UC —
     no multi-workspace wrapper, no other workspaces, no per-machine fields."""
