@@ -110,6 +110,7 @@ from ucode.ui import (
     status_badge,
 )
 from ucode.usage import (
+    _budget_usage_percent,
     format_local_budget_status,
     local_budget_status,
     render_local_budget_panel,
@@ -1254,7 +1255,15 @@ def _launch_in_tmux_split(tool_name: str, agent_args: list[str], interval: int) 
     seconds.
     """
     agent_cmd = shlex.join(["ucode", tool_name, *agent_args])
-    watch_cmd = f"while true; do clear; ucode usage budget-status; sleep {interval}; done"
+    # Redraw in place instead of clearing first: \033[2J clears once on
+    # startup, then each loop homes the cursor (\033[H), overwrites the old
+    # frame, and erases any leftover trailing lines (\033[J). Clearing before
+    # each render blanks the pane to an empty frame, which reads as a flicker.
+    watch_cmd = (
+        "printf '\\033[2J'; "
+        f"while true; do printf '\\033[H'; ucode usage budget-status; "
+        f"printf '\\033[J'; sleep {interval}; done"
+    )
     print_success(
         f"Launching {TOOL_SPECS[tool_name]['display']} in a tmux split "
         f"with a budget watcher (refreshing every {interval}s)."
@@ -1264,6 +1273,11 @@ def _launch_in_tmux_split(tool_name: str, agent_args: list[str], interval: int) 
             "tmux",
             "new-session",
             agent_cmd,
+            ";",
+            "set-option",
+            "-g",
+            "mouse",
+            "on",
             ";",
             "split-window",
             "-h",
@@ -1367,10 +1381,14 @@ def _launch_tool(
                         active_display = TOOL_SPECS.get(active_harness, {}).get(
                             "display", active_harness
                         )
+                        percent = _budget_usage_percent(
+                            float(budget_status.get("spend_usd") or 0.0),
+                            float(budget_status.get("limit_usd") or 0.0),
+                        )
                         extra_panel_lines.append(
-                            f"Invoking [bold]{active_name}[/bold] policy which is "
-                            f"[bold]{active_display}[/bold] with model "
-                            f"[bold]{active_model}[/bold]"
+                            f"You've used [bold]{percent}%[/bold] of today's budget. "
+                            f"Recommended harness is [bold]{active_display}[/bold] "
+                            f"with model [bold]{active_model}[/bold]."
                         )
                 console.print(
                     render_local_budget_panel(
@@ -2409,10 +2427,14 @@ def usage_budget_status_cmd() -> None:
                 and active_model
             ):
                 active_display = TOOL_SPECS.get(active_harness, {}).get("display", active_harness)
+                percent = _budget_usage_percent(
+                    float(status.get("spend_usd") or 0.0),
+                    float(status.get("limit_usd") or 0.0),
+                )
                 body_lines.append("")
                 body_lines.append(
-                    f"[bold]Invoking {active_name} policy which is "
-                    f"{active_display} with model {active_model}[/bold]"
+                    f"[bold]You've used {percent}% of today's budget. "
+                    f"Recommended harness is {active_display} with model {active_model}.[/bold]"
                 )
         console.print(
             Panel(

@@ -1617,6 +1617,9 @@ class TestWatchFlag:
         assert "split-window" in argv
         assert "-h" in argv
         assert any("budget-status" in part for part in argv)
+        # Mouse mode is enabled so the wheel scrolls pane history.
+        assert "set-option" in argv
+        assert "mouse" in argv
         # We return early before the in-place launch.
         mock_launch.assert_not_called()
 
