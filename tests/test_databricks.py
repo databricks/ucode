@@ -100,6 +100,40 @@ class TestBuildOpencodeBaseUrls:
         assert urls["anthropic"] == f"{WS}/ai-gateway/anthropic/v1"
         assert urls["gemini"] == f"{WS}/ai-gateway/gemini/v1beta"
 
+    def test_open_responses_points_at_serving_endpoints(self):
+        urls = build_opencode_base_urls(WS)
+        assert urls["open-responses"] == f"{WS}/serving-endpoints"
+
+
+class TestDiscoverKimiModels:
+    # Kimi is discovered via the `mlflow/v1/chat/completions` api_type, then
+    # filtered to kimi-named endpoints so only Kimi reaches OpenCode.
+    _ENDPOINTS = ["databricks-meta-llama", "databricks-kimi-k2-6-colo"]
+
+    def test_returns_only_kimi_endpoints(self, monkeypatch):
+        captured = {}
+
+        def fake(ws, tok, api):
+            captured["api"] = api
+            return list(self._ENDPOINTS), None
+
+        monkeypatch.setattr(db_mod, "discover_endpoints_with_api_type", fake)
+        models, reason = db_mod.discover_kimi_models(WS, "tok")
+        assert models == ["databricks-kimi-k2-6-colo"]
+        assert reason is None
+        # Probes the chat-completions api_type, not openai/v1/responses.
+        assert captured["api"] == "mlflow/v1/chat/completions"
+
+    def test_reason_when_no_kimi_endpoint(self, monkeypatch):
+        monkeypatch.setattr(
+            db_mod,
+            "discover_endpoints_with_api_type",
+            lambda ws, tok, api: (["databricks-meta-llama"], None),
+        )
+        models, reason = db_mod.discover_kimi_models(WS, "tok")
+        assert models == []
+        assert reason and "kimi" in reason
+
 
 class TestBuildSharedBaseUrls:
     def test_contains_all_tools(self):

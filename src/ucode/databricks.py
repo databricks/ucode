@@ -43,6 +43,11 @@ AI_GATEWAY_V2_DOCS_URL = "https://docs.databricks.com/aws/en/ai-gateway/overview
 MIN_DATABRICKS_CLI_VERSION = (0, 298, 0)
 TOKEN_REFRESH_INTERVAL_SECONDS = 1800
 
+# Substring identifying Kimi serving endpoints (e.g. `databricks-kimi-k2-6-colo`).
+# Kimi shares the `openai/v1/responses` api_type with Codex, so name-matching is
+# how we route it to the OpenCode open-responses provider instead of Codex.
+KIMI_ENDPOINT_SUBSTRING = "kimi"
+
 # UC volume that stores the shared ucode `state.json`. Lives in dedicated
 # top-level `ai_gateway` catalog.
 #
@@ -1473,6 +1478,23 @@ def discover_codex_models(workspace: str, token: str) -> tuple[list[str], str | 
     return discover_endpoints_with_api_type(workspace, token, "openai/v1/responses")
 
 
+def discover_kimi_models(workspace: str, token: str) -> tuple[list[str], str | None]:
+    """Discover Kimi serving endpoints.
+
+    Kimi is served as an MLflow chat-completions endpoint (api_type
+    `mlflow/v1/chat/completions`), so discoverability is probed there even
+    though OpenCode talks to it via the serving-endpoints base URL. We match by
+    name so only the Kimi endpoints — not every chat-completions model — are
+    routed to the OpenCode open-responses provider."""
+    endpoints, reason = discover_endpoints_with_api_type(
+        workspace, token, "mlflow/v1/chat/completions"
+    )
+    kimi = [name for name in endpoints if KIMI_ENDPOINT_SUBSTRING in name]
+    if kimi:
+        return kimi, None
+    return [], reason or f"no serving endpoint name contains `{KIMI_ENDPOINT_SUBSTRING}`"
+
+
 def fetch_gemini_models(workspace: str, token: str) -> list[str]:
     models, _ = discover_gemini_models(workspace, token)
     return models
@@ -1480,6 +1502,11 @@ def fetch_gemini_models(workspace: str, token: str) -> list[str]:
 
 def fetch_codex_models(workspace: str, token: str) -> list[str]:
     models, _ = discover_codex_models(workspace, token)
+    return models
+
+
+def fetch_kimi_models(workspace: str, token: str) -> list[str]:
+    models, _ = discover_kimi_models(workspace, token)
     return models
 
 
@@ -1670,6 +1697,11 @@ def build_opencode_base_urls(workspace: str) -> dict[str, str]:
     return {
         "anthropic": build_tool_base_url("claude", workspace) + "/v1",
         "gemini": build_tool_base_url("gemini", workspace) + "/v1beta",
+        # Kimi (OpenAI Responses API) is served at the plain serving-endpoints
+        # path, not an /ai-gateway/... path. @ai-sdk/openai POSTs to
+        # `${baseURL}/responses`; the OpenCode databricks plugin rewrites that
+        # suffix to `/open-responses`.
+        "open-responses": f"{workspace}/serving-endpoints",
     }
 
 

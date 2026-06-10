@@ -33,8 +33,14 @@ OPENCODE_XDG_CONFIG_HOME = APP_DIR / "opencode-xdg"
 OPENCODE_CONFIG_DIR = OPENCODE_XDG_CONFIG_HOME / "opencode"
 OPENCODE_CONFIG_PATH = OPENCODE_CONFIG_DIR / "opencode.json"
 OPENCODE_BACKUP_PATH = APP_DIR / "opencode-config.backup.json"
+# OpenCode reads stored credentials from `$XDG_DATA_HOME/opencode/auth.json`.
+# We point XDG_DATA_HOME at a ucode-managed dir (build_runtime_env) so we own
+# that file too.
+OPENCODE_XDG_DATA_HOME = APP_DIR / "opencode-xdg-data"
+OPENCODE_AUTH_PATH = OPENCODE_XDG_DATA_HOME / "opencode" / "auth.json"
 OPENCODE_MCP_AUTH_HEADER_VALUE = "Bearer {env:OAUTH_TOKEN}"
 OPENCODE_USAGE_PLUGIN_MARKER = "ucode-managed-usage-plugin"
+OPENCODE_OPEN_RESPONSES_PLUGIN_MARKER = "ucode-managed-open-responses-plugin"
 
 SPEC: ToolSpec = {
     "binary": "opencode",
@@ -188,13 +194,113 @@ def _upsert_usage_plugin(doc: dict) -> None:
     doc["plugin"] = plugins
 
 
+def _open_responses_plugin_path() -> str:
+    return str(OPENCODE_CONFIG_PATH.parent / "plugins" / "ucode-open-responses.mjs")
+
+
+def _open_responses_plugin_source() -> str:
+    # @ai-sdk/openai (Responses API) always POSTs to `${baseURL}/responses`, but
+    # Databricks serves it at `${baseURL}/open-responses`. A plugin auth.loader
+    # is the only place we can inject a custom `fetch` (JSON config can't carry a
+    # function), so we use it to rewrite the trailing `/responses` to
+    # `/open-responses`. The apiKey already lives in the provider `options`
+    # (refreshed on the token-refresh loop), so the loader only overrides fetch.
+    return f"""// {OPENCODE_OPEN_RESPONSES_PLUGIN_MARKER}
+export default async function UcodeOpenResponsesPlugin() {{
+  return {{
+    auth: {{
+      provider: "databricks-open-responses",
+      methods: [{{ label: "Databricks PAT", type: "api" }}],
+      async loader(getAuth) {{
+        const auth = await getAuth();
+        const apiKey =
+          auth?.type === "api" ? auth.key : process.env.OAUTH_TOKEN || process.env.DATABRICKS_TOKEN;
+        return {{
+          apiKey,
+          async fetch(input, init) {{
+            const raw =
+              typeof input === "string"
+                ? input
+                : input instanceof URL
+                  ? input.href
+                  : input.url;
+            const url = new URL(raw);
+            url.pathname = url.pathname.replace(/\\/responses$/, "/open-responses");
+            return fetch(url, init);
+          }},
+        }};
+      }},
+    }},
+  }};
+}}
+"""
+
+
+def _write_open_responses_plugin() -> None:
+    path = OPENCODE_CONFIG_PATH.parent / "plugins" / "ucode-open-responses.mjs"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(_open_responses_plugin_source(), encoding="utf-8")
+
+
+def _is_open_responses_plugin(value: object) -> bool:
+    plugin_path = _open_responses_plugin_path()
+    if isinstance(value, str):
+        return value == plugin_path
+    if isinstance(value, list) and value:
+        return value[0] == plugin_path
+    if isinstance(value, Mapping):
+        mapping = cast(Mapping[str, object], value)
+        raw = mapping.get("path") or mapping.get("module")
+        return raw == plugin_path
+    return False
+
+
+def _upsert_open_responses_plugin(doc: dict) -> None:
+    plugins = doc.get("plugin")
+    if not isinstance(plugins, list):
+        plugins = []
+    plugins = [plugin for plugin in plugins if not _is_open_responses_plugin(plugin)]
+    plugins.append(_open_responses_plugin_path())
+    doc["plugin"] = plugins
+
+
+def _remove_open_responses_plugin(doc: dict) -> None:
+    plugins = doc.get("plugin")
+    if not isinstance(plugins, list):
+        return
+    doc["plugin"] = [plugin for plugin in plugins if not _is_open_responses_plugin(plugin)]
+
+
+def _write_open_responses_auth(token: str) -> None:
+    # OpenCode only runs a provider's plugin `auth.loader` when a stored
+    # credential exists for that provider (it skips the loader otherwise, which
+    # leaves @ai-sdk/openai with no apiKey -> "OpenAI API key is missing").
+    # Writing an `api` entry here satisfies that gate so the loader runs; the
+    # loader reads this key, while the live token used for requests comes from
+    # OAUTH_TOKEN. We keep the token in sync anyway so the value is never stale.
+    OPENCODE_AUTH_PATH.parent.mkdir(parents=True, exist_ok=True)
+    auth = read_json_safe(OPENCODE_AUTH_PATH)
+    auth["databricks-open-responses"] = {"type": "api", "key": token}
+    write_json_file(OPENCODE_AUTH_PATH, auth)
+
+
+def _remove_open_responses_auth() -> None:
+    auth = read_json_safe(OPENCODE_AUTH_PATH)
+    if auth.pop("databricks-open-responses", None) is not None:
+        write_json_file(OPENCODE_AUTH_PATH, auth)
+
+
 def is_update_available() -> tuple[str, str] | None:
     return available_npm_package_update(SPEC["package"])
 
 
 def _resolve_model_selector(model: str, opencode_models: dict[str, list[str]]) -> str:
     """Return an OpenCode model selector in provider/model form when possible."""
-    if model.startswith("databricks-anthropic/") or model.startswith("databricks-google/"):
+    if (
+        model.startswith("databricks-anthropic/")
+        or model.startswith("databricks-google/")
+        or model.startswith("databricks-open-responses/")
+    ):
         return model
 
     anthropic_models = opencode_models.get("anthropic") or []
@@ -204,6 +310,10 @@ def _resolve_model_selector(model: str, opencode_models: dict[str, list[str]]) -
     gemini_models = opencode_models.get("gemini") or []
     if model in gemini_models:
         return f"databricks-google/{model}"
+
+    open_responses_models = opencode_models.get("open-responses") or []
+    if model in open_responses_models:
+        return f"databricks-open-responses/{model}"
 
     return model
 
@@ -226,6 +336,7 @@ def render_overlay(
 
     anthropic_models = opencode_models.get("anthropic") or []
     gemini_models = opencode_models.get("gemini") or []
+    open_responses_models = opencode_models.get("open-responses") or []
 
     providers: dict = {}
     keys: list[list[str]] = [["model"]]
@@ -260,6 +371,35 @@ def render_overlay(
             "models": {m: {"headers": ua_header} for m in gemini_models},
         }
         keys.append(["provider", "databricks-google"])
+    if open_responses_models:
+        # Kimi speaks the OpenAI Responses API at the serving-endpoints path.
+        # @ai-sdk/openai POSTs to `${baseURL}/responses`; the rewrite plugin
+        # (see _write_open_responses_plugin) maps that to `/open-responses`.
+        # Per-model `headers` carry the UA (same reason as anthropic).
+        #
+        # `X-Axon-Mode: ROUTER` is intentionally NOT sent: the gateway 502s on
+        # the `-colo` endpoint when that header is present. `X-Axon-LB-Mode`
+        # remains to keep load-balancer routing.
+        #
+        # Crucially, `apiKey` is NOT set here: OpenCode only invokes a provider's
+        # plugin `auth.loader` when it must resolve credentials itself. Supplying
+        # `apiKey` in `options` short-circuits that, so the loader — and its
+        # custom `fetch` that does the /responses -> /open-responses rewrite —
+        # never runs, and requests hit the wrong path. The loader sources the
+        # token from OAUTH_TOKEN (set by build_runtime_env) instead.
+        providers["databricks-open-responses"] = {
+            "npm": "@ai-sdk/openai",
+            "name": "Databricks",
+            "options": {
+                "baseURL": opencode_base_urls["open-responses"],
+                "headers": {
+                    **auth_headers,
+                    "X-Axon-LB-Mode": "DICER",
+                },
+            },
+            "models": {m: {"headers": ua_header} for m in open_responses_models},
+        }
+        keys.append(["provider", "databricks-open-responses"])
 
     overlay: dict = {"model": _resolve_model_selector(model, opencode_models)}
     if providers:
@@ -291,11 +431,26 @@ def write_tool_config(
     existing = read_json_safe(OPENCODE_CONFIG_PATH)
     providers = existing.get("provider")
     if isinstance(providers, dict):
-        for stale in ("databricks-anthropic", "databricks-google", "databricks-openai"):
+        for stale in (
+            "databricks-anthropic",
+            "databricks-google",
+            "databricks-openai",
+            "databricks-open-responses",
+        ):
             providers.pop(stale, None)
     merged = deep_merge_dict(existing, overlay)
     _write_usage_plugin(state["workspace"], str(overlay["model"]))
     _upsert_usage_plugin(merged)
+    # The open-responses rewrite plugin is only needed when the Kimi provider is
+    # configured; register it then and prune it otherwise so a removed endpoint
+    # leaves no dangling plugin path.
+    if "databricks-open-responses" in overlay.get("provider", {}):
+        _write_open_responses_plugin()
+        _upsert_open_responses_plugin(merged)
+        _write_open_responses_auth(token)
+    else:
+        _remove_open_responses_plugin(merged)
+        _remove_open_responses_auth()
     managed_keys = managed_keys + [["plugin"]]
     write_json_file(OPENCODE_CONFIG_PATH, merged)
     state = mark_tool_managed(state, "opencode", managed_keys)
@@ -344,7 +499,10 @@ def default_model(state: dict) -> str | None:
     if anthropic:
         return anthropic[0]
     gemini = opencode_models.get("gemini") or []
-    return gemini[0] if gemini else None
+    if gemini:
+        return gemini[0]
+    open_responses = opencode_models.get("open-responses") or []
+    return open_responses[0] if open_responses else None
 
 
 def _configured_model(state: dict) -> str | None:
@@ -390,6 +548,7 @@ def build_runtime_env(token: str, state: dict | None = None) -> dict[str, str]:
     env = os.environ.copy()
     env["OAUTH_TOKEN"] = token
     env["XDG_CONFIG_HOME"] = str(OPENCODE_XDG_CONFIG_HOME)
+    env["XDG_DATA_HOME"] = str(OPENCODE_XDG_DATA_HOME)
     return env
 
 

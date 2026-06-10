@@ -14,6 +14,7 @@ def _base_urls() -> dict[str, str]:
     return {
         "anthropic": f"{WS}/ai-gateway/anthropic/v1",
         "gemini": f"{WS}/ai-gateway/gemini/v1beta",
+        "open-responses": f"{WS}/serving-endpoints",
     }
 
 
@@ -151,6 +152,75 @@ class TestRenderOverlay:
         overlay, _ = opencode.render_overlay("gemini-2", "tok", _base_urls(), models)
         assert overlay["model"] == "databricks-google/gemini-2"
 
+    def test_open_responses_provider_added_when_models_present(self):
+        models = {"open-responses": ["databricks-kimi-k2-6-colo"]}
+        overlay, _ = opencode.render_overlay(
+            "databricks-kimi-k2-6-colo", "tok", _base_urls(), models
+        )
+        assert "databricks-open-responses" in overlay["provider"]
+
+    def test_open_responses_base_url_is_serving_endpoints(self):
+        models = {"open-responses": ["databricks-kimi-k2-6-colo"]}
+        overlay, _ = opencode.render_overlay(
+            "databricks-kimi-k2-6-colo", "tok", _base_urls(), models
+        )
+        options = overlay["provider"]["databricks-open-responses"]["options"]
+        assert options["baseURL"] == f"{WS}/serving-endpoints"
+
+    def test_open_responses_uses_openai_npm_package(self):
+        models = {"open-responses": ["databricks-kimi-k2-6-colo"]}
+        overlay, _ = opencode.render_overlay(
+            "databricks-kimi-k2-6-colo", "tok", _base_urls(), models
+        )
+        assert overlay["provider"]["databricks-open-responses"]["npm"] == "@ai-sdk/openai"
+
+    def test_open_responses_omits_api_key_so_loader_runs(self):
+        # OpenCode only calls the plugin auth.loader (which installs the
+        # /responses -> /open-responses fetch rewrite) when it has to resolve
+        # credentials itself. An apiKey in options short-circuits that, so it
+        # must be absent — the loader supplies the token from OAUTH_TOKEN.
+        models = {"open-responses": ["databricks-kimi-k2-6-colo"]}
+        overlay, _ = opencode.render_overlay(
+            "databricks-kimi-k2-6-colo", "tok", _base_urls(), models
+        )
+        options = overlay["provider"]["databricks-open-responses"]["options"]
+        assert "apiKey" not in options
+
+    def test_open_responses_axon_headers(self):
+        models = {"open-responses": ["databricks-kimi-k2-6-colo"]}
+        overlay, _ = opencode.render_overlay(
+            "databricks-kimi-k2-6-colo", "tok", _base_urls(), models
+        )
+        headers = overlay["provider"]["databricks-open-responses"]["options"]["headers"]
+        assert headers["Authorization"] == "Bearer tok"
+        # X-Axon-Mode: ROUTER 502s the -colo endpoint, so it is omitted.
+        assert "X-Axon-Mode" not in headers
+        assert headers["X-Axon-LB-Mode"] == "DICER"
+
+    def test_open_responses_user_agent_header(self, monkeypatch):
+        monkeypatch.setattr(opencode, "ucode_version", lambda: "0.1.0")
+        monkeypatch.setattr(opencode, "agent_version", lambda binary: "0.74.0")
+        models = {"open-responses": ["databricks-kimi-k2-6-colo"]}
+        overlay, _ = opencode.render_overlay(
+            "databricks-kimi-k2-6-colo", "tok", _base_urls(), models
+        )
+        model_headers = overlay["provider"]["databricks-open-responses"]["models"][
+            "databricks-kimi-k2-6-colo"
+        ]["headers"]
+        assert model_headers["User-Agent"] == "ucode/0.1.0 opencode/0.74.0"
+
+    def test_managed_keys_include_open_responses_provider(self):
+        models = {"open-responses": ["databricks-kimi-k2-6-colo"]}
+        _, keys = opencode.render_overlay("databricks-kimi-k2-6-colo", "tok", _base_urls(), models)
+        assert ["provider", "databricks-open-responses"] in keys
+
+    def test_prefixes_open_responses_model_with_provider_id(self):
+        models = {"open-responses": ["databricks-kimi-k2-6-colo"]}
+        overlay, _ = opencode.render_overlay(
+            "databricks-kimi-k2-6-colo", "tok", _base_urls(), models
+        )
+        assert overlay["model"] == "databricks-open-responses/databricks-kimi-k2-6-colo"
+
 
 class TestMcpServerConfig:
     def test_builds_remote_server_entry_with_oauth_token_env_header(self):
@@ -258,6 +328,71 @@ class TestBuildRuntimeEnv:
 
         assert env["XDG_CONFIG_HOME"] == str(opencode.OPENCODE_XDG_CONFIG_HOME)
 
+    def test_sets_ucode_xdg_data_home(self):
+        env = opencode.build_runtime_env("tok")
+
+        assert env["XDG_DATA_HOME"] == str(opencode.OPENCODE_XDG_DATA_HOME)
+
+
+class TestOpenResponsesAuth:
+    def test_write_creates_api_entry(self, tmp_path, monkeypatch):
+        auth_file = tmp_path / "opencode" / "auth.json"
+        monkeypatch.setattr(opencode, "OPENCODE_AUTH_PATH", auth_file)
+
+        opencode._write_open_responses_auth("tok")
+
+        auth = json.loads(auth_file.read_text())
+        assert auth["databricks-open-responses"] == {"type": "api", "key": "tok"}
+
+    def test_write_refreshes_token_and_preserves_others(self, tmp_path, monkeypatch):
+        auth_file = tmp_path / "opencode" / "auth.json"
+        auth_file.parent.mkdir(parents=True, exist_ok=True)
+        auth_file.write_text(
+            json.dumps(
+                {
+                    "databricks-open-responses": {"type": "api", "key": "old"},
+                    "other": {"type": "api", "key": "keep"},
+                }
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(opencode, "OPENCODE_AUTH_PATH", auth_file)
+
+        opencode._write_open_responses_auth("new")
+
+        auth = json.loads(auth_file.read_text())
+        assert auth["databricks-open-responses"]["key"] == "new"
+        assert auth["other"] == {"type": "api", "key": "keep"}
+
+    def test_remove_drops_only_open_responses_entry(self, tmp_path, monkeypatch):
+        auth_file = tmp_path / "opencode" / "auth.json"
+        auth_file.parent.mkdir(parents=True, exist_ok=True)
+        auth_file.write_text(
+            json.dumps(
+                {
+                    "databricks-open-responses": {"type": "api", "key": "old"},
+                    "other": {"type": "api", "key": "keep"},
+                }
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(opencode, "OPENCODE_AUTH_PATH", auth_file)
+
+        opencode._remove_open_responses_auth()
+
+        auth = json.loads(auth_file.read_text())
+        assert "databricks-open-responses" not in auth
+        assert auth["other"] == {"type": "api", "key": "keep"}
+
+    def test_remove_is_noop_when_absent(self, tmp_path, monkeypatch):
+        auth_file = tmp_path / "opencode" / "auth.json"
+        monkeypatch.setattr(opencode, "OPENCODE_AUTH_PATH", auth_file)
+
+        # No file on disk: removal must not raise or create one.
+        opencode._remove_open_responses_auth()
+
+        assert not auth_file.exists()
+
 
 class TestOpencodeDefaultModel:
     def test_prefers_anthropic(self):
@@ -267,6 +402,10 @@ class TestOpencodeDefaultModel:
     def test_falls_back_to_gemini(self):
         state = {"opencode_models": {"anthropic": [], "gemini": ["gemini-2"]}}
         assert opencode.default_model(state) == "gemini-2"
+
+    def test_falls_back_to_open_responses(self):
+        state = {"opencode_models": {"anthropic": [], "gemini": [], "open-responses": ["kimi"]}}
+        assert opencode.default_model(state) == "kimi"
 
     def test_returns_none_when_empty(self):
         assert opencode.default_model({}) is None
@@ -468,3 +607,89 @@ class TestWriteToolConfigStaleProviderCleanup:
 
         written = json.loads(config_file.read_text())
         assert written["plugin"] == ["user-plugin", plugin_path]
+
+    def test_open_responses_plugin_installed_when_kimi_present(self, tmp_path, monkeypatch):
+        import ucode.agents.opencode as oc_mod
+        import ucode.config_io as config_io_mod
+
+        monkeypatch.setattr(config_io_mod, "APP_DIR", tmp_path)
+        config_file = tmp_path / "opencode.json"
+        monkeypatch.setattr(oc_mod, "OPENCODE_CONFIG_PATH", config_file)
+        monkeypatch.setattr(oc_mod, "OPENCODE_BACKUP_PATH", tmp_path / "opencode-backup.json")
+        auth_file = tmp_path / "data" / "opencode" / "auth.json"
+        monkeypatch.setattr(oc_mod, "OPENCODE_AUTH_PATH", auth_file)
+        monkeypatch.setattr(oc_mod, "_ucode_command_prefix", lambda: ["ucode"])
+
+        state = {
+            "workspace": WS,
+            "base_urls": {"opencode": _base_urls()},
+            "opencode_models": {"open-responses": ["databricks-kimi-k2-6-colo"]},
+            "managed_configs": {},
+        }
+
+        with (
+            patch("ucode.agents.opencode.get_databricks_token", return_value="tok"),
+            patch("ucode.agents.opencode.save_state"),
+        ):
+            oc_mod.write_tool_config(state, "databricks-kimi-k2-6-colo", token="tok")
+
+        written = json.loads(config_file.read_text())
+        plugin_path = str(config_file.parent / "plugins" / "ucode-open-responses.mjs")
+        assert plugin_path in written["plugin"]
+        plugin = (config_file.parent / "plugins" / "ucode-open-responses.mjs").read_text()
+        assert "ucode-managed-open-responses-plugin" in plugin
+        assert "databricks-open-responses" in plugin
+        assert "/open-responses" in plugin
+        # The auth entry must exist so OpenCode runs the plugin's auth.loader.
+        auth = json.loads(auth_file.read_text())
+        assert auth["databricks-open-responses"] == {"type": "api", "key": "tok"}
+
+    def test_open_responses_plugin_pruned_when_kimi_absent(self, tmp_path, monkeypatch):
+        import ucode.agents.opencode as oc_mod
+        import ucode.config_io as config_io_mod
+
+        monkeypatch.setattr(config_io_mod, "APP_DIR", tmp_path)
+        config_file = tmp_path / "opencode.json"
+        monkeypatch.setattr(oc_mod, "OPENCODE_CONFIG_PATH", config_file)
+        monkeypatch.setattr(oc_mod, "OPENCODE_BACKUP_PATH", tmp_path / "opencode-backup.json")
+        auth_file = tmp_path / "data" / "opencode" / "auth.json"
+        monkeypatch.setattr(oc_mod, "OPENCODE_AUTH_PATH", auth_file)
+        monkeypatch.setattr(oc_mod, "_ucode_command_prefix", lambda: ["ucode"])
+        # A previously-registered open-responses plugin path that should be dropped
+        # now that no Kimi model is configured.
+        stale_plugin = str(config_file.parent / "plugins" / "ucode-open-responses.mjs")
+        config_file.write_text(
+            json.dumps({"plugin": ["user-plugin", stale_plugin]}), encoding="utf-8"
+        )
+        # A previously-written auth entry that should also be pruned.
+        auth_file.parent.mkdir(parents=True, exist_ok=True)
+        auth_file.write_text(
+            json.dumps(
+                {
+                    "databricks-open-responses": {"type": "api", "key": "stale"},
+                    "other-provider": {"type": "api", "key": "keep"},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        state = {
+            "workspace": WS,
+            "base_urls": {"opencode": _base_urls()},
+            "opencode_models": {"anthropic": ["claude-sonnet"]},
+            "managed_configs": {},
+        }
+
+        with (
+            patch("ucode.agents.opencode.get_databricks_token", return_value="tok"),
+            patch("ucode.agents.opencode.save_state"),
+        ):
+            oc_mod.write_tool_config(state, "claude-sonnet", token="tok")
+
+        written = json.loads(config_file.read_text())
+        assert stale_plugin not in written["plugin"]
+        assert "user-plugin" in written["plugin"]
+        # The open-responses auth entry is removed, unrelated entries preserved.
+        auth = json.loads(auth_file.read_text())
+        assert "databricks-open-responses" not in auth
+        assert auth["other-provider"] == {"type": "api", "key": "keep"}

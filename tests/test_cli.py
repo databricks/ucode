@@ -2239,3 +2239,20 @@ policy:
         cli_mod.configure_shared_state("https://example.databricks.com")
 
         assert installed == []
+
+
+class TestPolicyModelOptionsOpencode:
+    def test_surfaces_open_responses_kimi_model(self):
+        import ucode.cli as cli_mod
+
+        state = {
+            "opencode_models": {
+                "anthropic": ["databricks-claude-sonnet-4-6"],
+                "open-responses": ["databricks-kimi-k2-6-colo"],
+            }
+        }
+        options = cli_mod._policy_model_options("opencode", state)
+        assert (
+            "databricks-kimi-k2-6-colo",
+            "open-responses (databricks-kimi-k2-6-colo)",
+        ) in options

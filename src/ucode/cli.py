@@ -39,6 +39,7 @@ from ucode.databricks import (
     discover_claude_models,
     discover_codex_models,
     discover_gemini_models,
+    discover_kimi_models,
     download_managed_config,
     download_managed_policies,
     ensure_ai_gateway_v2,
@@ -127,6 +128,7 @@ _DISCOVERY_CONSUMERS: dict[str, tuple[str, ...]] = {
     "claude": ("claude", "opencode", "copilot", "pi"),
     "codex": ("codex", "copilot", "pi"),
     "gemini": ("gemini", "opencode", "pi"),
+    "open-responses": ("opencode",),
 }
 
 # Agents that record local spend and therefore have a daily budget to report.
@@ -146,7 +148,12 @@ def _print_discovery_diagnostics(state: dict) -> None:
     reasons = state.get("_discovery_reasons") or {}
     if not reasons:
         return
-    labels = {"claude": "Claude models", "codex": "Codex models", "gemini": "Gemini models"}
+    labels = {
+        "claude": "Claude models",
+        "codex": "Codex models",
+        "gemini": "Gemini models",
+        "open-responses": "Kimi (open-responses) models",
+    }
     for source, reason in reasons.items():
         consumers = ", ".join(_DISCOVERY_CONSUMERS.get(source, ()))
         label = labels.get(source, source)
@@ -275,10 +282,12 @@ def configure_shared_state(
     )
     want_gemini = fetch_all or "gemini" in tools or "opencode" in tools or "pi" in tools
     want_codex = fetch_all or "codex" in tools or "copilot" in tools or "pi" in tools
+    want_open_responses = fetch_all or "opencode" in tools
 
     claude_reason: str | None = None
     gemini_reason: str | None = None
     codex_reason: str | None = None
+    kimi_reason: str | None = None
     with spinner("Fetching available models..."):
         if want_claude:
             claude_models, claude_reason = discover_claude_models(workspace, token)
@@ -292,11 +301,17 @@ def configure_shared_state(
             codex_models, codex_reason = discover_codex_models(workspace, token)
         else:
             codex_models = []
+        if want_open_responses:
+            kimi_models, kimi_reason = discover_kimi_models(workspace, token)
+        else:
+            kimi_models = []
     opencode_models: dict[str, list[str]] = {}
     if claude_models:
         opencode_models["anthropic"] = list(claude_models.values())
     if gemini_models:
         opencode_models["gemini"] = gemini_models
+    if kimi_models:
+        opencode_models["open-responses"] = kimi_models
 
     # Merge into existing workspace state so prior tool configs are preserved.
     state = load_state()
@@ -365,6 +380,7 @@ def configure_shared_state(
         "claude": claude_reason,
         "gemini": gemini_reason,
         "codex": codex_reason,
+        "open-responses": kimi_reason,
     }
     return state
 
@@ -1464,7 +1480,7 @@ def _policy_model_options(harness: str, state: dict) -> list[tuple[str, str]]:
         if not isinstance(opencode_models, dict):
             return []
         options: list[tuple[str, str]] = []
-        for provider in ("anthropic", "gemini"):
+        for provider in ("anthropic", "gemini", "open-responses"):
             models = opencode_models.get(provider) or []
             if isinstance(models, list):
                 options.extend(
