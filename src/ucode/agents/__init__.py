@@ -71,10 +71,11 @@ def normalize_tool(tool: str) -> str:
     return normalized
 
 
-def _update_installed_tool_binary(tool: str) -> bool:
+def _update_installed_tool_binary(tool: str, version: str | None = None) -> bool:
     spec = TOOL_SPECS[tool]
     binary = spec["binary"]
     package = spec["package"]
+    target = f"{package}@{version}" if version else package
 
     if not shutil.which("npm"):
         print_warning(f"`npm` is not available to update {spec['display']}; continuing.")
@@ -82,7 +83,7 @@ def _update_installed_tool_binary(tool: str) -> bool:
 
     print_note(f"Updating {spec['display']}...")
     try:
-        subprocess.run(["npm", "install", "-g", package], check=True, timeout=300)
+        subprocess.run(["npm", "install", "-g", target], check=True, timeout=300)
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
         print_warning(f"Could not update {spec['display']}; continuing.")
         return False
@@ -116,6 +117,38 @@ def _confirm_update_installed_tool_binary(tool: str) -> bool:
     return prompt_yes_no(f"(Optional) Update {spec['display']} from {current} to {latest}?")
 
 
+def _too_new_downgrade(tool: str) -> tuple[str, str] | None:
+    """Return (installed_version, downgrade_target) when the installed tool is
+    too new to work, or None. Agents opt in by defining `too_new_downgrade`."""
+    checker = getattr(_MODULES[tool], "too_new_downgrade", None)
+    if not callable(checker):
+        return None
+    return checker()
+
+
+def _maybe_downgrade_too_new_tool(tool: str, *, prompt: bool) -> bool:
+    """Warn when the installed tool exceeds its supported version and offer to
+    downgrade to the latest working release. Returns True when the tool was too
+    new (regardless of whether the client accepted the downgrade).
+
+    Unlike a required *upgrade*, a too-new build may still launch (it just
+    misbehaves), so we never force the change — we warn and, when prompting is
+    enabled, let the client press `y` to downgrade.
+    """
+    downgrade = _too_new_downgrade(tool)
+    if not downgrade:
+        return False
+    spec = TOOL_SPECS[tool]
+    installed, target = downgrade
+    print_warning(
+        f"{spec['display']} {installed} is newer than the latest version known to work "
+        f"with the Databricks AI Gateway ({target})."
+    )
+    if prompt and prompt_yes_no(f"Downgrade {spec['display']} from {installed} to {target}?"):
+        _update_installed_tool_binary(tool, version=target)
+    return True
+
+
 def install_tool_binary(
     tool: str,
     *,
@@ -128,7 +161,12 @@ def install_tool_binary(
     package = spec["package"]
 
     if shutil.which(binary):
-        if update_existing:
+        # A too-new build is a correctness blocker (the tool runs but misbehaves
+        # against the gateway), so check it on every launch — not just when
+        # auto-configuring — mirroring the minimum-version gate below.
+        too_new = _maybe_downgrade_too_new_tool(tool, prompt=prompt_optional_updates)
+
+        if update_existing and not too_new:
             required_update = _required_update_message(tool)
             if required_update:
                 # Required updates are forced regardless of prompt preference;

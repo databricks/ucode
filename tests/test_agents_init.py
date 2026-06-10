@@ -339,6 +339,87 @@ class TestInstallToolBinary:
         )
         assert calls and calls[0][:3] == ["npm", "install", "-g"]
 
+    def test_too_new_tool_warns_and_downgrades_on_confirm(self, monkeypatch, capsys):
+        """An installed build past its supported ceiling is offered as a
+        downgrade (to a pinned working version), not an upgrade."""
+        calls: list[list[str]] = []
+        prompt_calls: list[str] = []
+
+        def fake_which(binary: str) -> str | None:
+            return f"/usr/bin/{binary}"
+
+        def fake_run(args, **kwargs):
+            calls.append(args)
+            return subprocess.CompletedProcess(args, 0)
+
+        monkeypatch.setattr("ucode.agents.shutil.which", fake_which)
+        monkeypatch.setattr("ucode.agents.subprocess.run", fake_run)
+        monkeypatch.setattr("ucode.agents.gemini.too_new_downgrade", lambda: ("0.45.0", "0.44.1"))
+        # The optional-update path must never be reached for a too-new tool.
+        monkeypatch.setattr(
+            "ucode.agents._confirm_update_installed_tool_binary",
+            lambda _: (_ for _ in ()).throw(AssertionError("should not reach optional update")),
+        )
+        monkeypatch.setattr(
+            "ucode.agents.prompt_yes_no", lambda prompt: prompt_calls.append(prompt) or True
+        )
+
+        assert install_tool_binary("gemini", strict=False, update_existing=True) is True
+        assert prompt_calls == ["Downgrade Gemini CLI from 0.45.0 to 0.44.1?"]
+        assert calls == [["npm", "install", "-g", "@google/gemini-cli@0.44.1"]]
+        out = capsys.readouterr().out
+        assert "newer than the latest version known to work" in out
+
+    def test_too_new_tool_warns_but_keeps_version_on_decline(self, monkeypatch, capsys):
+        calls: list[list[str]] = []
+
+        def fake_which(binary: str) -> str | None:
+            return f"/usr/bin/{binary}"
+
+        def fake_run(args, **kwargs):
+            calls.append(args)
+            return subprocess.CompletedProcess(args, 0)
+
+        monkeypatch.setattr("ucode.agents.shutil.which", fake_which)
+        monkeypatch.setattr("ucode.agents.subprocess.run", fake_run)
+        monkeypatch.setattr("ucode.agents.gemini.too_new_downgrade", lambda: ("0.45.0", "0.44.1"))
+        monkeypatch.setattr("ucode.agents.prompt_yes_no", lambda prompt: False)
+
+        assert install_tool_binary("gemini", strict=False, update_existing=True) is True
+        assert calls == []
+        assert "newer than the latest version known to work" in capsys.readouterr().out
+
+    def test_too_new_tool_warns_without_prompt_when_updates_disabled(self, monkeypatch, capsys):
+        """With prompts suppressed we still warn, but never downgrade."""
+        calls: list[list[str]] = []
+
+        def fake_which(binary: str) -> str | None:
+            return f"/usr/bin/{binary}"
+
+        def fake_run(args, **kwargs):
+            calls.append(args)
+            return subprocess.CompletedProcess(args, 0)
+
+        monkeypatch.setattr("ucode.agents.shutil.which", fake_which)
+        monkeypatch.setattr("ucode.agents.subprocess.run", fake_run)
+        monkeypatch.setattr("ucode.agents.gemini.too_new_downgrade", lambda: ("0.45.0", "0.44.1"))
+        monkeypatch.setattr(
+            "ucode.agents.prompt_yes_no",
+            lambda prompt: (_ for _ in ()).throw(AssertionError("should not prompt")),
+        )
+
+        assert (
+            install_tool_binary(
+                "gemini",
+                strict=False,
+                update_existing=True,
+                prompt_optional_updates=False,
+            )
+            is True
+        )
+        assert calls == []
+        assert "newer than the latest version known to work" in capsys.readouterr().out
+
     def test_update_failure_keeps_existing_binary_available(self, monkeypatch):
         def fake_which(binary: str) -> str | None:
             return f"/usr/bin/{binary}"

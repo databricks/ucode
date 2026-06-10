@@ -478,14 +478,6 @@ class TestClaudeLaunch:
 class TestGeminiLaunch:
     """Run gemini against every available gemini model."""
 
-    @pytest.mark.skipif(
-        os.environ.get("GITHUB_ACTIONS") == "true",
-        reason=(
-            "Skipped in CI: the gemini CLI version installed on the runner rewrites "
-            "model ids like 'databricks-gemini-3-5-flash' to 'gemini-3.5-flash', which "
-            "Unity Catalog rejects as an invalid endpoint name. Tracked separately."
-        ),
-    )
     def test_launch_gemini_per_model(
         self, tmp_path, monkeypatch, e2e_state, e2e_workspace, e2e_token
     ):
@@ -493,6 +485,17 @@ class TestGeminiLaunch:
         from ucode.agents import gemini, validate_tool
 
         _require_binary("gemini")
+        # Gemini CLI >= 0.45 rewrites forced flash model ids (e.g.
+        # 'databricks-gemini-3-5-flash') to 'gemini-3.5-flash', which Unity
+        # Catalog rejects. ucode caps the supported version below 0.45 and
+        # offers a downgrade; skip here if the runner still has a too-new build
+        # rather than asserting against a version we deliberately don't support.
+        too_new = gemini.too_new_version()
+        if too_new is not None:
+            pytest.skip(
+                f"Installed Gemini CLI {too_new} is past the supported ceiling "
+                f"({gemini.MAX_GEMINI_VERSION_TEXT}); run `ucode gemini` to downgrade."
+            )
         gemini_models: list = e2e_state.get("gemini_models") or []
         if not gemini_models:
             pytest.skip("No Gemini models available on this workspace")
