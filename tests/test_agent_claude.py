@@ -41,6 +41,14 @@ class TestRenderOverlay:
         overlay, _ = claude.render_overlay(WS, "databricks-claude-opus-4-7[1m]")
         assert overlay["env"]["ANTHROPIC_MODEL"] == "databricks-claude-opus-4-7[1m]"
 
+    def test_adds_1m_suffix_for_model_services_name(self):
+        overlay, _ = claude.render_overlay(WS, "system.ai.claude-opus-4-8")
+        assert overlay["env"]["ANTHROPIC_MODEL"] == "system.ai.claude-opus-4-8[1m]"
+
+    def test_no_1m_suffix_for_model_services_haiku(self):
+        overlay, _ = claude.render_overlay(WS, "system.ai.claude-haiku-4-6")
+        assert overlay["env"]["ANTHROPIC_MODEL"] == "system.ai.claude-haiku-4-6"
+
     def test_sets_anthropic_base_url(self):
         overlay, _ = claude.render_overlay(WS, "s4")
         assert overlay["env"]["ANTHROPIC_BASE_URL"] == f"{WS}/ai-gateway/anthropic"

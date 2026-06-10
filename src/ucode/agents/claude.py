@@ -62,7 +62,11 @@ def _resolve_web_search_model(state: dict) -> str | None:
 
 
 WEB_SEARCH_MCP_NAME = "web_search"
-_CLAUDE_MODEL_RE = re.compile(r"^databricks-claude-(opus|sonnet)-(\d+)-(\d+)(.*)$")
+# Matches both the AI Gateway form (`databricks-claude-opus-4-8`) and the UC
+# model-services form (`system.ai.claude-opus-4-8`).
+_CLAUDE_MODEL_RE = re.compile(
+    r"^(?:system\.ai\.)?(?:databricks-)?claude-(opus|sonnet)-(\d+)-(\d+)(.*)$"
+)
 
 # Env keys the MLflow Stop hook reads to route traces. Written into the
 # settings `env` block alongside the hook itself.

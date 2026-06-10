@@ -33,6 +33,7 @@ from ucode.databricks import (
     discover_claude_models,
     discover_codex_models,
     discover_gemini_models,
+    discover_model_services,
     ensure_ai_gateway_v2,
     ensure_databricks_auth,
     find_profile_name_for_host,
@@ -41,6 +42,7 @@ from ucode.databricks import (
     install_databricks_cli,
     normalize_workspace_url,
     run_databricks_login,
+    use_model_services,
 )
 from ucode.mcp import (
     MCP_CLIENTS,
@@ -160,7 +162,13 @@ def configure_shared_state(
     don't error out. If ``None``, we resolve it from the host after login.
     """
     workspace = normalize_workspace_url(workspace)
-    previous_workspace = load_state().get("workspace")
+    prior_state = load_state()
+    previous_workspace = prior_state.get("workspace")
+    # The flag is sticky: an explicit env var wins, otherwise fall back to what
+    # was persisted when the workspace was configured. Without this, every
+    # launch re-runs discovery and a missing env var would silently revert a
+    # model-services workspace to the databricks-* gateway names.
+    model_services = use_model_services(default=bool(prior_state.get("use_model_services")))
     fetch_all = tools is None
     if force_login:
         run_databricks_login(workspace, profile)
@@ -184,19 +192,29 @@ def configure_shared_state(
     claude_reason: str | None = None
     gemini_reason: str | None = None
     codex_reason: str | None = None
-    with spinner("Fetching available models..."):
+    claude_models = {}
+    gemini_models = []
+    codex_models = []
+    if model_services:
+        # Opt-in: one UC model-services call yields all families as
+        # `system.ai.<model-name>` ids, bucketed by name. The single reason is
+        # shared across the families that were requested.
+        with spinner("Fetching available models (model services)..."):
+            ms_claude, ms_codex, ms_gemini, ms_reason = discover_model_services(workspace, token)
         if want_claude:
-            claude_models, claude_reason = discover_claude_models(workspace, token)
-        else:
-            claude_models = {}
+            claude_models, claude_reason = ms_claude, ms_reason
         if want_gemini:
-            gemini_models, gemini_reason = discover_gemini_models(workspace, token)
-        else:
-            gemini_models = []
+            gemini_models, gemini_reason = ms_gemini, ms_reason
         if want_codex:
-            codex_models, codex_reason = discover_codex_models(workspace, token)
-        else:
-            codex_models = []
+            codex_models, codex_reason = ms_codex, ms_reason
+    else:
+        with spinner("Fetching available models..."):
+            if want_claude:
+                claude_models, claude_reason = discover_claude_models(workspace, token)
+            if want_gemini:
+                gemini_models, gemini_reason = discover_gemini_models(workspace, token)
+            if want_codex:
+                codex_models, codex_reason = discover_codex_models(workspace, token)
     opencode_models: dict[str, list[str]] = {}
     if claude_models:
         opencode_models["anthropic"] = list(claude_models.values())
@@ -210,6 +228,9 @@ def configure_shared_state(
         state["profile"] = profile
     else:
         state.pop("profile", None)
+    # Persist the resolved flag so subsequent launches stay on the same
+    # discovery path without the env var being re-exported.
+    state["use_model_services"] = model_services
     state["base_urls"] = build_shared_base_urls(workspace)
     if want_claude:
         state["claude_models"] = claude_models
