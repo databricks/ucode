@@ -4,6 +4,10 @@
 from __future__ import annotations
 
 import json
+import os
+import shlex
+import shutil
+import subprocess
 from pathlib import Path
 from typing import Annotated, cast
 
@@ -1193,6 +1197,88 @@ def _apply_budget_gate(
     return "default", None, None
 
 
+DEFAULT_WATCH_INTERVAL = 10
+
+
+def _extract_watch_flags(args: list[str]) -> tuple[bool, int, list[str]]:
+    """Pull ``--watch`` / ``--watch-interval N`` out of forwarded agent args.
+
+    Agent subcommands forward unknown options straight to the underlying agent,
+    so these flags must be parsed out here before launch. Returns
+    ``(watch, interval_seconds, remaining_args)``. Defaults: ``watch=False``,
+    ``interval=DEFAULT_WATCH_INTERVAL``. Supports both ``--watch-interval N`` and
+    ``--watch-interval=N``; a missing or invalid interval falls back to the
+    default.
+    """
+    watch = False
+    interval = DEFAULT_WATCH_INTERVAL
+    remaining: list[str] = []
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--watch":
+            watch = True
+        elif arg == "--watch-interval":
+            if i + 1 < len(args):
+                interval = _parse_watch_interval(args[i + 1])
+                i += 1
+        elif arg.startswith("--watch-interval="):
+            interval = _parse_watch_interval(arg.split("=", 1)[1])
+        else:
+            remaining.append(arg)
+        i += 1
+    return watch, interval, remaining
+
+
+def _parse_watch_interval(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError:
+        return DEFAULT_WATCH_INTERVAL
+    return parsed if parsed > 0 else DEFAULT_WATCH_INTERVAL
+
+
+def _in_tmux() -> bool:
+    return bool(os.environ.get("TMUX"))
+
+
+def _tmux_available() -> bool:
+    return shutil.which("tmux") is not None
+
+
+def _launch_in_tmux_split(tool_name: str, agent_args: list[str], interval: int) -> None:
+    """Launch the agent in a tmux split with a live budget-status watcher.
+
+    Left pane runs ``ucode <agent> [args]`` (without the watch flags); the
+    right pane re-renders ``ucode usage budget-status`` every ``interval``
+    seconds.
+    """
+    agent_cmd = shlex.join(["ucode", tool_name, *agent_args])
+    watch_cmd = f"while true; do clear; ucode usage budget-status; sleep {interval}; done"
+    print_success(
+        f"Launching {TOOL_SPECS[tool_name]['display']} in a tmux split "
+        f"with a budget watcher (refreshing every {interval}s)."
+    )
+    result = subprocess.run(
+        [
+            "tmux",
+            "new-session",
+            agent_cmd,
+            ";",
+            "split-window",
+            "-h",
+            watch_cmd,
+            ";",
+            "select-pane",
+            "-L",
+        ],
+        check=False,
+    )
+    if result.returncode != 0:
+        print_err(f"tmux exited with status {result.returncode}.")
+        raise typer.Exit(result.returncode)
+
+
 def _launch_tool(
     tool_name: str,
     ctx: typer.Context,
@@ -1205,6 +1291,15 @@ def _launch_tool(
     if prompt_optional_updates is None:
         prompt_optional_updates = not is_skip_update()
     try:
+        watch, watch_interval, ctx.args = _extract_watch_flags(list(ctx.args))
+        if watch and not _budget_redirected:
+            if not _tmux_available():
+                print_warning("tmux is not installed — launching without the budget watcher.")
+            elif _in_tmux():
+                print_note("Already inside tmux — launching without an extra budget-watcher split.")
+            else:
+                _launch_in_tmux_split(tool_name, ctx.args, watch_interval)
+                return
         tool = normalize_tool(tool_name)
         existing = load_state()
         needs_auto_configure = not existing.get("workspace") or tool not in (
@@ -2375,8 +2470,6 @@ def usage_hook_cmd(
 @app.command("upgrade")
 def upgrade_cmd() -> None:
     """Upgrade ucode to the latest version from GitHub."""
-    import subprocess
-
     git_url = "git+https://github.com/databricks/ucode"
     print_section("Upgrade")
     print_kv("Source", git_url)

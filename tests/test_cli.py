@@ -1593,6 +1593,122 @@ class TestPassthroughArgs:
         assert forwarded == []
 
 
+class TestWatchFlag:
+    """`ucode <agent> --watch` wraps the launch in a tmux split with a budget watcher."""
+
+    @staticmethod
+    def _tmux_argv(mock_run):
+        assert mock_run.called, "tmux subprocess.run was not invoked"
+        return mock_run.call_args[0][0]
+
+    def test_watch_flag_invokes_tmux(self):
+        with (
+            patch("ucode.cli._tmux_available", return_value=True),
+            patch("ucode.cli._in_tmux", return_value=False),
+            patch("ucode.cli.subprocess.run") as mock_run,
+            patch("ucode.cli.launch_agent") as mock_launch,
+        ):
+            mock_run.return_value.returncode = 0
+            result = runner.invoke(app, ["claude", "--watch"])
+        assert result.exit_code == 0, result.output
+        argv = self._tmux_argv(mock_run)
+        assert argv[0] == "tmux"
+        assert "new-session" in argv
+        assert "split-window" in argv
+        assert "-h" in argv
+        assert any("budget-status" in part for part in argv)
+        # We return early before the in-place launch.
+        mock_launch.assert_not_called()
+
+    def test_watch_default_interval_is_10(self):
+        with (
+            patch("ucode.cli._tmux_available", return_value=True),
+            patch("ucode.cli._in_tmux", return_value=False),
+            patch("ucode.cli.subprocess.run") as mock_run,
+        ):
+            mock_run.return_value.returncode = 0
+            runner.invoke(app, ["claude", "--watch"])
+        argv = self._tmux_argv(mock_run)
+        assert any("sleep 10" in part for part in argv)
+
+    def test_watch_interval_custom(self):
+        with (
+            patch("ucode.cli._tmux_available", return_value=True),
+            patch("ucode.cli._in_tmux", return_value=False),
+            patch("ucode.cli.subprocess.run") as mock_run,
+        ):
+            mock_run.return_value.returncode = 0
+            runner.invoke(app, ["claude", "--watch", "--watch-interval", "30"])
+        argv = self._tmux_argv(mock_run)
+        assert any("sleep 30" in part for part in argv)
+
+    def test_watch_interval_equals_form(self):
+        with (
+            patch("ucode.cli._tmux_available", return_value=True),
+            patch("ucode.cli._in_tmux", return_value=False),
+            patch("ucode.cli.subprocess.run") as mock_run,
+        ):
+            mock_run.return_value.returncode = 0
+            runner.invoke(app, ["claude", "--watch", "--watch-interval=45"])
+        argv = self._tmux_argv(mock_run)
+        assert any("sleep 45" in part for part in argv)
+
+    def test_watch_strips_flags_from_agent_args(self):
+        with (
+            patch("ucode.cli._tmux_available", return_value=True),
+            patch("ucode.cli._in_tmux", return_value=False),
+            patch("ucode.cli.subprocess.run") as mock_run,
+        ):
+            mock_run.return_value.returncode = 0
+            runner.invoke(app, ["claude", "--watch", "--watch-interval", "20", "--resume"])
+        argv = self._tmux_argv(mock_run)
+        # The left-pane agent command keeps real agent args but not the watch flags.
+        agent_cmd = next(part for part in argv if part.startswith("ucode claude"))
+        assert "--resume" in agent_cmd
+        assert "--watch" not in agent_cmd
+        assert "--watch-interval" not in agent_cmd
+
+    def test_watch_falls_back_when_no_tmux(self):
+        patches = _patch_launch("claude")
+        with (
+            patches[0],
+            patches[1],
+            patches[2],
+            patches[3],
+            patches[4],
+            patches[5],
+            patches[6] as mock_launch,
+            patch("ucode.cli._tmux_available", return_value=False),
+            patch("ucode.cli.subprocess.run") as mock_run,
+        ):
+            result = runner.invoke(app, ["claude", "--watch"])
+        assert result.exit_code == 0, result.output
+        mock_launch.assert_called_once()
+        mock_run.assert_not_called()
+        # The watch flag must not leak through to the agent.
+        assert mock_launch.call_args[0][2] == []
+
+    def test_watch_falls_back_when_already_in_tmux(self):
+        patches = _patch_launch("claude")
+        with (
+            patches[0],
+            patches[1],
+            patches[2],
+            patches[3],
+            patches[4],
+            patches[5],
+            patches[6] as mock_launch,
+            patch("ucode.cli._tmux_available", return_value=True),
+            patch("ucode.cli._in_tmux", return_value=True),
+            patch("ucode.cli.subprocess.run") as mock_run,
+        ):
+            result = runner.invoke(app, ["claude", "--watch"])
+        assert result.exit_code == 0, result.output
+        mock_launch.assert_called_once()
+        mock_run.assert_not_called()
+        assert mock_launch.call_args[0][2] == []
+
+
 class TestConfigureAgentFlag:
     def test_no_flag_calls_configure_all(self):
         with (
