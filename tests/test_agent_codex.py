@@ -264,6 +264,12 @@ class TestCodexUsageBudgetHook:
             "command": "ucode usage hook codex prompt-submit --model gpt-5.5 --workspace https://example.databricks.com",
             "timeout": 10,
         }
+        stop_hook = written["hooks"]["Stop"][0]["hooks"][0]
+        assert stop_hook == {
+            "type": "command",
+            "command": "ucode usage hook codex stop --model gpt-5.5 --workspace https://example.databricks.com",
+            "timeout": 10,
+        }
 
     def test_preserves_existing_prompt_hooks_and_replaces_old_ucode_hook(
         self, tmp_path, monkeypatch
@@ -305,6 +311,23 @@ class TestCodexUsageBudgetHook:
         )
         assert len(prompt_hooks) == 2
         assert backup_path.exists()
+
+    def test_reapply_replaces_old_stop_hook_without_duplicating(self, tmp_path, monkeypatch):
+        hooks_path = tmp_path / ".codex" / "hooks.json"
+        backup_path = tmp_path / "codex-hooks.backup.json"
+        monkeypatch.setattr(codex, "CODEX_HOOKS_PATH", hooks_path)
+        monkeypatch.setattr(codex, "CODEX_HOOKS_BACKUP_PATH", backup_path)
+        monkeypatch.setattr(codex, "_ucode_command_prefix", lambda: ["ucode"])
+
+        codex._apply_usage_budget_hook(WS, "gpt-5.5")
+        codex._apply_usage_budget_hook(WS, "gpt-5.5")
+
+        stop_hooks = json.loads(hooks_path.read_text())["hooks"]["Stop"]
+        assert len(stop_hooks) == 1
+        assert (
+            stop_hooks[0]["hooks"][0]["command"]
+            == "ucode usage hook codex stop --model gpt-5.5 --workspace https://example.databricks.com"
+        )
 
 
 class TestCodexLegacyLayoutDetection:

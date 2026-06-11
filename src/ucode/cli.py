@@ -2469,7 +2469,7 @@ def usage_hook_cmd(
     agent: Annotated[str, typer.Argument(help="Hook adapter: claude or codex.")],
     event: Annotated[
         str,
-        typer.Argument(help="Hook event: prompt-submit, post-tool, or notify."),
+        typer.Argument(help="Hook event: prompt-submit, post-tool, stop, or notify."),
     ],
     model: Annotated[str, typer.Option("--model", help="Model or endpoint name.")],
     workspace: Annotated[str | None, typer.Option("--workspace")] = None,

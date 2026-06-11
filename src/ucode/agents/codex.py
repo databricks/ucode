@@ -310,7 +310,7 @@ def _ucode_command_prefix() -> list[str]:
     return [shutil.which("ucode") or "ucode"]
 
 
-def _usage_budget_hook_command(workspace: str, model: str | None) -> str:
+def _usage_budget_hook_command(workspace: str, model: str | None, event: str) -> str:
     chosen_model = model or "codex"
     return " ".join(
         [
@@ -318,7 +318,7 @@ def _usage_budget_hook_command(workspace: str, model: str | None) -> str:
             "usage",
             "hook",
             "codex",
-            "prompt-submit",
+            event,
             "--model",
             shlex.quote(chosen_model),
             "--workspace",
@@ -333,25 +333,23 @@ def _is_ucode_usage_budget_hook(value: object) -> bool:
     hook = cast(Mapping[str, object], value)
     command = hook.get("command")
     return isinstance(command, str) and (
-        "usage hook codex prompt-submit" in command or "usage budget-check --agent codex" in command
+        "usage hook codex prompt-submit" in command
+        or "usage hook codex stop" in command
+        or "usage budget-check --agent codex" in command
     )
 
 
-def _apply_usage_budget_hook(workspace: str, model: str | None) -> None:
-    """Block new Codex prompts once the local Codex budget is exceeded."""
-    backup_existing_file(CODEX_HOOKS_PATH, CODEX_HOOKS_BACKUP_PATH)
-    doc = read_json_safe(CODEX_HOOKS_PATH)
-    hooks = doc.setdefault("hooks", {})
-    if not isinstance(hooks, dict):
-        hooks = {}
-        doc["hooks"] = hooks
-    prompt_blocks = hooks.setdefault("UserPromptSubmit", [])
-    if not isinstance(prompt_blocks, list):
-        prompt_blocks = []
-        hooks["UserPromptSubmit"] = prompt_blocks
+def _register_budget_hook_event(
+    hooks: dict, event_name: str, command: str
+) -> None:
+    """Replace ucode's budget hook for one Codex hook event, preserving others."""
+    blocks = hooks.setdefault(event_name, [])
+    if not isinstance(blocks, list):
+        blocks = []
+        hooks[event_name] = blocks
 
     filtered_blocks = []
-    for block in prompt_blocks:
+    for block in blocks:
         if not isinstance(block, dict):
             filtered_blocks.append(block)
             continue
@@ -369,13 +367,35 @@ def _apply_usage_budget_hook(workspace: str, model: str | None) -> None:
             "hooks": [
                 {
                     "type": "command",
-                    "command": _usage_budget_hook_command(workspace, model),
+                    "command": command,
                     "timeout": 10,
                 }
             ]
         }
     )
-    hooks["UserPromptSubmit"] = filtered_blocks
+    hooks[event_name] = filtered_blocks
+
+
+def _apply_usage_budget_hook(workspace: str, model: str | None) -> None:
+    """Warn/block on the local Codex budget.
+
+    Enforcement runs on ``UserPromptSubmit`` (blocks the next prompt once the
+    budget is exceeded). A second warning fires on ``Stop`` so spend from the
+    turn that just finished surfaces immediately, rather than only on the next
+    prompt submission.
+    """
+    backup_existing_file(CODEX_HOOKS_PATH, CODEX_HOOKS_BACKUP_PATH)
+    doc = read_json_safe(CODEX_HOOKS_PATH)
+    hooks = doc.setdefault("hooks", {})
+    if not isinstance(hooks, dict):
+        hooks = {}
+        doc["hooks"] = hooks
+    _register_budget_hook_event(
+        hooks, "UserPromptSubmit", _usage_budget_hook_command(workspace, model, "prompt-submit")
+    )
+    _register_budget_hook_event(
+        hooks, "Stop", _usage_budget_hook_command(workspace, model, "stop")
+    )
     write_json_file(CODEX_HOOKS_PATH, doc)
 
 
