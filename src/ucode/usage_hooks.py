@@ -539,12 +539,29 @@ def sync_opencode_usage_from_messages(
     return imported
 
 
+def _codex_budget_message(status: dict[str, object]) -> str:
+    """Format the budget message for Codex's single-line, plain-text rendering.
+
+    Codex renders the hook message on one line with no markdown: it collapses
+    the headline/detail newline and the variation-selector ``⚠️`` glyph crowds
+    the word after it (mirrors the two-space workaround at ``usage.py``'s rich
+    headline). Widen the emoji gap and turn the line break into a visible gap.
+    """
+    message = format_local_budget_hook_status(status)
+    return message.replace("⚠️ ", "⚠️  ").replace("⛔ ", "⛔  ").replace("\n", "  ")
+
+
 def _hook_response_for_budget(
-    status: dict[str, object], *, can_block: bool = False, quiet_warn: bool = False
+    status: dict[str, object],
+    *,
+    can_block: bool = False,
+    quiet_warn: bool = False,
+    message: str | None = None,
 ) -> dict[str, object]:
     state = str(status.get("state") or "ok")
     behavior = status.get("on_budget_exhausted") or "block"
-    message = format_local_budget_hook_status(status)
+    if message is None:
+        message = format_local_budget_hook_status(status)
     if state in {"warn", "exceeded"} and (state == "warn" or behavior == "warn"):
         if quiet_warn:
             return {
@@ -630,10 +647,12 @@ def codex_usage_hook(
         )
     if event in {"prompt-submit", "user-prompt-submit"}:
         sync_codex_usage_from_state(workspace=workspace, session_id=session_id)
+        status = local_budget_status("codex")
         return _hook_response_for_budget(
-            local_budget_status("codex"),
+            status,
             can_block=True,
             quiet_warn=True,
+            message=_codex_budget_message(status),
         )
     if event == "stop":
         # Fires at turn end so spend from the turn that just finished surfaces
@@ -642,7 +661,7 @@ def codex_usage_hook(
         sync_codex_usage_from_state(workspace=workspace, session_id=session_id)
         status = local_budget_status("codex")
         if str(status.get("state") or "ok") in {"warn", "exceeded"}:
-            return {"systemMessage": format_local_budget_hook_status(status)}
+            return {"systemMessage": _codex_budget_message(status)}
         return {}
     # The notify callback only records spend — it must not surface the budget
     # warning, or the message would appear twice (once here, once from the

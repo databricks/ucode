@@ -293,7 +293,7 @@ def test_codex_prompt_submit_blocks_with_valid_prompt_json(monkeypatch):
     )
 
     assert response["decision"] == "block"
-    assert "⛔ Daily budget — limit exceeded" in response["reason"]
+    assert "⛔  Daily budget — limit exceeded" in response["reason"]
     assert "further tool use blocked today" in response["reason"]
     assert "Tokens used today" not in response["reason"]
     assert "Window:" not in response["reason"]
@@ -327,7 +327,7 @@ def test_codex_prompt_submit_warns_when_budget_exceeded_policy_warn(monkeypatch)
         "hookSpecificOutput": {
             "hookEventName": "UserPromptSubmit",
             "additionalContext": (
-                "⚠️ Daily budget — limit exceeded\n"
+                "⚠️  Daily budget — limit exceeded  "
                 "$2.00 / $1.00 (200%)  ▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰  "
                 "continuing because policy is warn"
             ),
@@ -389,7 +389,7 @@ def test_codex_prompt_submit_returns_warning_additional_context(monkeypatch):
         "hookSpecificOutput": {
             "hookEventName": "UserPromptSubmit",
             "additionalContext": (
-                "⚠️ Daily budget — nearing limit\n"
+                "⚠️  Daily budget — nearing limit  "
                 "$0.90 / $1.00 (90%)  ▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▱▱  $0.10 left"
             ),
         }
@@ -427,7 +427,7 @@ def test_codex_stop_warns_visibly_at_turn_end(monkeypatch):
     )
 
     assert synced and synced[0]["session_id"] == "s2"
-    assert response["systemMessage"].startswith("⚠️ Daily budget — nearing limit")
+    assert response["systemMessage"].startswith("⚠️  Daily budget — nearing limit")
 
 
 def test_codex_stop_does_not_block_when_budget_exceeded(monkeypatch):
