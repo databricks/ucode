@@ -13,6 +13,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Literal, cast, overload
 from urllib import error as urllib_error
@@ -956,7 +957,29 @@ def list_databricks_apps(workspace: str, profile: str | None = None) -> list[dic
 
 
 def build_auth_shell_command(workspace: str, profile: str | None = None) -> str:
-    workspace_arg = shlex.quote(workspace.rstrip("/"))
+    workspace_clean = workspace.rstrip("/")
+
+    if os.name == "nt":
+        # On Windows, Claude Code runs apiKeyHelper via cmd.exe, which does not
+        # understand POSIX syntax ([ -n "$VAR" ], env -u, jq pipes). Instead we
+        # delegate to the Python interpreter that is running ucode — it is always
+        # available, handles DATABRICKS_BEARER short-circuit, and parses the JSON
+        # token response without requiring jq on PATH.
+        python_exe = sys.executable
+        databricks_exe = shutil.which("databricks") or "databricks"
+        profile_part = f", '--profile', {profile!r}" if profile else ""
+        helper_code = (
+            "import json, os, subprocess, sys; "
+            "bearer=os.environ.get('DATABRICKS_BEARER'); "
+            "sys.exit(print(bearer) or 0) if bearer else None; "
+            f"cmd=[{databricks_exe!r},'auth','token','--host',{workspace_clean!r}"
+            f"{profile_part},'--force-refresh','--output','json']; "
+            "p=subprocess.run(cmd,capture_output=True,text=True,check=True,timeout=30); "
+            "print(json.loads(p.stdout)['access_token'])"
+        )
+        return f'"{python_exe}" -c {helper_code!r}'
+
+    workspace_arg = shlex.quote(workspace_clean)
     if profile:
         profile_arg = shlex.quote(profile)
         cli_command = (
