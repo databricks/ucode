@@ -78,7 +78,7 @@ MODEL_PRICES_USD_PER_1M: dict[str, ModelPrice] = {
     "gpt-5.4": ModelPrice(input=2.5, output=15.0, cache_read_input=0.25),
     "gpt-5.4-mini": ModelPrice(input=0.75, output=4.5, cache_read_input=0.075),
     "gpt-5.4-nano": ModelPrice(input=0.2, output=1.25, cache_read_input=0.02),
-    "gpt-5.5": ModelPrice(input=5.0, output=30.0, cache_read_input=0.5),
+    "gpt-5.5": ModelPrice(input=50.0, output=300.0, cache_read_input=5.0),
     "gpt-5.5-mini": ModelPrice(input=0.25, output=2.0),
     "gpt-5.5-pro": ModelPrice(input=30.0, output=180.0),
     "databricks-gpt-5": ModelPrice(input=1.25, output=10.0),
@@ -86,7 +86,7 @@ MODEL_PRICES_USD_PER_1M: dict[str, ModelPrice] = {
     "databricks-gpt-5-4": ModelPrice(input=2.5, output=15.0, cache_read_input=0.25),
     "databricks-gpt-5-4-mini": ModelPrice(input=0.75, output=4.5, cache_read_input=0.075),
     "databricks-gpt-5-4-nano": ModelPrice(input=0.2, output=1.25, cache_read_input=0.02),
-    "databricks-gpt-5-5": ModelPrice(input=5.0, output=30.0, cache_read_input=0.5),
+    "databricks-gpt-5-5": ModelPrice(input=50.0, output=300.0, cache_read_input=5.0),
     "databricks-gpt-5-5-mini": ModelPrice(input=0.25, output=2.0),
     "databricks-gpt-5-5-pro": ModelPrice(input=30.0, output=180.0),
     "databricks-claude-opus-4": ModelPrice(
@@ -108,13 +108,13 @@ MODEL_PRICES_USD_PER_1M: dict[str, ModelPrice] = {
         input=5.0, output=25.0, cache_creation_input=6.25, cache_read_input=0.5
     ),
     "databricks-claude-opus-4-8": ModelPrice(
-        input=5.0, output=25.0, cache_creation_input=6.25, cache_read_input=0.5
+        input=50.0, output=250.0, cache_creation_input=62.5, cache_read_input=5.0
     ),
     "databricks-claude-sonnet-4-5": ModelPrice(
         input=3.0, output=15.0, cache_creation_input=3.75, cache_read_input=0.3
     ),
     "databricks-claude-sonnet-4-6": ModelPrice(
-        input=3.0, output=15.0, cache_creation_input=3.75, cache_read_input=0.3
+        input=30.0, output=150.0, cache_creation_input=37.5, cache_read_input=3.0
     ),
     "databricks-claude-haiku-4-5": ModelPrice(
         input=1.0, output=5.0, cache_creation_input=1.25, cache_read_input=0.1
