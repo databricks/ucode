@@ -125,7 +125,7 @@ from ucode.usage import (
 from ucode.usage_hooks import (
     claude_usage_hook,
     codex_usage_hook,
-    opencode_usage_hook,
+    sync_codex_usage_recent,
     sync_opencode_usage_from_messages,
     sync_opencode_usage_from_state,
 )
@@ -2404,6 +2404,7 @@ def usage_budget_status_cmd() -> None:
     sync_workspace = workspace if isinstance(workspace, str) else None
     sync_opencode_usage_from_messages(workspace=sync_workspace)
     sync_opencode_usage_from_state(workspace=sync_workspace)
+    sync_codex_usage_recent(workspace=sync_workspace)
     status = local_budget_status()
     console.print(render_local_budget_panel(status, title="Daily Budget · All Tools"))
     policy_lines = _render_policy_summary_lines(sync_workspace)
@@ -2465,7 +2466,7 @@ def usage_budget_check_cmd(
 
 @usage_app.command("hook")
 def usage_hook_cmd(
-    agent: Annotated[str, typer.Argument(help="Hook adapter: claude, codex, or opencode.")],
+    agent: Annotated[str, typer.Argument(help="Hook adapter: claude or codex.")],
     event: Annotated[
         str,
         typer.Argument(help="Hook event: prompt-submit, post-tool, or notify."),
@@ -2479,10 +2480,8 @@ def usage_hook_cmd(
             response = claude_usage_hook(model=model, event=event, workspace=workspace)
         elif agent == "codex":
             response = codex_usage_hook(model=model, event=event, workspace=workspace)
-        elif agent == "opencode":
-            response = opencode_usage_hook(model=model, event=event, workspace=workspace)
         else:
-            raise RuntimeError("Unsupported usage hook. Use 'claude', 'codex', or 'opencode'.")
+            raise RuntimeError("Unsupported usage hook. Use 'claude' or 'codex'.")
     except RuntimeError as exc:
         typer.echo(json.dumps({"systemMessage": str(exc)}))
         raise typer.Exit(0) from None

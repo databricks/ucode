@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import json
 import os
-import shutil
 import signal
 import subprocess
 import threading
@@ -39,7 +37,6 @@ OPENCODE_BACKUP_PATH = APP_DIR / "opencode-config.backup.json"
 OPENCODE_XDG_DATA_HOME = APP_DIR / "opencode-xdg-data"
 OPENCODE_AUTH_PATH = OPENCODE_XDG_DATA_HOME / "opencode" / "auth.json"
 OPENCODE_MCP_AUTH_HEADER_VALUE = "Bearer {env:OAUTH_TOKEN}"
-OPENCODE_USAGE_PLUGIN_MARKER = "ucode-managed-usage-plugin"
 OPENCODE_OPEN_RESPONSES_PLUGIN_MARKER = "ucode-managed-open-responses-plugin"
 
 SPEC: ToolSpec = {
@@ -56,120 +53,8 @@ PROVIDER_KEYS: list[list[str]] = [
 ]
 
 
-def _ucode_command_prefix() -> list[str]:
-    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
-    if os.path.exists(os.path.join(repo_root, "pyproject.toml")) and os.path.exists(
-        os.path.join(repo_root, "src", "ucode")
-    ):
-        return ["uv", "run", "--project", repo_root, "ucode"]
-    return [shutil.which("ucode") or "ucode"]
-
-
 def _usage_plugin_path() -> str:
     return str(OPENCODE_CONFIG_PATH.parent / "plugins" / "ucode-usage.mjs")
-
-
-def _usage_plugin_source(workspace: str, model: str) -> str:
-    command_json = json.dumps(_ucode_command_prefix())
-    workspace_json = json.dumps(workspace)
-    model_json = json.dumps(model)
-    return f"""// {OPENCODE_USAGE_PLUGIN_MARKER}
-import {{ spawnSync }} from "node:child_process";
-
-const UCODE = {command_json};
-const WORKSPACE = {workspace_json};
-const MODEL = {model_json};
-const POLL_INTERVAL_MS = 2000;
-
-function hook(event, sessionID, extra = {{}}) {{
-  const args = [
-    ...UCODE.slice(1),
-    "usage",
-    "hook",
-    "opencode",
-    event,
-    "--model",
-    MODEL,
-    "--workspace",
-    WORKSPACE,
-  ];
-  const input = JSON.stringify(sessionID ? {{ sessionID, ...extra }} : extra);
-  const result = spawnSync(UCODE[0], args, {{
-    input,
-    encoding: "utf8",
-    stdio: ["pipe", "pipe", "ignore"],
-  }});
-  if (result.error || result.status !== 0) return {{}};
-  try {{
-    return JSON.parse(result.stdout || "{{}}");
-  }} catch {{
-    return {{}};
-  }}
-}}
-
-function message(response) {{
-  return response?.reason
-    || response?.systemMessage
-    || response?.hookSpecificOutput?.additionalContext
-    || "";
-}}
-
-async function enforce(client, event, sessionID) {{
-  const response = hook(event, sessionID);
-  const text = message(response);
-  if (response?.decision === "block" || response?.continue === false) {{
-    throw new Error(text || "Daily budget exceeded.");
-  }}
-  if (text) {{
-    await client.tui.showToast({{
-      title: "ucode budget",
-      message: text,
-      variant: "warning",
-      duration: 10000,
-    }}).catch(() => undefined);
-  }}
-}}
-
-export default async function UcodeUsagePlugin({{ client }}) {{
-  const timer = setInterval(() => {{
-    hook("event");
-  }}, POLL_INTERVAL_MS);
-  timer.unref?.();
-  return {{
-    async event(input) {{
-      const event = input?.event;
-      const type = event?.type;
-      const sessionID = event?.properties?.sessionID;
-      if (!type) {{
-        return;
-      }}
-      if (
-        type === "message.updated"
-        || type === "session.updated"
-        || type === "session.idle"
-        || type.startsWith("session.next.")
-      ) {{
-        hook("event", sessionID);
-      }}
-      if (type === "session.next.step.ended" && sessionID) {{
-        hook("step-ended", sessionID, {{ tokens: event?.properties?.tokens }});
-      }}
-    }},
-    async "chat.params"(input, _output) {{
-      await enforce(client, "chat-params", input?.sessionID);
-    }},
-    async "tool.execute.before"(input, _output) {{
-      await enforce(client, "tool-execute-before", input?.sessionID);
-    }},
-  }};
-}}
-"""
-
-
-def _write_usage_plugin(workspace: str, model: str) -> None:
-    path = OPENCODE_CONFIG_PATH.parent / "plugins" / "ucode-usage.mjs"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(_usage_plugin_source(workspace, model), encoding="utf-8")
 
 
 def _is_ucode_usage_plugin(value: object) -> bool:
@@ -185,13 +70,16 @@ def _is_ucode_usage_plugin(value: object) -> bool:
     return False
 
 
-def _upsert_usage_plugin(doc: dict) -> None:
+def _remove_usage_plugin(doc: dict) -> None:
+    # The usage plugin used to spawn a blocking `ucode` subprocess on a timer and
+    # before every tool call, which badly slowed OpenCode down. We no longer track
+    # OpenCode spend via a plugin (budget-status reads its DB directly instead), so
+    # drop any previously-installed plugin from the config and delete the file.
     plugins = doc.get("plugin")
-    if not isinstance(plugins, list):
-        plugins = []
-    plugins = [plugin for plugin in plugins if not _is_ucode_usage_plugin(plugin)]
-    plugins.append(_usage_plugin_path())
-    doc["plugin"] = plugins
+    if isinstance(plugins, list):
+        doc["plugin"] = [plugin for plugin in plugins if not _is_ucode_usage_plugin(plugin)]
+    stale = OPENCODE_CONFIG_PATH.parent / "plugins" / "ucode-usage.mjs"
+    stale.unlink(missing_ok=True)
 
 
 def _open_responses_plugin_path() -> str:
@@ -226,7 +114,16 @@ export default async function UcodeOpenResponsesPlugin() {{
                   : input.url;
             const url = new URL(raw);
             url.pathname = url.pathname.replace(/\\/responses$/, "/open-responses");
-            return fetch(url, init);
+            // Kimi reasoning OFF by default.
+            let opts = init;
+            try {{
+              if (init && typeof init.body === "string") {{
+                const body = JSON.parse(init.body);
+                body.reasoning = {{ effort: "none" }};
+                opts = {{ ...init, body: JSON.stringify(body) }};
+              }}
+            }} catch (e) {{}}
+            return fetch(url, opts);
           }},
         }};
       }},
@@ -439,8 +336,7 @@ def write_tool_config(
         ):
             providers.pop(stale, None)
     merged = deep_merge_dict(existing, overlay)
-    _write_usage_plugin(state["workspace"], str(overlay["model"]))
-    _upsert_usage_plugin(merged)
+    _remove_usage_plugin(merged)
     # The open-responses rewrite plugin is only needed when the Kimi provider is
     # configured; register it then and prune it otherwise so a removed endpoint
     # leaves no dangling plugin path.

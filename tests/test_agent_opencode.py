@@ -539,7 +539,8 @@ class TestWriteToolConfigStaleProviderCleanup:
         written = json.loads(config_file.read_text())
         assert written["model"] == "databricks-anthropic/claude-sonnet"
 
-    def test_config_installs_usage_plugin(self, tmp_path, monkeypatch):
+    def test_config_prunes_stale_usage_plugin(self, tmp_path, monkeypatch):
+        """The slow spawnSync usage plugin is removed from config and disk on setup."""
         import ucode.agents.opencode as oc_mod
         import ucode.config_io as config_io_mod
 
@@ -548,49 +549,13 @@ class TestWriteToolConfigStaleProviderCleanup:
         backup_file = tmp_path / "opencode-backup.json"
         monkeypatch.setattr(oc_mod, "OPENCODE_CONFIG_PATH", config_file)
         monkeypatch.setattr(oc_mod, "OPENCODE_BACKUP_PATH", backup_file)
-        monkeypatch.setattr(oc_mod, "_ucode_command_prefix", lambda: ["ucode"])
 
-        config_file.write_text(json.dumps({"plugin": ["user-plugin"]}), encoding="utf-8")
-        state = {
-            "workspace": WS,
-            "base_urls": {"opencode": _base_urls()},
-            "opencode_models": {"anthropic": ["claude-sonnet"]},
-            "managed_configs": {},
-        }
-
-        with (
-            patch("ucode.agents.opencode.get_databricks_token", return_value="tok"),
-            patch("ucode.agents.opencode.save_state"),
-        ):
-            oc_mod.write_tool_config(state, "claude-sonnet", token="tok")
-
-        written = json.loads(config_file.read_text())
         plugin_path = str(config_file.parent / "plugins" / "ucode-usage.mjs")
-        assert written["plugin"] == ["user-plugin", plugin_path]
-        plugin = (config_file.parent / "plugins" / "ucode-usage.mjs").read_text()
-        assert "ucode-managed-usage-plugin" in plugin
-        assert '"opencode"' in plugin
-        assert "databricks-anthropic/claude-sonnet" in plugin
-        assert 'type.startsWith("session.next.")' in plugin
-        assert 'hook("step-ended", sessionID, { tokens: event?.properties?.tokens })' in plugin
-        assert "const POLL_INTERVAL_MS = 2000;" in plugin
-        assert "setInterval(() => {" in plugin
-        assert 'hook("event");' in plugin
-
-    def test_usage_plugin_upsert_is_idempotent(self, tmp_path, monkeypatch):
-        import ucode.agents.opencode as oc_mod
-        import ucode.config_io as config_io_mod
-
-        monkeypatch.setattr(config_io_mod, "APP_DIR", tmp_path)
-        config_file = tmp_path / "opencode.json"
-        backup_file = tmp_path / "opencode-backup.json"
-        monkeypatch.setattr(oc_mod, "OPENCODE_CONFIG_PATH", config_file)
-        monkeypatch.setattr(oc_mod, "OPENCODE_BACKUP_PATH", backup_file)
-        monkeypatch.setattr(oc_mod, "_ucode_command_prefix", lambda: ["ucode"])
-        plugin_path = str(config_file.parent / "plugins" / "ucode-usage.mjs")
+        plugin_file = config_file.parent / "plugins" / "ucode-usage.mjs"
+        plugin_file.parent.mkdir(parents=True, exist_ok=True)
+        plugin_file.write_text("// stale", encoding="utf-8")
         config_file.write_text(
-            json.dumps({"plugin": ["user-plugin", plugin_path]}),
-            encoding="utf-8",
+            json.dumps({"plugin": ["user-plugin", plugin_path]}), encoding="utf-8"
         )
         state = {
             "workspace": WS,
@@ -606,7 +571,8 @@ class TestWriteToolConfigStaleProviderCleanup:
             oc_mod.write_tool_config(state, "claude-sonnet", token="tok")
 
         written = json.loads(config_file.read_text())
-        assert written["plugin"] == ["user-plugin", plugin_path]
+        assert written["plugin"] == ["user-plugin"]
+        assert not plugin_file.exists()
 
     def test_open_responses_plugin_installed_when_kimi_present(self, tmp_path, monkeypatch):
         import ucode.agents.opencode as oc_mod
@@ -618,7 +584,6 @@ class TestWriteToolConfigStaleProviderCleanup:
         monkeypatch.setattr(oc_mod, "OPENCODE_BACKUP_PATH", tmp_path / "opencode-backup.json")
         auth_file = tmp_path / "data" / "opencode" / "auth.json"
         monkeypatch.setattr(oc_mod, "OPENCODE_AUTH_PATH", auth_file)
-        monkeypatch.setattr(oc_mod, "_ucode_command_prefix", lambda: ["ucode"])
 
         state = {
             "workspace": WS,
@@ -654,7 +619,6 @@ class TestWriteToolConfigStaleProviderCleanup:
         monkeypatch.setattr(oc_mod, "OPENCODE_BACKUP_PATH", tmp_path / "opencode-backup.json")
         auth_file = tmp_path / "data" / "opencode" / "auth.json"
         monkeypatch.setattr(oc_mod, "OPENCODE_AUTH_PATH", auth_file)
-        monkeypatch.setattr(oc_mod, "_ucode_command_prefix", lambda: ["ucode"])
         # A previously-registered open-responses plugin path that should be dropped
         # now that no Kimi model is configured.
         stale_plugin = str(config_file.parent / "plugins" / "ucode-open-responses.mjs")

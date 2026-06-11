@@ -646,6 +646,74 @@ def test_sync_codex_usage_from_state_ignores_old_threads_for_fresh_ledger(tmp_pa
     assert recorded == []
 
 
+def test_sync_codex_usage_recent_syncs_in_progress_thread(tmp_path, monkeypatch):
+    """A recent thread syncs from its rollout even when tokens_used is still 0.
+
+    Codex writes ``tokens_used`` lazily, so live budget display must read the
+    rollout file directly for in-progress sessions.
+    """
+    state_db = tmp_path / "state_5.sqlite"
+    session = tmp_path / "session.jsonl"
+    session.write_text(
+        json.dumps(
+            {
+                "type": "event_msg",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "total_token_usage": {
+                            "input_tokens": 100,
+                            "output_tokens": 10,
+                            "total_tokens": 110,
+                        }
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    now = datetime.now(UTC)
+    with sqlite3.connect(state_db) as conn:
+        conn.execute(
+            """
+            CREATE TABLE threads (
+              id TEXT,
+              rollout_path TEXT,
+              tokens_used INTEGER,
+              model TEXT,
+              model_provider TEXT,
+              updated_at INTEGER
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?)",
+            ("recent", str(session), 0, "gpt-5.5", "ucode-databricks", int(now.timestamp())),
+        )
+        conn.execute(
+            "INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?)",
+            ("stale", str(session), 110, "gpt-5.5", "ucode-databricks", 1),
+        )
+    recorded: list[dict] = []
+    monkeypatch.setattr(
+        usage_hooks,
+        "record_local_usage_snapshot",
+        lambda **kwargs: recorded.append(kwargs) or {"total_tokens": 110},
+    )
+
+    imported = usage_hooks.sync_codex_usage_recent(
+        workspace="https://example.com",
+        within_seconds=3600,
+        state_db_path=state_db,
+        usage_db_path=tmp_path / "usage.sqlite",
+        now=now,
+    )
+
+    assert imported == 1
+    assert [r["session_id"] for r in recorded] == ["recent"]
+    assert recorded[0]["total_tokens"] == 110
+
+
 def test_sync_opencode_usage_from_state_imports_recent_sessions(tmp_path, monkeypatch):
     state_db = tmp_path / "opencode.db"
     with sqlite3.connect(state_db) as conn:
@@ -801,71 +869,3 @@ def test_sync_opencode_usage_from_messages_imports_assistant_tokens(tmp_path, mo
     assert recorded[0]["cache_read_input_tokens"] == 110
     assert recorded[0]["cache_creation_input_tokens"] == 19
     assert recorded[0]["total_tokens"] == 150
-
-
-def test_opencode_usage_hook_blocks_when_budget_exceeded(monkeypatch):
-    monkeypatch.setattr(usage_hooks, "sync_opencode_usage_from_messages", lambda **kwargs: 0)
-    monkeypatch.setattr(usage_hooks, "sync_opencode_usage_from_state", lambda **kwargs: 0)
-    monkeypatch.setattr(
-        usage_hooks,
-        "local_budget_status",
-        lambda tool: {
-            "configured": True,
-            "state": "exceeded",
-            "tool": tool,
-            "spend_usd": 2.0,
-            "limit_usd": 1.0,
-            "days": 1,
-            "remaining_usd": 0.0,
-            "total_tokens": 120,
-        },
-    )
-
-    response = usage_hooks.opencode_usage_hook(
-        model="databricks-anthropic/databricks-claude-haiku-4-5",
-        event="chat-params",
-        payload={"sessionID": "ses_1"},
-    )
-
-    assert response["decision"] == "block"
-    assert "⛔ Daily budget — limit exceeded" in response["reason"]
-
-
-def test_opencode_step_ended_syncs_messages_without_delta(monkeypatch):
-    message_syncs: list[dict] = []
-    monkeypatch.setattr(
-        usage_hooks,
-        "sync_opencode_usage_from_messages",
-        lambda **kwargs: message_syncs.append(kwargs) or 0,
-    )
-    monkeypatch.setattr(usage_hooks, "sync_opencode_usage_from_state", lambda **kwargs: 0)
-    monkeypatch.setattr(
-        usage_hooks,
-        "local_budget_status",
-        lambda tool: {
-            "configured": True,
-            "state": "ok",
-            "tool": tool,
-            "spend_usd": 0.1,
-            "limit_usd": 20.0,
-            "days": 1,
-            "total_tokens": 120,
-        },
-    )
-
-    response = usage_hooks.opencode_usage_hook(
-        model="databricks-anthropic/databricks-claude-opus-4-8",
-        event="step-ended",
-        payload={
-            "sessionID": "ses_2",
-            "tokens": {
-                "input": 100,
-                "output": 20,
-                "reasoning": 5,
-                "cache": {"read": 30, "write": 40},
-            },
-        },
-    )
-
-    assert message_syncs[0]["session_id"] == "ses_2"
-    assert response == {}

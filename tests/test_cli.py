@@ -961,16 +961,15 @@ class TestUsageCommands:
             == '{"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": "warning text"}}'
         )
 
-    def test_usage_hook_opencode_outputs_json(self):
-        with patch("ucode.cli.opencode_usage_hook", return_value={"decision": "block"}):
-            result = runner.invoke(
-                app,
-                ["usage", "hook", "opencode", "chat-params", "--model", "databricks-claude"],
-                input="{}",
-            )
+    def test_usage_hook_opencode_is_unsupported(self):
+        result = runner.invoke(
+            app,
+            ["usage", "hook", "opencode", "chat-params", "--model", "databricks-claude"],
+            input="{}",
+        )
 
         assert result.exit_code == 0, result.output
-        assert result.output.strip() == '{"decision": "block"}'
+        assert "Unsupported usage hook" in result.output
 
 
 class TestStatus:

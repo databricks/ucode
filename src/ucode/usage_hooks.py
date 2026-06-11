@@ -6,7 +6,7 @@ import json
 import sqlite3
 import sys
 from collections.abc import Mapping
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 
@@ -261,30 +261,40 @@ def sync_codex_usage_from_state(
     usage_db_path: Path = LOCAL_USAGE_DB_PATH,
     updated_since: datetime | None = None,
 ) -> int:
-    """Import recent Codex thread token snapshots from Codex's local state DB."""
+    """Import recent Codex thread token snapshots from Codex's local state DB.
+
+    When ``session_id`` is given (the live prompt-submit path), sync just that
+    thread unconditionally: skip the time watermark and the ``tokens_used > 0``
+    gate, since Codex writes ``tokens_used`` lazily and a just-finished session
+    often still reads 0 there even though its rollout file already has the real
+    counts. The bulk path (no ``session_id``) keeps both gates to avoid dumping
+    historical sessions into today's ledger. Either way ``record_local_usage_snapshot``
+    records only per-session deltas, so re-syncing the same thread is idempotent.
+    """
     if not state_db_path.exists():
         return 0
-    since = updated_since or ensure_local_usage_sync_started_at(
-        CODEX_SYNC_STARTED_AT_KEY,
-        db_path=usage_db_path,
+    provider_filter = (
+        "AND (model_provider = 'ucode-databricks'"
+        " OR model_provider = 'Databricks'"
+        " OR model_provider LIKE '%databricks%')"
     )
-    since_epoch = int(since.timestamp())
-    session_filter = "AND id = ?" if session_id else ""
-    params: tuple[object, ...] = (since_epoch, session_id) if session_id else (since_epoch,)
+    if session_id:
+        where = f"WHERE id = ? {provider_filter}"
+        params: tuple[object, ...] = (session_id,)
+    else:
+        since = updated_since or ensure_local_usage_sync_started_at(
+            CODEX_SYNC_STARTED_AT_KEY,
+            db_path=usage_db_path,
+        )
+        where = f"WHERE updated_at >= ? AND COALESCE(tokens_used, 0) > 0 {provider_filter}"
+        params = (int(since.timestamp()),)
     try:
         with sqlite3.connect(state_db_path, timeout=5) as conn:
             rows = conn.execute(
                 f"""
                 SELECT id, rollout_path, tokens_used, model, model_provider
                 FROM threads
-                WHERE updated_at >= ?
-                  {session_filter}
-                  AND COALESCE(tokens_used, 0) > 0
-                  AND (
-                    model_provider = 'ucode-databricks'
-                    OR model_provider = 'Databricks'
-                    OR model_provider LIKE '%databricks%'
-                  )
+                {where}
                 """,
                 params,
             ).fetchall()
@@ -313,6 +323,61 @@ def sync_codex_usage_from_state(
         )
         if event is not None:
             imported += 1
+    return imported
+
+
+def sync_codex_usage_recent(
+    *,
+    workspace: str | None = None,
+    within_seconds: int = 3600,
+    state_db_path: Path = CODEX_STATE_DB_PATH,
+    usage_db_path: Path = LOCAL_USAGE_DB_PATH,
+    now: datetime | None = None,
+) -> int:
+    """Sync recently active Codex threads for live budget display.
+
+    Codex 0.134's ``notify``/``Stop`` hooks don't fire reliably, and the
+    ``UserPromptSubmit`` hook runs *before* a turn produces tokens, so spend
+    only lands on the next prompt. Polling this from ``budget-status`` (which
+    the ``--watch`` pane re-runs on an interval) keeps the displayed Codex
+    spend current without depending on those hooks.
+
+    Each recently-updated Databricks thread is synced session-scoped, which
+    bypasses the ``tokens_used > 0`` gate so in-progress sessions count even
+    before Codex lazily writes that column. The per-session snapshot ledger
+    makes repeated polling idempotent. The recency window keeps stale history
+    out of today's ledger.
+    """
+    if not state_db_path.exists():
+        return 0
+    current = now or datetime.now(UTC)
+    cutoff = int(current.timestamp()) - max(within_seconds, 0)
+    try:
+        with sqlite3.connect(state_db_path, timeout=5) as conn:
+            rows = conn.execute(
+                """
+                SELECT id
+                FROM threads
+                WHERE updated_at >= ?
+                  AND (
+                    model_provider = 'ucode-databricks'
+                    OR model_provider = 'Databricks'
+                    OR model_provider LIKE '%databricks%'
+                  )
+                """,
+                (cutoff,),
+            ).fetchall()
+    except sqlite3.Error:
+        return 0
+
+    imported = 0
+    for (session_id,) in rows:
+        imported += sync_codex_usage_from_state(
+            workspace=workspace,
+            session_id=str(session_id),
+            state_db_path=state_db_path,
+            usage_db_path=usage_db_path,
+        )
     return imported
 
 
@@ -573,25 +638,4 @@ def codex_usage_hook(
     # The notify callback only records spend — it must not surface the budget
     # warning, or the message would appear twice (once here, once from the
     # UserPromptSubmit hook). Enforcement/warning is the prompt-submit hook's job.
-    return {}
-
-
-def opencode_usage_hook(
-    *,
-    model: str,
-    event: str = "event",
-    workspace: str | None = None,
-    payload: dict[str, object] | None = None,
-) -> dict[str, object]:
-    payload = payload if payload is not None else _read_json_stdin()
-    session_id = str(payload.get("session_id") or payload.get("sessionID") or "")
-    sync_opencode_usage_from_messages(workspace=workspace, session_id=session_id or None)
-    sync_opencode_usage_from_state(workspace=workspace, session_id=session_id or None)
-    if event in {
-        "prompt-submit",
-        "user-prompt-submit",
-        "chat-params",
-        "tool-execute-before",
-    }:
-        return _hook_response_for_budget(local_budget_status("opencode"), can_block=True)
     return {}
