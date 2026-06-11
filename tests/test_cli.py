@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import contextlib
+import os
 import re
 from unittest.mock import patch
 
 import pytest
 from typer.testing import CliRunner
 
+from ucode import cli
 from ucode.cli import app
 from ucode.databricks import MANAGED_CONFIG_VOLUME_PATH, MANAGED_POLICIES_VOLUME_PATH
 
@@ -1604,6 +1606,7 @@ class TestWatchFlag:
         with (
             patch("ucode.cli._tmux_available", return_value=True),
             patch("ucode.cli._in_tmux", return_value=False),
+            patch("ucode.cli.shutil.get_terminal_size", return_value=os.terminal_size((160, 40))),
             patch("ucode.cli.subprocess.run") as mock_run,
             patch("ucode.cli.launch_agent") as mock_launch,
         ):
@@ -1615,12 +1618,32 @@ class TestWatchFlag:
         assert "new-session" in argv
         assert "split-window" in argv
         assert "-h" in argv
+        assert "-l" in argv
+        assert str(cli.WATCH_PANE_PREFERRED_WIDTH) in argv
         assert any("budget-status" in part for part in argv)
         # Mouse mode is enabled so the wheel scrolls pane history.
         assert "set-option" in argv
         assert "mouse" in argv
         # We return early before the in-place launch.
         mock_launch.assert_not_called()
+
+    def test_watch_uses_preferred_right_pane_when_terminal_is_wide(self):
+        assert cli._watch_tmux_layout_args(160) == (
+            ["split-window", "-h", "-l", str(cli.WATCH_PANE_PREFERRED_WIDTH)],
+            ["select-pane", "-L"],
+        )
+
+    def test_watch_uses_available_width_when_terminal_is_tight_but_still_wide_enough(self):
+        assert cli._watch_tmux_layout_args(140) == (
+            ["split-window", "-h", "-l", "52"],
+            ["select-pane", "-L"],
+        )
+
+    def test_watch_uses_bottom_pane_when_terminal_is_narrow(self):
+        assert cli._watch_tmux_layout_args(120) == (
+            ["split-window", "-v", "-l", str(cli.WATCH_PANE_HEIGHT)],
+            ["select-pane", "-U"],
+        )
 
     def test_watch_default_interval_is_10(self):
         with (

@@ -1199,6 +1199,10 @@ def _apply_budget_gate(
 
 
 DEFAULT_WATCH_INTERVAL = 10
+WATCH_AGENT_MIN_WIDTH = 88
+WATCH_PANE_MIN_WIDTH = 46
+WATCH_PANE_PREFERRED_WIDTH = 56
+WATCH_PANE_HEIGHT = 12
 
 
 def _extract_watch_flags(args: list[str]) -> tuple[bool, int, list[str]]:
@@ -1247,6 +1251,16 @@ def _tmux_available() -> bool:
     return shutil.which("tmux") is not None
 
 
+def _watch_tmux_layout_args(columns: int | None = None) -> tuple[list[str], list[str]]:
+    if columns is None:
+        columns = shutil.get_terminal_size((160, 40)).columns
+    available_watch_width = columns - WATCH_AGENT_MIN_WIDTH
+    if available_watch_width >= WATCH_PANE_MIN_WIDTH:
+        watch_width = min(WATCH_PANE_PREFERRED_WIDTH, available_watch_width)
+        return ["split-window", "-h", "-l", str(watch_width)], ["select-pane", "-L"]
+    return ["split-window", "-v", "-l", str(WATCH_PANE_HEIGHT)], ["select-pane", "-U"]
+
+
 def _launch_in_tmux_split(tool_name: str, agent_args: list[str], interval: int) -> None:
     """Launch the agent in a tmux split with a live budget-status watcher.
 
@@ -1268,6 +1282,7 @@ def _launch_in_tmux_split(tool_name: str, agent_args: list[str], interval: int) 
         f"Launching {TOOL_SPECS[tool_name]['display']} in a tmux split "
         f"with a budget watcher (refreshing every {interval}s)."
     )
+    split_args, select_args = _watch_tmux_layout_args()
     result = subprocess.run(
         [
             "tmux",
@@ -1279,12 +1294,10 @@ def _launch_in_tmux_split(tool_name: str, agent_args: list[str], interval: int) 
             "mouse",
             "on",
             ";",
-            "split-window",
-            "-h",
+            *split_args,
             watch_cmd,
             ";",
-            "select-pane",
-            "-L",
+            *select_args,
         ],
         check=False,
     )
