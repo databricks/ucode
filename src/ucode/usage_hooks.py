@@ -638,9 +638,12 @@ def codex_usage_hook(
     if event == "stop":
         # Fires at turn end so spend from the turn that just finished surfaces
         # immediately. Warn only — blocking belongs to the prompt-submit hook,
-        # and the turn is already over. quiet_warn is off so the message shows.
+        # and the turn is already over, so never return continue:False here.
         sync_codex_usage_from_state(workspace=workspace, session_id=session_id)
-        return _hook_response_for_budget(local_budget_status("codex"))
+        status = local_budget_status("codex")
+        if str(status.get("state") or "ok") in {"warn", "exceeded"}:
+            return {"systemMessage": format_local_budget_hook_status(status)}
+        return {}
     # The notify callback only records spend — it must not surface the budget
     # warning, or the message would appear twice (once here, once from the
     # UserPromptSubmit hook). Enforcement/warning is the prompt-submit hook's job.

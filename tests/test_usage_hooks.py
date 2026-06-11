@@ -396,6 +396,71 @@ def test_codex_prompt_submit_returns_warning_additional_context(monkeypatch):
     }
 
 
+def test_codex_stop_warns_visibly_at_turn_end(monkeypatch):
+    # The Stop hook fires at turn end and must surface the warning visibly
+    # (systemMessage), not silently inject it like the prompt-submit hook does.
+    synced = []
+    monkeypatch.setattr(
+        usage_hooks,
+        "sync_codex_usage_from_state",
+        lambda **kwargs: synced.append(kwargs) or 0,
+    )
+    monkeypatch.setattr(
+        usage_hooks,
+        "local_budget_status",
+        lambda tool: {
+            "configured": True,
+            "state": "warn",
+            "tool": tool,
+            "spend_usd": 0.9,
+            "limit_usd": 1.0,
+            "days": 1,
+            "remaining_usd": 0.1,
+            "total_tokens": 120,
+        },
+    )
+
+    response = usage_hooks.codex_usage_hook(
+        model="gpt-5.5",
+        event="stop",
+        payload={"session_id": "s2"},
+    )
+
+    assert synced and synced[0]["session_id"] == "s2"
+    assert response["systemMessage"].startswith("⚠️ Daily budget — nearing limit")
+
+
+def test_codex_stop_does_not_block_when_budget_exceeded(monkeypatch):
+    # Blocking belongs to prompt-submit; the turn is already over, so Stop only
+    # warns even when the budget is exceeded under a block policy.
+    monkeypatch.setattr(usage_hooks, "sync_codex_usage_from_state", lambda **kwargs: 0)
+    monkeypatch.setattr(
+        usage_hooks,
+        "local_budget_status",
+        lambda tool: {
+            "configured": True,
+            "state": "exceeded",
+            "tool": tool,
+            "spend_usd": 2.0,
+            "limit_usd": 1.0,
+            "days": 1,
+            "remaining_usd": 0.0,
+            "total_tokens": 120,
+            "on_budget_exhausted": "block",
+        },
+    )
+
+    response = usage_hooks.codex_usage_hook(
+        model="gpt-5.5",
+        event="stop",
+        payload={"session_id": "s2"},
+    )
+
+    assert "decision" not in response
+    assert response.get("continue") is not False
+    assert "Daily budget — limit exceeded" in response["systemMessage"]
+
+
 def test_codex_hook_records_session_snapshot(tmp_path, monkeypatch):
     session = tmp_path / "session.jsonl"
     session.write_text(
