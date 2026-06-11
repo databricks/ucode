@@ -285,6 +285,95 @@ class TestDiscoverModelServices:
         assert ids == ["system.ai.gpt-5"]
         assert calls["n"] == 3  # two failures, third succeeds
 
+    def test_null_model_services_field_does_not_crash(self, monkeypatch):
+        # Detect UC list endpoints sometimes serialize empty buckets as `null`
+        payload = {"model_services": None}
+        monkeypatch.setattr(
+            db_mod, "_http_get_json", lambda url, token, timeout=10: (payload, None)
+        )
+
+        ids, reason = db_mod.list_model_services(WS, "token")
+
+        assert ids == []
+        assert reason == "no `system.ai.*` model services found"
+
+    def test_partial_pagination_failure_propagates_reason(self, monkeypatch):
+        # Surface the failure reason for page fails after retries.
+        pages = [
+            (
+                {
+                    "model_services": [_model_service("system.ai.gpt-5")],
+                    "next_page_token": "tok2",
+                },
+                None,
+            ),
+            (None, "HTTP 504 Gateway Timeout"),
+        ]
+        calls = {"i": 0}
+
+        def fake_get(url, token, timeout=10):
+            idx = min(calls["i"], len(pages) - 1)
+            calls["i"] += 1
+            return pages[idx]
+
+        # Disable per-page retries so the second-page failure isn't masked.
+        monkeypatch.setattr(db_mod, "_MODEL_SERVICES_PAGE_RETRIES", 1)
+        monkeypatch.setattr(db_mod, "_http_get_json", fake_get)
+
+        ids, reason = db_mod.list_model_services(WS, "token")
+
+        assert ids == ["system.ai.gpt-5"]  # still got the first page
+        assert reason == "HTTP 504 Gateway Timeout"  # but caller is warned
+
+    def test_empty_listing_returns_one_reason_regardless_of_user_services(self, monkeypatch):
+        for payload in (
+            {"model_services": []},
+            {
+                "model_services": [
+                    _model_service("main.svenwb.my-gpt"),
+                    _model_service("temp.erni.claude-opus-4-8"),
+                ]
+            },
+        ):
+            monkeypatch.setattr(
+                db_mod, "_http_get_json", lambda url, token, timeout=10, p=payload: (p, None)
+            )
+
+            ids, reason = db_mod.list_model_services(WS, "token")
+
+            assert ids == []
+            assert reason == "no `system.ai.*` model services found"
+
+    def test_partial_truncation_exposed_via_discover_too(self, monkeypatch):
+        # End-to-end: discover_model_services preserves the truncation reason
+        # so the CLI layer can warn about partial results.
+        pages = [
+            (
+                {
+                    "model_services": [_model_service("system.ai.gpt-5")],
+                    "next_page_token": "tok2",
+                },
+                None,
+            ),
+            (None, "HTTP 504 Gateway Timeout"),
+        ]
+        calls = {"i": 0}
+
+        def fake_get(url, token, timeout=10):
+            idx = min(calls["i"], len(pages) - 1)
+            calls["i"] += 1
+            return pages[idx]
+
+        monkeypatch.setattr(db_mod, "_MODEL_SERVICES_PAGE_RETRIES", 1)
+        monkeypatch.setattr(db_mod, "_http_get_json", fake_get)
+
+        claude, codex, gemini, reason = db_mod.discover_model_services(WS, "token")
+
+        assert codex == ["system.ai.gpt-5"]
+        assert claude == {}
+        assert gemini == []
+        assert reason == "HTTP 504 Gateway Timeout"
+
 
 def _foundation_models_payload(names):
     return {

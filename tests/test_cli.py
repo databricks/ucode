@@ -196,6 +196,27 @@ class TestStatus:
         assert "MCP Server:" not in result.output
         assert "Configured tools:" not in result.output
 
+    def test_shows_ai_gateway_discovery_when_flag_unset(self):
+        with patch("ucode.cli.load_state", return_value=MINIMAL_STATE):
+            result = runner.invoke(app, ["status"])
+
+        assert result.exit_code == 0, result.output
+        assert "Model discovery:" in result.output
+        assert "ai-gateway" in result.output
+        assert "system.ai" not in result.output
+
+    def test_shows_model_services_discovery_when_flag_set(self):
+        # Surface the active discovery path so users don't have to read
+        # state.json to remember whether a workspace is on UC model-services.
+        state = {**MINIMAL_STATE, "use_model_services": True}
+        with patch("ucode.cli.load_state", return_value=state):
+            result = runner.invoke(app, ["status"])
+
+        assert result.exit_code == 0, result.output
+        assert "Model discovery:" in result.output
+        assert "model-services" in result.output
+        assert "system.ai" in result.output
+
     def test_status_treats_available_tools_as_configured_agents(self):
         state = {
             **MINIMAL_STATE,

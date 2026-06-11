@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from pathlib import Path
@@ -13,6 +14,7 @@ from ucode.config_io import (
     backup_existing_file,
     deep_merge_dict,
     read_toml_safe,
+    write_text_file,
     write_toml_file,
 )
 from ucode.databricks import (
@@ -29,6 +31,14 @@ CODEX_CONFIG_PATH = CODEX_CONFIG_DIR / f"{CODEX_PROFILE_NAME}.config.toml"
 CODEX_BACKUP_PATH = APP_DIR / "codex-ucode-config.backup.toml"
 LEGACY_CODEX_CONFIG_PATH = CODEX_CONFIG_DIR / "config.toml"
 LEGACY_CODEX_BACKUP_PATH = APP_DIR / "codex-config.backup.toml"
+# Static model catalog written when the workspace uses UC model-services
+# discovery. Pointing Codex at this file via `model_catalog_json` switches it
+# to `StaticModelsManager`, which bypasses the `GET /v1/models` listing the
+# AI Gateway currently rejects for `system.ai.*` (it requires a
+# `Databricks-Model-Provider-Service` header that Codex doesn't send). Schema
+# documented at openai/codex#14757; ucode emits the minimum required fields
+# and lets Codex fill in the rest from `model_info_from_slug`-style defaults.
+CODEX_MODEL_CATALOG_PATH = APP_DIR / "codex-model-catalog.json"
 CODEX_MODEL_PROVIDER_NAME = "ucode-databricks"
 MINIMUM_CODEX_VERSION = (0, 134, 0)
 MINIMUM_CODEX_VERSION_TEXT = "0.134.0"
@@ -45,6 +55,7 @@ SPEC: ToolSpec = {
 MANAGED_KEYS: list[list[str]] = [
     ["model_provider"],
     ["model"],
+    ["model_catalog_json"],
     ["model_providers", CODEX_MODEL_PROVIDER_NAME],
     ["model_providers", CODEX_MODEL_PROVIDER_NAME, "http_headers"],
 ]
@@ -120,12 +131,111 @@ def _provider_block(workspace: str, databricks_profile: str | None) -> dict:
     }
 
 
+def _model_catalog_entry(slug: str) -> dict:
+    """Minimum-viable Codex `ModelInfo` for a UC model-services slug.
+
+    Codex's `model_catalog_json` deserializer requires every non-`#[serde(default)]`
+    field to be present (Option-typed fields accept `null`). We surface the
+    minimum required keys plus a few optional ones (`context_window`,
+    `web_search_tool_type`, `input_modalities`) chosen to match Codex's own
+    fallback defaults so behaviour matches what users would have got from the
+    `GET /v1/models` listing.
+
+    Schema reference: openai/codex protocol/src/openai_models.rs:257-315 and
+    issue openai/codex#14757 for the field-by-field contract.
+    """
+    return {
+        "slug": slug,
+        "display_name": slug,
+        "description": None,
+        # Empty list keeps the picker quiet without claiming reasoning support.
+        "supported_reasoning_levels": [],
+        "shell_type": "default",
+        "visibility": "list",
+        "supported_in_api": True,
+        # Identical priority across entries — the picker breaks ties by slug
+        # which matches the alphabetic order users already see today.
+        "priority": 10,
+        "availability_nux": None,
+        "upgrade": None,
+        # Empty `base_instructions` leaves the bundled system prompt in place
+        # (Codex falls back to its default when the field is empty after
+        # personality substitution; see client.rs reasoning-field gating notes).
+        "base_instructions": "",
+        # Conservative defaults: don't claim reasoning summaries or verbosity
+        # support, since the gateway-fronted models may not implement either.
+        # Users can still send the request; this just keeps Codex from
+        # serializing fields the model can't honour.
+        "supports_reasoning_summaries": False,
+        "support_verbosity": False,
+        "default_verbosity": None,
+        # `freeform` enables apply_patch with the lark grammar that GPT-5
+        # variants are trained on. Setting this to null would silently drop
+        # apply_patch from the tool list, which is a worse UX than a runtime
+        # error if a particular model doesn't support it.
+        "apply_patch_tool_type": "freeform",
+        "truncation_policy": {"mode": "bytes", "limit": 10000},
+        "supports_parallel_tool_calls": True,
+        "experimental_supported_tools": [],
+    }
+
+
+def build_model_catalog(codex_models: list[str] | None) -> dict | None:
+    """Build a `{"models": [...]}` document, or None if there are no entries.
+
+    Codex rejects empty catalogs at startup, so we return None (and therefore
+    skip writing the file at all) when discovery returned no GPT models.
+    """
+    if not codex_models:
+        return None
+    return {"models": [_model_catalog_entry(slug) for slug in codex_models]}
+
+
+def _write_model_catalog_file(state: dict) -> Path | None:
+    """Materialise the static catalog when this workspace uses model-services.
+
+    Returns the catalog path so the caller can wire it into the toml overlay.
+    Returns None when the workspace is on the AI-gateway path, in which case
+    we also remove any stale catalog left over from a previous configure run.
+    """
+    if not state.get("use_model_services"):
+        if CODEX_MODEL_CATALOG_PATH.exists():
+            try:
+                CODEX_MODEL_CATALOG_PATH.unlink()
+            except OSError:
+                # Non-fatal — Codex just re-fetches via /v1/models when
+                # `model_catalog_json` is unset. Leave the stale file alone.
+                pass
+        return None
+    catalog = build_model_catalog(state.get("codex_models"))
+    if catalog is None:
+        return None
+    write_text_file(CODEX_MODEL_CATALOG_PATH, json.dumps(catalog, indent=2))
+    return CODEX_MODEL_CATALOG_PATH
+
+
+def revert_model_catalog_file() -> bool:
+    """Delete the static catalog written during configure. Idempotent."""
+    if not CODEX_MODEL_CATALOG_PATH.exists():
+        return False
+    try:
+        CODEX_MODEL_CATALOG_PATH.unlink()
+        return True
+    except OSError:
+        return False
+
+
 def render_overlay(
-    workspace: str, model: str | None = None, databricks_profile: str | None = None
+    workspace: str,
+    model: str | None = None,
+    databricks_profile: str | None = None,
+    model_catalog_path: Path | None = None,
 ) -> dict:
     overlay: dict = {"model_provider": CODEX_MODEL_PROVIDER_NAME}
     if model:
         overlay["model"] = model
+    if model_catalog_path is not None:
+        overlay["model_catalog_json"] = str(model_catalog_path)
     overlay["model_providers"] = {
         CODEX_MODEL_PROVIDER_NAME: _provider_block(workspace, databricks_profile),
     }
@@ -305,8 +415,19 @@ def write_tool_config(state: dict, model: str | None = None) -> dict:
 
     _remove_legacy_ucode_profile()
     backup_existing_file(CODEX_CONFIG_PATH, CODEX_BACKUP_PATH)
-    overlay = render_overlay(workspace, chosen_model, databricks_profile)
+    # Static catalog written iff the workspace is on UC model-services. When
+    # set, Codex switches to StaticModelsManager and never calls /v1/models —
+    # which is currently rejected by the AI Gateway for `system.ai.*` ids.
+    catalog_path = _write_model_catalog_file(state)
+    overlay = render_overlay(
+        workspace, chosen_model, databricks_profile, model_catalog_path=catalog_path
+    )
     doc = read_toml_safe(CODEX_CONFIG_PATH)
+    # Strip a stale `model_catalog_json` if we're no longer in model-services
+    # mode — `deep_merge_dict` only adds/overwrites keys, it won't clear one
+    # that the new overlay omits.
+    if catalog_path is None:
+        doc.pop("model_catalog_json", None)
     deep_merge_dict(doc, overlay)
     write_toml_file(CODEX_CONFIG_PATH, doc)
     state = mark_tool_managed(state, "codex", MANAGED_KEYS)

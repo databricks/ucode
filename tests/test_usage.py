@@ -206,6 +206,24 @@ class TestSimplifyModelName:
         result = simplify_model_name("opencode", "databricks-claude-sonnet-4")
         assert result == "claude-sonnet-4"
 
+    def test_strips_system_ai_prefix_for_model_services(self):
+        # Model-services-form ids use a `system.ai.` prefix instead of
+        # `databricks-`; the simplified label must match the AI Gateway form
+        # so usage rows stay consistent across discovery paths.
+        assert simplify_model_name("claude", "system.ai.claude-sonnet-4") == "sonnet-4"
+        assert simplify_model_name("codex", "system.ai.gpt-5-5") == "5-5"
+        assert simplify_model_name("gemini", "system.ai.gemini-3-5-flash") == "3-5-flash"
+
+    def test_system_ai_only_stripped_once(self):
+        # Defensive: a name that *starts with* `system.ai.` and embeds
+        # `databricks-` further in is not real, but we want to be sure
+        # we don't double-strip across the two family prefixes. Only the
+        # leading prefix is removed; the embedded one is left alone.
+        assert (
+            simplify_model_name("claude", "system.ai.databricks-claude-sonnet-4")
+            == "databricks-claude-sonnet-4"
+        )
+
 
 class TestExtractModelNames:
     def test_single_model(self):

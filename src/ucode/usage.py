@@ -172,9 +172,14 @@ def simplify_model_name(tool: str, model_name: str) -> str:
     if not normalized:
         return "-"
 
-    prefix = "databricks-"
-    if normalized.startswith(prefix):
-        normalized = normalized[len(prefix) :]
+    # Strip whichever family prefix is in use so usage rows stay consistent
+    # regardless of whether a workspace uses the AI Gateway path
+    # (`databricks-claude-...`) or the UC model-services path
+    # (`system.ai.claude-...`). Order doesn't matter — only one will match.
+    for prefix in ("databricks-", "system.ai."):
+        if normalized.startswith(prefix):
+            normalized = normalized[len(prefix) :]
+            break
 
     tool_prefixes = {
         "claude": "claude-",

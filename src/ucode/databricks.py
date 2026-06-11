@@ -1075,12 +1075,15 @@ def list_model_services(
         url = f"https://{hostname}/api/2.1/unity-catalog/model-services?{urlencode(params)}"
         payload, reason = _get_model_services_page(url, token)
         if payload is None:
-            # Surface the failure only if we have nothing yet; a mid-pagination
-            # blip still returns whatever we collected.
+            # Mid-pagination failure: keep whatever we collected, but propagate
+            # the failure reason so callers can warn the user that the list is
+            # truncated.
             last_reason = reason
             break
         data = cast(dict, payload) if isinstance(payload, dict) else {}
-        for service in data.get("model_services", []):
+        # `dict.get(key, default)` returns the present value even if it's None.
+        services = data.get("model_services") or []
+        for service in services:
             if isinstance(service, dict):
                 model_id = _model_service_id(service)
                 if model_id:
@@ -1095,8 +1098,17 @@ def list_model_services(
 
     deduped = sorted(set(ids))
     if deduped:
-        return deduped, None
-    return [], last_reason or "model-services listing returned no models"
+        # Even on partial success, surface the reason so the caller can warn upstream.
+        return deduped, last_reason
+    if last_reason:
+        return [], last_reason
+    # Empty listing with no HTTP error. The metastore listing mixes
+    # `system.ai.*` foundation models with user-created services in
+    # non-deterministic order across page sizes (verified against
+    # e2-dogfood 2026-06-10), so distinguishing "saw 0 entries" from
+    # "saw N entries, all in user schemas" doesn't change what the user
+    # should do — retry, or verify foundation models are provisioned.
+    return [], "no `system.ai.*` model services found"
 
 
 def discover_model_services(
@@ -1142,7 +1154,9 @@ def discover_model_services(
                 f"claude/gpt/gemini families (got: {sample})"
             ),
         )
-    return claude_models, codex_models, gemini_models, None
+    # Pass `reason` through even on success — `list_model_services` sets it on
+    # partial pagination so the CLI layer can warn about truncation.
+    return claude_models, codex_models, gemini_models, reason
 
 
 def discover_claude_models(workspace: str, token: str) -> tuple[dict[str, str], str | None]:
