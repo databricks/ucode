@@ -42,7 +42,7 @@ from ucode.databricks import (
     install_databricks_cli,
     normalize_workspace_url,
     run_databricks_login,
-    use_model_services,
+    use_uc_securables,
 )
 from ucode.mcp import (
     MCP_CLIENTS,
@@ -168,7 +168,7 @@ def configure_shared_state(
     # was persisted when the workspace was configured. Without this, every
     # launch re-runs discovery and a missing env var would silently revert a
     # model-services workspace to the databricks-* gateway names.
-    model_services = use_model_services(default=bool(prior_state.get("use_model_services")))
+    model_services = use_uc_securables(default=bool(prior_state.get("use_uc_securables")))
     fetch_all = tools is None
     if force_login:
         run_databricks_login(workspace, profile)
@@ -230,7 +230,7 @@ def configure_shared_state(
         state.pop("profile", None)
     # Persist the resolved flag so subsequent launches stay on the same
     # discovery path without the env var being re-exported.
-    state["use_model_services"] = model_services
+    state["use_uc_securables"] = model_services
     state["base_urls"] = build_shared_base_urls(workspace)
     if want_claude:
         state["claude_models"] = claude_models

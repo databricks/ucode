@@ -977,19 +977,19 @@ def build_auth_shell_command(workspace: str, profile: str | None = None) -> str:
     )
 
 
-def use_model_services(default: bool = False) -> bool:
-    """True when the opt-in UC model-services discovery path is enabled.
+def use_uc_securables(default: bool = False) -> bool:
+    """True when the opt-in UC-securables discovery path is enabled.
 
-    Set ``UCODE_USE_MODEL_SERVICES=1`` (or true/yes/on) to discover models via
-    the Unity Catalog model-services API and address them as
-    ``system.ai.<model-name>`` instead of the per-family AI Gateway listings.
+    Set ``UCODE_USE_UC_SECURABLES=1`` (or true/yes/on) to:
+      - discover models via UC `model-services` (`system.ai.<model-name>`)
+      - surface curated `system.ai.*` MCP services in `ucode configure mcp`
 
     The env var, when set to any value, wins. ``default`` is the fallback used
     when the env var is unset — callers pass the value persisted in state so a
-    workspace configured with the flag keeps using model services on later
-    launches without the env var being re-exported each time.
+    workspace configured with the flag stays on the UC path without the env
+    var being re-exported each time.
     """
-    raw = os.environ.get("UCODE_USE_MODEL_SERVICES")
+    raw = os.environ.get("UCODE_USE_UC_SECURABLES")
     if raw is None or not raw.strip():
         return default
     return raw.strip().lower() in {"1", "true", "yes", "on"}
@@ -1143,6 +1143,57 @@ def discover_model_services(
             ),
         )
     return claude_models, codex_models, gemini_models, None
+
+
+# --- MCP services (parallel to model services) -----------------------------
+
+
+_MCP_SERVICE_NAME_PREFIX = "mcp-services/"
+_MCP_SERVICE_REQUIRED_PREFIX = "system.ai."
+
+
+def _mcp_service_full_name(service: dict) -> str | None:
+    """Extract `system.ai.<name>` from one mcp-service entry, or None."""
+    name = service.get("name")
+    if not isinstance(name, str):
+        return None
+    name = name.strip().removeprefix(_MCP_SERVICE_NAME_PREFIX)
+    if not name.startswith(_MCP_SERVICE_REQUIRED_PREFIX):
+        return None
+    status = ((service.get("config") or {}).get("connection") or {}).get("status")
+    if status != "ACTIVE":
+        return None
+    return name
+
+
+def list_mcp_services(workspace: str, token: str) -> tuple[list[str], str | None]:
+    """List Databricks-curated `system.ai.*` MCP services.
+
+    The listing endpoint requires `?parent=schemas/system.ai`; without it the
+    request returns 499 with a truncated body (verified against e2-dogfood
+    2026-06-11). Returns (full_names, reason).
+    """
+    hostname = workspace_hostname(workspace)
+    url = (
+        f"https://{hostname}/api/2.1/unity-catalog/mcp-services"
+        f"?{urlencode({'parent': 'schemas/system.ai'})}"
+    )
+    payload, reason = _http_get_json(url, token, timeout=30)
+    if payload is None:
+        return [], reason
+    data = cast(dict, payload) if isinstance(payload, dict) else {}
+    names = []
+    for service in data.get("mcp_services") or []:
+        if not isinstance(service, dict):
+            continue
+        full_name = _mcp_service_full_name(service)
+        if full_name:
+            names.append(full_name)
+    return sorted(set(names)), None if names else (reason or "no `system.ai.*` mcp services found")
+
+
+def build_mcp_service_url(workspace: str, full_name: str) -> str:
+    return f"{workspace}/ai-gateway/mcp-services/{full_name}"
 
 
 def discover_claude_models(workspace: str, token: str) -> tuple[dict[str, str], str | None]:

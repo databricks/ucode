@@ -137,35 +137,35 @@ def _model_service(model_id: str) -> dict:
     return {"name": f"model-services/{model_id}"}
 
 
-class TestUseModelServices:
+class TestUseUcSecurables:
     def test_off_by_default(self, monkeypatch):
-        monkeypatch.delenv("UCODE_USE_MODEL_SERVICES", raising=False)
-        assert db_mod.use_model_services() is False
+        monkeypatch.delenv("UCODE_USE_UC_SECURABLES", raising=False)
+        assert db_mod.use_uc_securables() is False
 
     def test_truthy_values_enable(self, monkeypatch):
         for value in ("1", "true", "TRUE", "yes", "on"):
-            monkeypatch.setenv("UCODE_USE_MODEL_SERVICES", value)
-            assert db_mod.use_model_services() is True
+            monkeypatch.setenv("UCODE_USE_UC_SECURABLES", value)
+            assert db_mod.use_uc_securables() is True
 
     def test_falsey_values_disable(self, monkeypatch):
         # A non-empty, non-truthy value explicitly disables — even over a
         # persisted default of True.
         for value in ("0", "false", "no"):
-            monkeypatch.setenv("UCODE_USE_MODEL_SERVICES", value)
-            assert db_mod.use_model_services(default=True) is False
+            monkeypatch.setenv("UCODE_USE_UC_SECURABLES", value)
+            assert db_mod.use_uc_securables(default=True) is False
 
     def test_unset_falls_back_to_default(self, monkeypatch):
         # Sticky behavior: when the env var is unset (or blank), the persisted
         # default decides.
-        monkeypatch.delenv("UCODE_USE_MODEL_SERVICES", raising=False)
-        assert db_mod.use_model_services(default=True) is True
-        assert db_mod.use_model_services(default=False) is False
-        monkeypatch.setenv("UCODE_USE_MODEL_SERVICES", "")
-        assert db_mod.use_model_services(default=True) is True
+        monkeypatch.delenv("UCODE_USE_UC_SECURABLES", raising=False)
+        assert db_mod.use_uc_securables(default=True) is True
+        assert db_mod.use_uc_securables(default=False) is False
+        monkeypatch.setenv("UCODE_USE_UC_SECURABLES", "")
+        assert db_mod.use_uc_securables(default=True) is True
 
     def test_env_var_overrides_default(self, monkeypatch):
-        monkeypatch.setenv("UCODE_USE_MODEL_SERVICES", "1")
-        assert db_mod.use_model_services(default=False) is True
+        monkeypatch.setenv("UCODE_USE_UC_SECURABLES", "1")
+        assert db_mod.use_uc_securables(default=False) is True
 
 
 class TestDiscoverModelServices:
