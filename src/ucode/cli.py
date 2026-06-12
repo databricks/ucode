@@ -48,6 +48,7 @@ from ucode.mcp import (
     MCP_CLIENTS,
     configure_mcp_command,
     purge_cross_workspace_mcp_residue,
+    purge_uc_mcp_residue,
     revert_mcp_configs,
 )
 from ucode.state import STATE_PATH, clear_state, load_full_state, load_state, save_state
@@ -173,17 +174,13 @@ def configure_shared_state(
     # launch: target workspace's persisted state). Use *target* state on the
     # launch path so the flag is sticky per-workspace and doesn't leak
     # across workspace switches.
-    # TODO: when this flips uc_enabled True->False, prune any
-    # `system.ai.*` MCP services from state["mcp_servers"] (and their
-    # cross-tool registrations). Today they linger as orphans pointing at
-    # /ai-gateway/mcp-services/* until the user re-runs `configure mcp`
-    # or switches workspaces.
+    target_ws_state = load_full_state().get("workspaces", {}).get(workspace) or {}
+    previous_uc_enabled = bool(target_ws_state.get("uc_enabled"))
     if enable_uc is None:
         if reset_uc:
             enable_uc = uc_enabled(default=False)
         else:
-            target_ws_state = load_full_state().get("workspaces", {}).get(workspace) or {}
-            enable_uc = uc_enabled(default=bool(target_ws_state.get("uc_enabled")))
+            enable_uc = uc_enabled(default=previous_uc_enabled)
     fetch_all = tools is None
     if force_login:
         run_databricks_login(workspace, profile)
@@ -260,6 +257,10 @@ def configure_shared_state(
     # workspace's agent configs aren't stale.
     if previous_workspace and previous_workspace != workspace:
         purge_cross_workspace_mcp_residue(state, workspace)
+    # When the user flips UC discovery off (typically by re-running plain
+    # `ucode configure`), drop any `system.ai.*` MCP service entries
+    if previous_uc_enabled and not enable_uc:
+        purge_uc_mcp_residue(state)
     # Diagnostic reasons are transient — attach after save_state so they don't
     # land on disk but are available to the caller for this run.
     state["_discovery_reasons"] = {

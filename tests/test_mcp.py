@@ -1107,3 +1107,149 @@ class TestRevertMcpConfigs:
             "opencode": True,
             "copilot": True,
         }
+
+
+class TestPurgeUcMcpResidue:
+    """`purge_uc_mcp_residue` runs when uc_enabled flips True->False on a
+    workspace; it drops `system.ai.*` MCP entries from state["mcp_servers"]
+    and de-registers them from each agent CLI, while leaving
+    connection-based (`/api/2.0/mcp/external/`) entries alone."""
+
+    def _patch_clients_installed(self, monkeypatch, clients):
+        monkeypatch.setattr(mcp, "available_mcp_clients", lambda: clients)
+
+    def test_drops_only_system_ai_entries_keeps_connections(self, monkeypatch):
+        removed: list[tuple[str, str]] = []
+        saved: list[dict] = []
+        self._patch_clients_installed(monkeypatch, ["claude", "codex"])
+        monkeypatch.setattr(
+            mcp,
+            "remove_client_mcp_server",
+            lambda client, name: removed.append((client, name)) or ["user"],
+        )
+        monkeypatch.setattr(mcp, "save_state", lambda s: saved.append(dict(s)))
+
+        state = {
+            "workspace": WS,
+            "mcp_servers": [
+                {
+                    "name": "system-ai-github",
+                    "url": f"{WS}/ai-gateway/mcp-services/system.ai.github",
+                    "clients": ["claude", "codex"],
+                },
+                {
+                    "name": "asda-github-mcp",
+                    "url": f"{WS}/api/2.0/mcp/external/asda_github_mcp",
+                    "clients": ["claude"],
+                },
+                {
+                    "name": "system-ai-slack",
+                    "url": f"{WS}/ai-gateway/mcp-services/system.ai.slack",
+                    "clients": ["claude"],
+                },
+            ],
+        }
+
+        mcp.purge_uc_mcp_residue(state)
+
+        assert removed == [
+            ("claude", "system-ai-github"),
+            ("codex", "system-ai-github"),
+            ("claude", "system-ai-slack"),
+        ]
+        assert state["mcp_servers"] == [
+            {
+                "name": "asda-github-mcp",
+                "url": f"{WS}/api/2.0/mcp/external/asda_github_mcp",
+                "clients": ["claude"],
+            }
+        ]
+        assert saved and saved[-1]["mcp_servers"] == state["mcp_servers"]
+
+    def test_no_uc_entries_is_a_noop(self, monkeypatch):
+        saved: list[dict] = []
+        monkeypatch.setattr(
+            mcp,
+            "remove_client_mcp_server",
+            lambda client, name: (_ for _ in ()).throw(AssertionError("should not be called")),
+        )
+        monkeypatch.setattr(mcp, "save_state", lambda s: saved.append(dict(s)))
+        self._patch_clients_installed(monkeypatch, ["claude"])
+
+        state = {
+            "workspace": WS,
+            "mcp_servers": [
+                {
+                    "name": "asda-github-mcp",
+                    "url": f"{WS}/api/2.0/mcp/external/asda_github_mcp",
+                    "clients": ["claude"],
+                }
+            ],
+        }
+        mcp.purge_uc_mcp_residue(state)
+        assert state["mcp_servers"] == [
+            {
+                "name": "asda-github-mcp",
+                "url": f"{WS}/api/2.0/mcp/external/asda_github_mcp",
+                "clients": ["claude"],
+            }
+        ]
+        assert saved == []
+
+    def test_skips_clients_not_installed(self, monkeypatch):
+        # If gemini isn't on the box (e.g. uninstalled after the entry was
+        # registered), we still drop the entry from state but skip the
+        # de-registration call so we don't crash.
+        removed: list[tuple[str, str]] = []
+        self._patch_clients_installed(monkeypatch, ["claude"])
+        monkeypatch.setattr(
+            mcp,
+            "remove_client_mcp_server",
+            lambda client, name: removed.append((client, name)) or ["user"],
+        )
+        monkeypatch.setattr(mcp, "save_state", lambda s: None)
+
+        state = {
+            "workspace": WS,
+            "mcp_servers": [
+                {
+                    "name": "system-ai-github",
+                    "url": f"{WS}/ai-gateway/mcp-services/system.ai.github",
+                    "clients": ["claude", "gemini"],
+                },
+            ],
+        }
+        mcp.purge_uc_mcp_residue(state)
+        assert removed == [("claude", "system-ai-github")]
+        assert state["mcp_servers"] == []
+
+    def test_swallows_per_client_removal_errors(self, monkeypatch):
+        # One client failing to remove must not stop the rest.
+        attempts: list[tuple[str, str]] = []
+
+        def fake_remove(client, name):
+            attempts.append((client, name))
+            if client == "claude":
+                raise RuntimeError("claude config locked")
+            return ["user"]
+
+        self._patch_clients_installed(monkeypatch, ["claude", "codex"])
+        monkeypatch.setattr(mcp, "remove_client_mcp_server", fake_remove)
+        monkeypatch.setattr(mcp, "save_state", lambda s: None)
+
+        state = {
+            "workspace": WS,
+            "mcp_servers": [
+                {
+                    "name": "system-ai-github",
+                    "url": f"{WS}/ai-gateway/mcp-services/system.ai.github",
+                    "clients": ["claude", "codex"],
+                },
+            ],
+        }
+        mcp.purge_uc_mcp_residue(state)
+        assert attempts == [
+            ("claude", "system-ai-github"),
+            ("codex", "system-ai-github"),
+        ]
+        assert state["mcp_servers"] == []

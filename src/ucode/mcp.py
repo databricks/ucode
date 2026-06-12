@@ -511,6 +511,15 @@ def _partition_mcp_entries_by_workspace(
     return current, foreign
 
 
+_UC_MCP_SERVICE_URL_FRAGMENT = "/ai-gateway/mcp-services/"
+
+
+def _is_uc_mcp_service_entry(entry: dict) -> bool:
+    """An MCP entry pointing at a curated `system.ai.*` UC MCP service."""
+    url = entry.get("url")
+    return isinstance(url, str) and _UC_MCP_SERVICE_URL_FRAGMENT in url
+
+
 def _mcp_entries_only_in_other_workspaces(current_workspace: str) -> dict[str, set[str]]:
     """Return ``{name: {client, ...}}`` for MCPs ucode tracks only in workspaces other than ``current_workspace``."""
     full_state = load_full_state()
@@ -937,6 +946,43 @@ def purge_cross_workspace_mcp_residue(state: dict, workspace: str) -> None:
             f"Removed {len(actually_removed)} MCP {noun} left over from "
             f"previously-configured workspaces: {', '.join(actually_removed)}."
         )
+
+
+def purge_uc_mcp_residue(state: dict) -> None:
+    """Drop `system.ai.*` UC MCP service entries when UC discovery is disabled."""
+    raw_mcp_servers = list(state.get("mcp_servers") or [])
+    keep: list[dict] = []
+    drop: list[dict] = []
+    for entry in raw_mcp_servers:
+        if _is_uc_mcp_service_entry(entry):
+            drop.append(entry)
+        else:
+            keep.append(entry)
+    if not drop:
+        return
+
+    installed = set(available_mcp_clients())
+    dropped_names = ", ".join((_server_name(server) or "(unnamed)") for server in drop)
+    noun = "entry" if len(drop) == 1 else "entries"
+    print_warning(
+        f"Dropping {len(drop)} `system.ai.*` MCP {noun} after UC discovery was "
+        f"disabled: {dropped_names}."
+    )
+    for server in drop:
+        name = _server_name(server)
+        if not name:
+            continue
+        for client in server.get("clients") or []:
+            if client not in installed or client not in MCP_CLIENTS:
+                continue
+            try:
+                remove_client_mcp_server(client, name)
+            except RuntimeError as exc:
+                print_warning(
+                    f"Failed to remove `{name}` from {MCP_CLIENTS[client]['display']}: {exc}"
+                )
+    state["mcp_servers"] = keep
+    save_state(state)
 
 
 def configure_mcp_command() -> int:

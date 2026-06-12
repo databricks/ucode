@@ -161,6 +161,47 @@ class TestConfigureSharedStateEnableUcE2E:
             f"Reset run still pulled UC ids: {[m for m in ids if m.startswith('system.ai.')][:5]}"
         )
 
+    def test_plain_configure_purges_system_ai_mcp_entries(
+        self, monkeypatch, e2e_workspace, e2e_token
+    ):
+        """The True->False reset must also drop any `system.ai.*` MCP
+        service entries from state["mcp_servers"] (and from each tool's
+        registration) so they don't linger as orphans after UC is off.
+        Connection-based entries are left intact."""
+        from ucode.state import save_state
+
+        if not _has_uc_models(e2e_workspace, e2e_token):
+            pytest.skip("Workspace has no system.ai.* model services.")
+        monkeypatch.delenv("UCODE_ENABLE_UC", raising=False)
+
+        # Pretend the user just ran `--enable-uc` and then `configure mcp`,
+        # registering a UC MCP service entry alongside a regular connection
+        # entry. We seed the state directly to avoid driving the picker.
+        configure_shared_state(e2e_workspace, force_login=False, enable_uc=True)
+        seeded = load_state()
+        seeded["mcp_servers"] = [
+            {
+                "name": "system-ai-github",
+                "url": f"{e2e_workspace}/ai-gateway/mcp-services/system.ai.github",
+                "clients": [],  # no installed clients => no per-tool removals
+            },
+            {
+                "name": "regular-connection-mcp",
+                "url": f"{e2e_workspace}/api/2.0/mcp/external/regular_connection_mcp",
+                "clients": [],
+            },
+        ]
+        save_state(seeded)
+
+        # Plain `ucode configure` -> reset_uc=True, no flag, no env -> False.
+        configure_shared_state(e2e_workspace, force_login=False, enable_uc=None, reset_uc=True)
+
+        after = load_state()
+        names = sorted((s.get("name") or "") for s in (after.get("mcp_servers") or []))
+        assert names == ["regular-connection-mcp"], (
+            f"Expected only the connection-based entry to remain, got: {names}"
+        )
+
     def test_launch_path_preserves_persisted_uc_enabled(
         self, monkeypatch, e2e_workspace, e2e_token
     ):
