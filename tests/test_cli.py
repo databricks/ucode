@@ -80,8 +80,11 @@ class TestHelp:
         result = runner.invoke(app, ["configure", "--help"])
         assert result.exit_code == 0
         output = _strip_ansi(result.output)
+        # Typer wraps long help text across lines and pads with box-drawing
+        # characters; collapse whitespace + box chars before substring-matching.
+        flat = re.sub(r"[│╭╮╯╰─\s]+", " ", output)
         assert "--agents" in output
-        assert "comma-separated list of agents" in output
+        assert "comma-separated list of agents" in flat
         assert "--workspaces" in output
 
 
@@ -380,7 +383,9 @@ class TestConfigureAgentFlag:
         ):
             result = runner.invoke(app, ["configure"])
         assert result.exit_code == 0, result.output
-        mock_cfg.assert_called_once_with(prompt_optional_updates=True)
+        mock_cfg.assert_called_once_with(
+            prompt_optional_updates=True, enable_uc=None, reset_uc=True
+        )
 
     def test_agents_flag_calls_configure_with_tools(self):
         with (
@@ -392,7 +397,10 @@ class TestConfigureAgentFlag:
         assert result.exit_code == 0, result.output
         mock_install.assert_not_called()
         mock_cfg.assert_called_once_with(
-            selected_tools=["claude", "codex"], prompt_optional_updates=True
+            selected_tools=["claude", "codex"],
+            prompt_optional_updates=True,
+            enable_uc=None,
+            reset_uc=True,
         )
 
     def test_agents_flag_normalizes_aliases_and_dedupes(self):
@@ -404,7 +412,10 @@ class TestConfigureAgentFlag:
             result = runner.invoke(app, ["configure", "--agents", " claude-code, codex,claude "])
         assert result.exit_code == 0, result.output
         mock_cfg.assert_called_once_with(
-            selected_tools=["claude", "codex"], prompt_optional_updates=True
+            selected_tools=["claude", "codex"],
+            prompt_optional_updates=True,
+            enable_uc=None,
+            reset_uc=True,
         )
 
     def test_workspaces_flag_calls_configure_with_workspaces(self):
@@ -428,6 +439,8 @@ class TestConfigureAgentFlag:
                 ("https://second.databricks.com", None),
             ],
             prompt_optional_updates=True,
+            enable_uc=None,
+            reset_uc=True,
         )
 
     def test_agents_and_workspaces_flags_call_configure_with_both(self):
@@ -445,6 +458,8 @@ class TestConfigureAgentFlag:
             selected_tools=["claude", "codex"],
             workspaces=[("https://first.com", None)],
             prompt_optional_updates=True,
+            enable_uc=None,
+            reset_uc=True,
         )
 
     def test_agent_and_workspaces_flags_call_configure_with_both(self):
@@ -461,7 +476,9 @@ class TestConfigureAgentFlag:
         mock_install.assert_called_once_with(
             "claude", strict=True, update_existing=True, prompt_optional_updates=True
         )
-        mock_cfg.assert_called_once_with("claude", workspaces=[("https://first.com", None)])
+        mock_cfg.assert_called_once_with(
+            "claude", workspaces=[("https://first.com", None)], enable_uc=None, reset_uc=True
+        )
 
     def test_agent_flag_calls_configure_with_tool(self):
         with (
@@ -474,7 +491,7 @@ class TestConfigureAgentFlag:
         mock_install.assert_called_once_with(
             "claude", strict=True, update_existing=True, prompt_optional_updates=True
         )
-        mock_cfg.assert_called_once_with("claude")
+        mock_cfg.assert_called_once_with("claude", enable_uc=None, reset_uc=True)
 
     def test_skip_upgrade_flag_disables_optional_update_prompt(self):
         with (
@@ -484,7 +501,9 @@ class TestConfigureAgentFlag:
         ):
             result = runner.invoke(app, ["configure", "--skip-upgrade"])
         assert result.exit_code == 0, result.output
-        mock_cfg.assert_called_once_with(prompt_optional_updates=False)
+        mock_cfg.assert_called_once_with(
+            prompt_optional_updates=False, enable_uc=None, reset_uc=True
+        )
 
     def test_skip_upgrade_flag_with_agent_skips_optional_update(self):
         with (
@@ -507,7 +526,10 @@ class TestConfigureAgentFlag:
             result = runner.invoke(app, ["configure", "--agents", "claude,codex", "--skip-upgrade"])
         assert result.exit_code == 0, result.output
         mock_cfg.assert_called_once_with(
-            selected_tools=["claude", "codex"], prompt_optional_updates=False
+            selected_tools=["claude", "codex"],
+            prompt_optional_updates=False,
+            enable_uc=None,
+            reset_uc=True,
         )
 
     def test_agent_flag_normalizes_alias(self):
@@ -518,7 +540,7 @@ class TestConfigureAgentFlag:
         ):
             result = runner.invoke(app, ["configure", "--agent", "claude-code"])
         assert result.exit_code == 0, result.output
-        mock_cfg.assert_called_once_with("claude")
+        mock_cfg.assert_called_once_with("claude", enable_uc=None, reset_uc=True)
 
     def test_upgrade_runs_uv_tool_install(self):
         with patch("subprocess.run") as mock_run:
@@ -658,7 +680,14 @@ class TestConfigureAgentsSelection:
         }
         configured_shared: list[tuple[str, str | None, tuple[str, ...] | None, bool]] = []
 
-        def fake_configure_shared_state(workspace, profile=None, tools=None, force_login=False):
+        def fake_configure_shared_state(
+            workspace,
+            profile=None,
+            tools=None,
+            force_login=False,
+            enable_uc=None,
+            reset_uc=False,
+        ):
             configured_shared.append(
                 (workspace, profile, tuple(tools) if tools is not None else None, force_login)
             )

@@ -27,10 +27,14 @@ from questionary.styles import merge_styles_default
 from ucode.agents import copilot, gemini, opencode
 from ucode.config_io import restore_file
 from ucode.databricks import (
+    build_mcp_service_url,
     ensure_databricks_auth,
+    get_databricks_token,
     list_databricks_apps,
     list_databricks_connections,
     list_genie_spaces,
+    list_mcp_services,
+    uc_enabled,
     workspace_hostname,
 )
 from ucode.state import load_full_state, load_state, save_state
@@ -76,6 +80,7 @@ EXTERNAL_MCP_SELECTION_PREFIX = "external:"
 SQL_MCP_VALUE = "managed:sql"
 GENIE_SPACE_SELECTION_PREFIX = "genie-space:"
 APP_MCP_SELECTION_PREFIX = "app:"
+MCP_SERVICE_SELECTION_PREFIX = "mcp-service:"
 MCP_ADD_PREFIX = "add:"
 MCP_CONNECTION_MARKERS = (
     "is_mcp",
@@ -360,6 +365,15 @@ def external_mcp_connection_names(connections: list[dict]) -> list[str]:
 
 def discover_external_mcp_connection_names(workspace: str, profile: str | None = None) -> list[str]:
     return external_mcp_connection_names(list_databricks_connections(workspace, profile))
+
+
+def discover_mcp_service_names(workspace: str, profile: str | None = None) -> list[str]:
+    """Curated `system.ai.*` MCP services. Empty list if discovery fails so
+    callers can fall back to legacy connection discovery without surfacing
+    every error to the picker."""
+    token = get_databricks_token(workspace, profile)
+    names, _reason = list_mcp_services(workspace, token)
+    return names
 
 
 def _normalize_workspace_title(text: str) -> str:
@@ -679,6 +693,7 @@ def build_mcp_picker_choices(
     available_genie_servers: list[dict],
     available_app_servers: list[dict],
     original_servers: list[dict],
+    available_mcp_service_names: list[str] | None = None,
 ) -> list[questionary.Choice | questionary.Separator]:
     original_by_name = _servers_by_name(original_servers)
     known_names = set(original_by_name)
@@ -691,6 +706,17 @@ def build_mcp_picker_choices(
     else:
         choices.append(_add_choice(SQL_MCP_VALUE, "Databricks SQL"))
     displayed_names.add("databricks-sql")
+
+    for name in available_mcp_service_names or []:
+        # Picker shows the dotted UC name; state/agents store the dashed form
+        # (see resolver). Compare against the dashed form when checking what's
+        # already registered.
+        registered_as = name.replace(".", "-")
+        if registered_as in known_names:
+            choices.append(_server_choice(registered_as, True, name))
+        else:
+            choices.append(_add_choice(f"{MCP_SERVICE_SELECTION_PREFIX}{name}", name))
+        displayed_names.add(registered_as)
 
     for name in available_external_names:
         if name in known_names:
@@ -743,6 +769,7 @@ def prompt_for_mcp_server_choices(
     available_genie_servers: list[dict],
     available_app_servers: list[dict],
     original_servers: list[dict],
+    available_mcp_service_names: list[str] | None = None,
 ) -> list[str] | None:
     selection = _scrolling_checkbox(
         "MCP:",
@@ -751,6 +778,7 @@ def prompt_for_mcp_server_choices(
             available_genie_servers,
             available_app_servers,
             original_servers,
+            available_mcp_service_names,
         ),
         style=_picker_style(),
         instruction="(space to toggle, enter to save, type to filter)",
@@ -800,6 +828,14 @@ def _resolve_mcp_selection(
         if not server_name:
             raise RuntimeError("missing external connection name")
         return server_name, f"{workspace}/api/2.0/mcp/external/{server_name}"
+
+    if selection.startswith(MCP_SERVICE_SELECTION_PREFIX):
+        full_name = selection.removeprefix(MCP_SERVICE_SELECTION_PREFIX)
+        if not full_name:
+            raise RuntimeError("missing MCP service name")
+        # Agent CLIs (claude/codex/gemini) reject dots in registered names.
+        # URL keeps the UC `<cat>.<schema>.<id>` form; entry name uses dashes.
+        return full_name.replace(".", "-"), build_mcp_service_url(workspace, full_name)
 
     if selection == SQL_MCP_VALUE:
         return "databricks-sql", f"{workspace}/api/2.0/mcp/sql"
@@ -952,6 +988,18 @@ def configure_mcp_command() -> int:
         "Databricks apps",
         lambda: discover_app_mcp_servers(workspace, profile),
     )
+    # Curated `system.ai.*` MCP services live behind a separate UC API and
+    # are gated on the same UC opt-in that enables model-services discovery
+    # (env: UCODE_ENABLE_UC, CLI: `ucode configure --enable-uc`, persisted
+    # in state on configure).
+    available_mcp_service_names = (
+        _discover_mcp_source(
+            "MCP services",
+            lambda: discover_mcp_service_names(workspace, profile),
+        )
+        if uc_enabled(default=bool(state.get("uc_enabled")))
+        else []
+    )
 
     original_mcp_servers: list[dict] = list(state.get("mcp_servers") or [])
     original_by_name = _servers_by_name(original_mcp_servers)
@@ -960,6 +1008,7 @@ def configure_mcp_command() -> int:
         available_genie_mcp_servers,
         available_app_mcp_servers,
         original_mcp_servers,
+        available_mcp_service_names,
     )
     if selections is None:
         return 0

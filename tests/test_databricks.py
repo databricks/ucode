@@ -132,6 +132,266 @@ class TestDiscoverClaudeModels:
         assert models["opus"] == "databricks-claude-opus-4-8"
 
 
+def _model_service(model_id: str) -> dict:
+    """A model-services entry whose `name` strips to `model_id`."""
+    return {"name": f"model-services/{model_id}"}
+
+
+class TestUcEnabled:
+    def test_off_by_default(self, monkeypatch):
+        monkeypatch.delenv("UCODE_ENABLE_UC", raising=False)
+        assert db_mod.uc_enabled() is False
+
+    def test_truthy_values_enable(self, monkeypatch):
+        for value in ("1", "true", "TRUE", "yes", "on"):
+            monkeypatch.setenv("UCODE_ENABLE_UC", value)
+            assert db_mod.uc_enabled() is True
+
+    def test_falsey_values_disable(self, monkeypatch):
+        # A non-empty, non-truthy value explicitly disables — even over a
+        # persisted default of True.
+        for value in ("0", "false", "no"):
+            monkeypatch.setenv("UCODE_ENABLE_UC", value)
+            assert db_mod.uc_enabled(default=True) is False
+
+    def test_unset_falls_back_to_default(self, monkeypatch):
+        # Sticky behavior: when the env var is unset (or blank), the persisted
+        # default decides.
+        monkeypatch.delenv("UCODE_ENABLE_UC", raising=False)
+        assert db_mod.uc_enabled(default=True) is True
+        assert db_mod.uc_enabled(default=False) is False
+        monkeypatch.setenv("UCODE_ENABLE_UC", "")
+        assert db_mod.uc_enabled(default=True) is True
+
+    def test_env_var_overrides_default(self, monkeypatch):
+        monkeypatch.setenv("UCODE_ENABLE_UC", "1")
+        assert db_mod.uc_enabled(default=False) is True
+
+
+class TestDiscoverModelServices:
+    def test_buckets_families_by_name(self, monkeypatch):
+        payload = {
+            "model_services": [
+                _model_service("system.ai.claude-opus-4-7"),
+                _model_service("system.ai.claude-opus-4-8"),
+                _model_service("system.ai.claude-sonnet-4-6"),
+                _model_service("system.ai.gpt-5"),
+                _model_service("system.ai.gemini-2-5-flash"),
+                _model_service("system.ai.gemini-3-5-flash"),
+                _model_service("system.ai.llama-4-maverick"),
+            ]
+        }
+        monkeypatch.setattr(
+            db_mod, "_http_get_json", lambda url, token, timeout=10: (payload, None)
+        )
+
+        claude, codex, gemini, reason = db_mod.discover_model_services(WS, "token")
+
+        assert reason is None
+        # Newest opus wins; sonnet bucketed; haiku absent.
+        assert claude == {
+            "opus": "system.ai.claude-opus-4-8",
+            "sonnet": "system.ai.claude-sonnet-4-6",
+        }
+        assert codex == ["system.ai.gpt-5"]
+        # Gemini ordered newest-first via the shared sort key.
+        assert gemini[0] == "system.ai.gemini-3-5-flash"
+        # llama is not bucketed into any of the three families.
+        assert "system.ai.llama-4-maverick" not in codex + gemini
+
+    def test_paginates_via_next_page_token(self, monkeypatch):
+        pages = {
+            None: {
+                "model_services": [_model_service("system.ai.gpt-5")],
+                "next_page_token": "tok2",
+            },
+            "tok2": {
+                "model_services": [_model_service("system.ai.claude-opus-4-8")],
+            },
+        }
+
+        def fake_get(url, token, timeout=10):
+            token_param = None
+            if "page_token=" in url:
+                token_param = url.split("page_token=")[1].split("&")[0]
+            return pages[token_param], None
+
+        monkeypatch.setattr(db_mod, "_http_get_json", fake_get)
+
+        claude, codex, _, reason = db_mod.discover_model_services(WS, "token")
+
+        assert reason is None
+        assert codex == ["system.ai.gpt-5"]
+        assert claude == {"opus": "system.ai.claude-opus-4-8"}
+
+    def test_http_failure_returns_reason(self, monkeypatch):
+        monkeypatch.setattr(
+            db_mod, "_http_get_json", lambda url, token, timeout=10: (None, "HTTP 500 Server Error")
+        )
+
+        claude, codex, gemini, reason = db_mod.discover_model_services(WS, "token")
+
+        assert (claude, codex, gemini) == ({}, [], [])
+        assert reason == "HTTP 500 Server Error"
+
+    def test_no_matching_families_reports_sample(self, monkeypatch):
+        payload = {"model_services": [_model_service("system.ai.llama-4-maverick")]}
+        monkeypatch.setattr(
+            db_mod, "_http_get_json", lambda url, token, timeout=10: (payload, None)
+        )
+
+        claude, codex, gemini, reason = db_mod.discover_model_services(WS, "token")
+
+        assert (claude, codex, gemini) == ({}, [], [])
+        assert reason is not None and "llama-4-maverick" in reason
+
+    def test_ignores_non_system_ai_schemas(self, monkeypatch):
+        # The metastore listing returns services from every schema; only
+        # system.ai.* foundation models should be picked up.
+        payload = {
+            "model_services": [
+                _model_service("system.ai.gpt-5"),
+                _model_service("main.svenwb.gpt-5-5"),
+                _model_service("temp.erni.claude-opus-4-8"),
+                _model_service("dnasi_agent_cuj.default.dnasi-gpt55-test"),
+            ]
+        }
+        monkeypatch.setattr(
+            db_mod, "_http_get_json", lambda url, token, timeout=10: (payload, None)
+        )
+
+        claude, codex, gemini, reason = db_mod.discover_model_services(WS, "token")
+
+        assert reason is None
+        assert codex == ["system.ai.gpt-5"]
+        assert claude == {}  # temp.erni.claude-* must not be bucketed
+        assert gemini == []
+
+    def test_retries_page_before_giving_up(self, monkeypatch):
+        payload = {"model_services": [_model_service("system.ai.gpt-5")]}
+        calls = {"n": 0}
+
+        def flaky_get(url, token, timeout=10):
+            calls["n"] += 1
+            if calls["n"] < 3:
+                return None, "HTTP 504 Gateway Timeout"
+            return payload, None
+
+        monkeypatch.setattr(db_mod, "_http_get_json", flaky_get)
+
+        ids, reason = db_mod.list_model_services(WS, "token")
+
+        assert reason is None
+        assert ids == ["system.ai.gpt-5"]
+        assert calls["n"] == 3  # two failures, third succeeds
+
+
+class TestListMcpServices:
+    def test_accepts_entries_without_connection_status(self, monkeypatch):
+        payload = {
+            "mcp_services": [
+                {
+                    "name": "mcp-services/system.ai.github",
+                    "config": {"usage_tracking": {"enabled": True}, "tracing": {"enabled": True}},
+                },
+                {
+                    "name": "mcp-services/system.ai.atlassian",
+                    "config": {},
+                },
+                {
+                    "name": "mcp-services/system.ai.slack",
+                },
+            ]
+        }
+        monkeypatch.setattr(
+            db_mod, "_http_get_json", lambda url, token, timeout=30: (payload, None)
+        )
+
+        names, reason = db_mod.list_mcp_services(WS, "token")
+
+        assert reason is None
+        assert names == ["system.ai.atlassian", "system.ai.github", "system.ai.slack"]
+
+    def test_accepts_legacy_active_status(self, monkeypatch):
+        payload = {
+            "mcp_services": [
+                {
+                    "name": "mcp-services/system.ai.github",
+                    "config": {"connection": {"status": "ACTIVE"}},
+                },
+            ]
+        }
+        monkeypatch.setattr(
+            db_mod, "_http_get_json", lambda url, token, timeout=30: (payload, None)
+        )
+
+        names, reason = db_mod.list_mcp_services(WS, "token")
+
+        assert reason is None
+        assert names == ["system.ai.github"]
+
+    def test_rejects_explicit_non_active_status(self, monkeypatch):
+        # If the field is present and non-ACTIVE, drop the entry — the
+        # backing connection is broken and the proxy will fail.
+        payload = {
+            "mcp_services": [
+                {
+                    "name": "mcp-services/system.ai.github",
+                    "config": {"connection": {"status": "ACTIVE"}},
+                },
+                {
+                    "name": "mcp-services/system.ai.broken",
+                    "config": {"connection": {"status": "FAILED"}},
+                },
+            ]
+        }
+        monkeypatch.setattr(
+            db_mod, "_http_get_json", lambda url, token, timeout=30: (payload, None)
+        )
+
+        names, _reason = db_mod.list_mcp_services(WS, "token")
+
+        assert names == ["system.ai.github"]
+
+    def test_ignores_non_system_ai_entries(self, monkeypatch):
+        payload = {
+            "mcp_services": [
+                {"name": "mcp-services/system.ai.github"},
+                {"name": "mcp-services/main.svenwb.github_mcp"},
+                {"name": "mcp-services/temp.erni.github_mcp"},
+            ]
+        }
+        monkeypatch.setattr(
+            db_mod, "_http_get_json", lambda url, token, timeout=30: (payload, None)
+        )
+
+        names, _reason = db_mod.list_mcp_services(WS, "token")
+
+        assert names == ["system.ai.github"]
+
+    def test_http_failure_propagates_reason(self, monkeypatch):
+        monkeypatch.setattr(
+            db_mod,
+            "_http_get_json",
+            lambda url, token, timeout=30: (None, "HTTP 500 Server Error"),
+        )
+
+        names, reason = db_mod.list_mcp_services(WS, "token")
+
+        assert names == []
+        assert reason == "HTTP 500 Server Error"
+
+    def test_empty_payload_reports_no_results(self, monkeypatch):
+        monkeypatch.setattr(
+            db_mod, "_http_get_json", lambda url, token, timeout=30: ({"mcp_services": []}, None)
+        )
+
+        names, reason = db_mod.list_mcp_services(WS, "token")
+
+        assert names == []
+        assert reason and "no `system.ai.*`" in reason
+
+
 def _foundation_models_payload(names):
     return {
         "endpoints": [

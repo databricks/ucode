@@ -255,6 +255,10 @@ def _openai_model_id(model: str | None) -> str | None:
 
 
 def _codex_model_id(model: str | None) -> str | None:
+    # UC model-services ids (`system.ai.gpt-5`) route by name through the
+    # gateway, so they must be sent verbatim — not rewritten to an OpenAI id.
+    if model and model.startswith("system.ai."):
+        return model
     if model in CODEX_OPENAI_ID_INCOMPATIBLE_MODELS:
         return model
     return _openai_model_id(model)
@@ -263,7 +267,12 @@ def _codex_model_id(model: str | None) -> str | None:
 def _parse_gpt(model: str | None) -> tuple[int, int | None, int | None, str] | None:
     if not model:
         return None
-    match = _GPT_RE.fullmatch(model.split("/")[-1])
+    # Strip the UC model-services prefix so `system.ai.gpt-5` parses for version
+    # selection; the original id is preserved by callers that need it verbatim.
+    tail = model.split("/")[-1]
+    if tail.startswith("system.ai."):
+        tail = tail[len("system.ai.") :]
+    match = _GPT_RE.fullmatch(tail)
     if not match:
         return None
     major, minor, patch, suffix = match.groups()

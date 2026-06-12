@@ -33,6 +33,7 @@ from ucode.databricks import (
     discover_claude_models,
     discover_codex_models,
     discover_gemini_models,
+    discover_model_services,
     ensure_ai_gateway_v2,
     ensure_databricks_auth,
     find_profile_name_for_host,
@@ -41,6 +42,7 @@ from ucode.databricks import (
     install_databricks_cli,
     normalize_workspace_url,
     run_databricks_login,
+    uc_enabled,
 )
 from ucode.mcp import (
     MCP_CLIENTS,
@@ -149,6 +151,8 @@ def configure_shared_state(
     profile: str | None = None,
     tools: list[str] | None = None,
     force_login: bool = False,
+    enable_uc: bool | None = None,
+    reset_uc: bool = False,
 ) -> dict:
     """Log into Databricks, enforce AI Gateway v2, fetch model lists, persist state.
 
@@ -158,9 +162,28 @@ def configure_shared_state(
     ``--profile`` to every CLI invocation so ambiguous `~/.databrickscfg`
     entries (e.g. DEFAULT and a named profile both pointing at the same host)
     don't error out. If ``None``, we resolve it from the host after login.
+    ``enable_uc`` is the resolved CLI flag (`--enable-uc`): when not None
+    it overrides both the env var and the persisted state.
+    ``reset_uc`` is True only on the explicit ``ucode configure`` flow.
     """
     workspace = normalize_workspace_url(workspace)
-    previous_workspace = load_state().get("workspace")
+    prior_state = load_state()
+    previous_workspace = prior_state.get("workspace")
+    # Precedence: explicit CLI flag > env var > (configure: reset to False;
+    # launch: target workspace's persisted state). Use *target* state on the
+    # launch path so the flag is sticky per-workspace and doesn't leak
+    # across workspace switches.
+    # TODO: when this flips uc_enabled True->False, prune any
+    # `system.ai.*` MCP services from state["mcp_servers"] (and their
+    # cross-tool registrations). Today they linger as orphans pointing at
+    # /ai-gateway/mcp-services/* until the user re-runs `configure mcp`
+    # or switches workspaces.
+    if enable_uc is None:
+        if reset_uc:
+            enable_uc = uc_enabled(default=False)
+        else:
+            target_ws_state = load_full_state().get("workspaces", {}).get(workspace) or {}
+            enable_uc = uc_enabled(default=bool(target_ws_state.get("uc_enabled")))
     fetch_all = tools is None
     if force_login:
         run_databricks_login(workspace, profile)
@@ -184,19 +207,29 @@ def configure_shared_state(
     claude_reason: str | None = None
     gemini_reason: str | None = None
     codex_reason: str | None = None
-    with spinner("Fetching available models..."):
+    claude_models = {}
+    gemini_models = []
+    codex_models = []
+    if enable_uc:
+        # Opt-in: one UC model-services call yields all families as
+        # `system.ai.<model-name>` ids, bucketed by name. The single reason is
+        # shared across the families that were requested.
+        with spinner("Fetching available models (model services)..."):
+            ms_claude, ms_codex, ms_gemini, ms_reason = discover_model_services(workspace, token)
         if want_claude:
-            claude_models, claude_reason = discover_claude_models(workspace, token)
-        else:
-            claude_models = {}
+            claude_models, claude_reason = ms_claude, ms_reason
         if want_gemini:
-            gemini_models, gemini_reason = discover_gemini_models(workspace, token)
-        else:
-            gemini_models = []
+            gemini_models, gemini_reason = ms_gemini, ms_reason
         if want_codex:
-            codex_models, codex_reason = discover_codex_models(workspace, token)
-        else:
-            codex_models = []
+            codex_models, codex_reason = ms_codex, ms_reason
+    else:
+        with spinner("Fetching available models..."):
+            if want_claude:
+                claude_models, claude_reason = discover_claude_models(workspace, token)
+            if want_gemini:
+                gemini_models, gemini_reason = discover_gemini_models(workspace, token)
+            if want_codex:
+                codex_models, codex_reason = discover_codex_models(workspace, token)
     opencode_models: dict[str, list[str]] = {}
     if claude_models:
         opencode_models["anthropic"] = list(claude_models.values())
@@ -210,6 +243,9 @@ def configure_shared_state(
         state["profile"] = profile
     else:
         state.pop("profile", None)
+    # Persist the resolved flag so subsequent launches stay on the same
+    # discovery path without the env var or CLI flag being re-passed.
+    state["uc_enabled"] = enable_uc
     state["base_urls"] = build_shared_base_urls(workspace)
     if want_claude:
         state["claude_models"] = claude_models
@@ -239,13 +275,22 @@ def _configure_shared_workspace_states(
     tools: list[str] | None,
     *,
     force_login: bool,
+    enable_uc: bool | None = None,
+    reset_uc: bool = False,
 ) -> list[dict]:
     if not workspaces:
         raise RuntimeError("At least one workspace must be provided.")
     states: list[dict] = []
     for workspace, profile in workspaces:
         states.append(
-            configure_shared_state(workspace, profile=profile, tools=tools, force_login=force_login)
+            configure_shared_state(
+                workspace,
+                profile=profile,
+                tools=tools,
+                force_login=force_login,
+                enable_uc=enable_uc,
+                reset_uc=reset_uc,
+            )
         )
     return states
 
@@ -256,6 +301,8 @@ def configure_workspace_command(
     workspaces: list[tuple[str, str | None]] | None = None,
     *,
     prompt_optional_updates: bool = True,
+    enable_uc: bool | None = None,
+    reset_uc: bool = False,
 ) -> int:
     if tool is not None and selected_tools is not None:
         raise RuntimeError("Use either --agent or --agents, not both.")
@@ -263,7 +310,9 @@ def configure_workspace_command(
     workspace_entries = workspaces or [_prompt_for_configuration(tool)]
 
     if tool is not None:
-        states = _configure_shared_workspace_states(workspace_entries, [tool], force_login=True)
+        states = _configure_shared_workspace_states(
+            workspace_entries, [tool], force_login=True, enable_uc=enable_uc, reset_uc=reset_uc
+        )
         state = states[0]
         state = configure_single_tool(tool, state)
         spec = TOOL_SPECS[tool]
@@ -290,7 +339,13 @@ def configure_workspace_command(
             raise RuntimeError(f"{spec['display']} validation failed — config reverted.")
         return 0
 
-    states = _configure_shared_workspace_states(workspace_entries, selected_tools, force_login=True)
+    states = _configure_shared_workspace_states(
+        workspace_entries,
+        selected_tools,
+        force_login=True,
+        enable_uc=enable_uc,
+        reset_uc=reset_uc,
+    )
     state = states[0]
     save_state(state)
 
@@ -649,6 +704,18 @@ def configure(
             "'low' prints terse single-line status instead.",
         ),
     ] = "normal",
+    enable_uc: Annotated[
+        bool,
+        typer.Option(
+            "--enable-uc",
+            help="Discover models via UC `model-services` (`system.ai.<model>`) and "
+            "surface curated `system.ai.*` MCP services. Equivalent to setting "
+            "UCODE_ENABLE_UC=1 for this configure run. The value is persisted so "
+            "subsequent `ucode <agent>` launches stay on the same discovery path; "
+            "re-run `ucode configure` without the flag (and without "
+            "UCODE_ENABLE_UC=1 in the env) to turn UC discovery back off.",
+        ),
+    ] = False,
 ) -> None:
     """Configure workspace URL and AI Gateway."""
     if ctx.invoked_subcommand is not None:
@@ -659,6 +726,10 @@ def configure(
     set_dry_run(dry_run)
     set_verbosity(verbose)
     prompt_optional_updates = not skip_upgrade
+    flag_enable_uc: bool | None = True if enable_uc else None
+    # Explicit `ucode configure` is a clean slate: when the user omits both
+    # `--enable-uc` and `UCODE_ENABLE_UC`, persisted `uc_enabled=true` from
+    # a prior run is reset to false.
     try:
         install_databricks_cli()
         if agent is not None and agents is not None:
@@ -673,31 +744,46 @@ def configure(
                 prompt_optional_updates=prompt_optional_updates,
             )
             if workspace_entries is None:
-                configure_workspace_command(tool)
+                configure_workspace_command(tool, enable_uc=flag_enable_uc, reset_uc=True)
             else:
-                configure_workspace_command(tool, workspaces=workspace_entries)
+                configure_workspace_command(
+                    tool,
+                    workspaces=workspace_entries,
+                    enable_uc=flag_enable_uc,
+                    reset_uc=True,
+                )
         elif agents is not None:
             selected_tools = _parse_agents_option(agents)
             if workspace_entries is None:
                 configure_workspace_command(
                     selected_tools=selected_tools,
                     prompt_optional_updates=prompt_optional_updates,
+                    enable_uc=flag_enable_uc,
+                    reset_uc=True,
                 )
             else:
                 configure_workspace_command(
                     selected_tools=selected_tools,
                     workspaces=workspace_entries,
                     prompt_optional_updates=prompt_optional_updates,
+                    enable_uc=flag_enable_uc,
+                    reset_uc=True,
                 )
         else:
             # Tool binaries are installed after the user picks which agents
             # they want, in configure_workspace_command.
             if workspace_entries is None:
-                configure_workspace_command(prompt_optional_updates=prompt_optional_updates)
+                configure_workspace_command(
+                    prompt_optional_updates=prompt_optional_updates,
+                    enable_uc=flag_enable_uc,
+                    reset_uc=True,
+                )
             else:
                 configure_workspace_command(
                     workspaces=workspace_entries,
                     prompt_optional_updates=prompt_optional_updates,
+                    enable_uc=flag_enable_uc,
+                    reset_uc=True,
                 )
         if tracing:
             # The workspaces were just configured, so enable tracing for them

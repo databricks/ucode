@@ -337,6 +337,17 @@ class TestCodexDefaultModel:
     def test_codex_model_id_preserves_openai_incompatible_models(self):
         assert codex._codex_model_id("databricks-gpt-5-2-codex") == "databricks-gpt-5-2-codex"
         assert codex._codex_model_id("databricks-gpt-5-4-nano") == "databricks-gpt-5-4-nano"
+
+    def test_codex_model_id_passes_model_services_id_verbatim(self):
+        # UC model-services ids route by name, so they must not be rewritten
+        # to the OpenAI id form.
+        assert codex._codex_model_id("system.ai.gpt-5") == "system.ai.gpt-5"
+        assert codex._codex_model_id("system.ai.gpt-5-2-codex") == "system.ai.gpt-5-2-codex"
+
+    def test_default_model_selects_model_services_gpt(self):
+        models = ["system.ai.gpt-5", "system.ai.gpt-5-5", "system.ai.claude-opus-4-8"]
+
+        assert codex.default_model({"codex_models": models}) == "system.ai.gpt-5-5"
         assert codex._codex_model_id("databricks-gpt-5-5") == "gpt-5.5"
 
 

@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Literal, cast, overload
 from urllib import error as urllib_error
 from urllib import request as urllib_request
-from urllib.parse import urlparse
+from urllib.parse import urlencode, urlparse
 
 from databricks.sql.exc import ServerOperationError
 
@@ -975,6 +975,228 @@ def build_auth_shell_command(workspace: str, profile: str | None = None) -> str:
         'printf "%s\\n" "$DATABRICKS_BEARER"; '
         f"else {cli_command}; fi"
     )
+
+
+def uc_enabled(default: bool = False) -> bool:
+    """True when the opt-in UC-securables discovery path is enabled.
+
+    Three input precedences, callers handle the highest one first:
+      1. ``ucode configure --enable-uc / --no-enable-uc`` (resolved by the
+         CLI before this function is called and passed in via ``default``,
+         since it overrides everything).
+      2. ``UCODE_ENABLE_UC=1`` (or true/yes/on) env var.
+      3. The value persisted in state (sticky, also passed via ``default``).
+
+    Enabling UC discovery makes ucode:
+      - resolve models via UC `model-services` as `system.ai.<model-name>`
+        instead of the per-family AI Gateway listings
+      - surface curated `system.ai.*` MCP services in `ucode configure mcp`
+    """
+    raw = os.environ.get("UCODE_ENABLE_UC")
+    if raw is None or not raw.strip():
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+# A model-service's `name` is `model-services/system.ai.<model-name>`; the
+# part after the prefix is exactly the model string agents send (no
+# `databricks-` infix — that only appears on the inner destination name).
+_MODEL_SERVICE_NAME_PREFIX = "model-services/"
+# The metastore-scope listing returns services from EVERY schema (e.g.
+# `main.user.foo`, `temp.*`, internal DLT schemas). We only want the
+# Databricks-managed foundation models under `system.ai`.
+_MODEL_SERVICE_REQUIRED_PREFIX = "system.ai."
+
+
+def _model_service_id(service: dict) -> str | None:
+    """Extract the `system.ai.<model-name>` id from one model-service entry.
+
+    Returns None for services in any other schema, so user/internal model
+    services don't leak into the family buckets."""
+    name = service.get("name")
+    if not isinstance(name, str):
+        return None
+    name = name.strip()
+    if name.startswith(_MODEL_SERVICE_NAME_PREFIX):
+        name = name[len(_MODEL_SERVICE_NAME_PREFIX) :]
+    if not name.startswith(_MODEL_SERVICE_REQUIRED_PREFIX):
+        return None
+    return name or None
+
+
+# The model-services metastore listing is slow and flaky — large pages
+# routinely 504 with `Timeout listing model services under metastore`. A small
+# page is far more likely to come back, and each page gets a few retries before
+# we give up.
+_MODEL_SERVICES_PAGE_SIZE = 10
+_MODEL_SERVICES_PAGE_RETRIES = 4
+
+
+def _get_model_services_page(
+    url: str, token: str, *, retries: int = _MODEL_SERVICES_PAGE_RETRIES
+) -> tuple[dict | list | None, str | None]:
+    """GET one model-services page, retrying on failure.
+
+    The endpoint frequently 504s under load; a retry usually succeeds. Returns
+    the same (payload, reason) shape as ``_http_get_json`` — the last attempt's
+    result when all retries are exhausted."""
+    payload: dict | list | None = None
+    reason: str | None = None
+    for attempt in range(retries):
+        payload, reason = _http_get_json(url, token, timeout=30)
+        if payload is not None:
+            return payload, None
+        _debug("model-services page", f"attempt {attempt + 1}/{retries} failed: {reason}")
+    return payload, reason
+
+
+def list_model_services(
+    workspace: str,
+    token: str,
+    *,
+    page_size: int = _MODEL_SERVICES_PAGE_SIZE,
+    max_pages: int = 100,
+) -> tuple[list[str], str | None]:
+    """List all `system.ai.*` model ids via the UC model-services API.
+
+    Pages through ``/api/2.1/unity-catalog/model-services`` (metastore scope)
+    and returns the de-duplicated, sorted list of ``system.ai.<model-name>``
+    ids. Uses a small page size with per-page retries because the endpoint is
+    slow and frequently 504s. Returns (ids, reason); reason is None on success,
+    otherwise it describes why the list is empty (HTTP/network error or no
+    services).
+    """
+    hostname = workspace_hostname(workspace)
+    ids: list[str] = []
+    page_token: str | None = None
+    seen_tokens: set[str] = set()
+    last_reason: str | None = None
+    for _ in range(max_pages):
+        params: dict[str, str] = {"page_size": str(page_size)}
+        if page_token:
+            params["page_token"] = page_token
+        url = f"https://{hostname}/api/2.1/unity-catalog/model-services?{urlencode(params)}"
+        payload, reason = _get_model_services_page(url, token)
+        if payload is None:
+            # Surface the failure only if we have nothing yet; a mid-pagination
+            # blip still returns whatever we collected.
+            last_reason = reason
+            break
+        data = cast(dict, payload) if isinstance(payload, dict) else {}
+        for service in data.get("model_services", []):
+            if isinstance(service, dict):
+                model_id = _model_service_id(service)
+                if model_id:
+                    ids.append(model_id)
+        page_token = data.get("next_page_token") or None
+        if not page_token:
+            last_reason = None
+            break
+        if page_token in seen_tokens:
+            break
+        seen_tokens.add(page_token)
+
+    deduped = sorted(set(ids))
+    if deduped:
+        return deduped, None
+    return [], last_reason or "model-services listing returned no models"
+
+
+def discover_model_services(
+    workspace: str, token: str
+) -> tuple[dict[str, str], list[str], list[str], str | None]:
+    """Discover models via UC model-services and bucket them by family name.
+
+    Returns (claude_models, codex_models, gemini_models, reason):
+
+    - ``claude_models`` maps ``opus``/``sonnet``/``haiku`` to the newest
+      matching ``system.ai.claude-*`` id (mirrors ``discover_claude_models``).
+    - ``codex_models`` is the list of ``system.ai.*gpt-*`` ids.
+    - ``gemini_models`` is the list of ``system.ai.*gemini-*`` ids, newest first.
+
+    ``reason`` is None on success, else explains why nothing was found. Family
+    bucketing is by name substring because the model-services API does not
+    expose per-model API dialects.
+    """
+    ids, reason = list_model_services(workspace, token)
+    if not ids:
+        return {}, [], [], reason
+
+    claude_models: dict[str, str] = {}
+    for family in ("opus", "sonnet", "haiku"):
+        candidates = sorted(
+            [m for m in ids if f"claude-{family}-" in m],
+            reverse=True,
+        )
+        if candidates:
+            claude_models[family] = candidates[0]
+
+    codex_models = [m for m in ids if "gpt-" in m]
+    gemini_models = sorted([m for m in ids if "gemini-" in m], key=model_version_sort_key)
+
+    if not (claude_models or codex_models or gemini_models):
+        sample = ", ".join(ids[:5])
+        return (
+            {},
+            [],
+            [],
+            (
+                "model-services returned model ids but none matched "
+                f"claude/gpt/gemini families (got: {sample})"
+            ),
+        )
+    return claude_models, codex_models, gemini_models, None
+
+
+# --- MCP services (parallel to model services) -----------------------------
+
+
+_MCP_SERVICE_NAME_PREFIX = "mcp-services/"
+_MCP_SERVICE_REQUIRED_PREFIX = "system.ai."
+
+
+def _mcp_service_full_name(service: dict) -> str | None:
+    """Extract `system.ai.<name>` from one mcp-service entry, or None."""
+    name = service.get("name")
+    if not isinstance(name, str):
+        return None
+    name = name.strip().removeprefix(_MCP_SERVICE_NAME_PREFIX)
+    if not name.startswith(_MCP_SERVICE_REQUIRED_PREFIX):
+        return None
+    status = ((service.get("config") or {}).get("connection") or {}).get("status")
+    if status is not None and status != "ACTIVE":
+        return None
+    return name
+
+
+def list_mcp_services(workspace: str, token: str) -> tuple[list[str], str | None]:
+    """List Databricks-curated `system.ai.*` MCP services.
+
+    The listing endpoint requires `?parent=schemas/system.ai`; without it the
+    request returns 499 with a truncated body (verified against e2-dogfood
+    2026-06-11). Returns (full_names, reason).
+    """
+    hostname = workspace_hostname(workspace)
+    url = (
+        f"https://{hostname}/api/2.1/unity-catalog/mcp-services"
+        f"?{urlencode({'parent': 'schemas/system.ai'})}"
+    )
+    payload, reason = _http_get_json(url, token, timeout=30)
+    if payload is None:
+        return [], reason
+    data = cast(dict, payload) if isinstance(payload, dict) else {}
+    names = []
+    for service in data.get("mcp_services") or []:
+        if not isinstance(service, dict):
+            continue
+        full_name = _mcp_service_full_name(service)
+        if full_name:
+            names.append(full_name)
+    return sorted(set(names)), None if names else (reason or "no `system.ai.*` mcp services found")
+
+
+def build_mcp_service_url(workspace: str, full_name: str) -> str:
+    return f"{workspace}/ai-gateway/mcp-services/{full_name}"
 
 
 def discover_claude_models(workspace: str, token: str) -> tuple[dict[str, str], str | None]:
