@@ -391,6 +391,21 @@ body.editing [contenteditable="true"]:focus{outline:2px solid var(--green);backg
 .slide.visible .balance .panel.dev{animation:slideInL .6s var(--ease) both;animation-delay:.15s;}
 .slide.visible .balance .panel.adm{animation:slideInR .6s var(--ease) both;animation-delay:.28s;}
 
+/* === IT nightmare cards === */
+.nightmare{width:100%;margin:auto 0;}
+.nm-row{display:grid;grid-template-columns:repeat(3,1fr);gap:24px;}
+.nm-row.two{grid-template-columns:repeat(2,1fr);width:66.4%;margin:24px auto 0;}
+.nm-card{background:linear-gradient(180deg,#160C0B,#110807);border:1px solid #3A1714;border-radius:16px;padding:34px 30px;display:flex;flex-direction:column;align-items:center;gap:20px;text-align:center;}
+.nm-ic{width:86px;height:86px;border-radius:50%;background:rgba(255,92,73,.10);border:1px solid rgba(255,92,73,.28);display:flex;align-items:center;justify-content:center;color:var(--lava-br);flex:0 0 auto;}
+.nm-ic svg{width:40px;height:40px;}
+.nm-card h3{font-family:var(--font-display);font-weight:700;font-size:29px;color:var(--lava-br);margin:0;line-height:1.22;}
+.slide.visible .nm-card{animation:countPop .55s var(--ease) both;}
+.slide.visible .nm-row:nth-child(1) .nm-card:nth-child(1){animation-delay:.18s;}
+.slide.visible .nm-row:nth-child(1) .nm-card:nth-child(2){animation-delay:.30s;}
+.slide.visible .nm-row:nth-child(1) .nm-card:nth-child(3){animation-delay:.42s;}
+.slide.visible .nm-row:nth-child(2) .nm-card:nth-child(1){animation-delay:.54s;}
+.slide.visible .nm-row:nth-child(2) .nm-card:nth-child(2){animation-delay:.66s;}
+
 @keyframes lineIn{from{opacity:0;transform:translateY(8px);}to{opacity:1;transform:translateY(0);}}
 @keyframes blink{0%,50%{opacity:1;}50.01%,100%{opacity:0;}}
 </style>
@@ -492,18 +507,22 @@ body.editing [contenteditable="true"]:focus{outline:2px solid var(--green);backg
     </div>
   </section>
 
-  <!-- ============ 07 · ADMIN PAIN: SPRAWL ============ -->
+  <!-- ============ 07 · ADMIN PAIN: IT NIGHTMARE ============ -->
   <section class="slide">
     <div class="s">
-      <h2 class="s-title reveal d1">Now multiply that by <span class="acc">every dev and tool</span></h2>
-      <p class="s-sub reveal d2">For admins, this is sprawl: more cost, less control, and no idea what's running.</p>
-      <div class="sprawl">
-        <div class="sc"><div class="bn">N&times;</div><h3>Vendor contracts</h3><p>One per tool, with no shared budget.</p></div>
-        <div class="sc"><div class="bn">N&times;</div><h3>Admin consoles</h3><p>A different panel and policy per vendor.</p></div>
-        <div class="sc"><div class="bn">0</div><h3>Usage visibility</h3><p>No view of who uses what, or what it costs.</p></div>
-        <div class="sc"><div class="bn">0</div><h3>Policy control</h3><p>No way to enforce limits, logging, or data boundaries.</p></div>
+      <h2 class="s-title sm reveal d1">Deploying coding tools is an <span class="acc">IT nightmare</span></h2>
+      <p class="s-sub reveal d2">Now multiply that across every developer and tool. Managing coding agents at enterprise scale gets complex fast.</p>
+      <div class="nightmare">
+        <div class="nm-row">
+          <div class="nm-card"><div class="nm-ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round" stroke-linecap="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/><path d="M9 13h6M9 17h4"/></svg></div><h3>Multiple vendor contracts per tool</h3></div>
+          <div class="nm-card"><div class="nm-ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round" stroke-linecap="round"><rect x="2.5" y="4" width="11" height="8" rx="1.5"/><rect x="14.5" y="9" width="7" height="6" rx="1.5"/><path d="M8 12v3M5 18h6M18 15v2M16 19h4"/></svg></div><h3>Multiple admin consoles to manage</h3></div>
+          <div class="nm-card"><div class="nm-ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v10"/><path d="M14.6 9.2c-.6-.8-1.6-1.1-2.6-1.1-1.4 0-2.6.8-2.6 2s1.2 1.7 2.6 2 2.6.8 2.6 2-1.2 2-2.6 2c-1 0-2-.4-2.6-1.2"/></svg></div><h3>Fragmented billing across teams</h3></div>
+        </div>
+        <div class="nm-row two">
+          <div class="nm-card"><div class="nm-ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3l18 18"/><path d="M10.6 5.1A9 9 0 0 1 12 5c5 0 9 5 9 7a13 13 0 0 1-2.2 2.8M6.3 6.3A13 13 0 0 0 3 12c0 2 4 7 9 7a9 9 0 0 0 3.7-.8"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/></svg></div><h3>No centralized usage visibility</h3></div>
+          <div class="nm-card"><div class="nm-ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 3v6c0 4.5-3 7.6-7 9-4-1.4-7-4.5-7-9V6z"/><path d="M12 9v4M12 16v.4"/></svg></div><h3>Difficult to enforce security &amp; policies</h3></div>
+        </div>
       </div>
-      <p class="s-sub reveal d6" style="text-align:center;margin:30px auto 0;font-size:31px;">So teams overcorrect, in <span style="color:var(--lava-br);font-weight:700;">one of two directions</span>.</p>
     </div>
   </section>
 
@@ -557,20 +576,22 @@ body.editing [contenteditable="true"]:focus{outline:2px solid var(--green);backg
       <p class="s-sub reveal d2">Developers and admins aren&#39;t on opposite sides. They want the same outcome.</p>
       <div class="balance">
         <div class="panel dev">
-          <p class="ph">&#9656; Developers want freedom</p>
+          <p class="ph">&#9656; For developers</p>
           <ul>
-            <li>Freedom to choose the agent and model they want</li>
-            <li>MCP, skills, and hooks that follow them</li>
-            <li>To move fast without fear</li>
+            <li>Access to multiple coding agents</li>
+            <li>Latest SOTA models</li>
+            <li>Low switching friction</li>
+            <li>Faster iteration</li>
           </ul>
         </div>
         <div class="bmid"><div class="bmid-circle">+</div></div>
         <div class="panel adm">
-          <p class="ph">&#9656; Admins want control</p>
+          <p class="ph">&#9656; For admins</p>
           <ul>
-            <li>One bill, budgets, and rate limits</li>
-            <li>Full usage visibility and audit</li>
-            <li>Governed credentials</li>
+            <li>Cost controls</li>
+            <li>Governance</li>
+            <li>Observability</li>
+            <li>Privacy guarantees</li>
           </ul>
         </div>
       </div>
