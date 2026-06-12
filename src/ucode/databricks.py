@@ -977,19 +977,22 @@ def build_auth_shell_command(workspace: str, profile: str | None = None) -> str:
     )
 
 
-def use_uc_securables(default: bool = False) -> bool:
+def uc_enabled(default: bool = False) -> bool:
     """True when the opt-in UC-securables discovery path is enabled.
 
-    Set ``UCODE_USE_UC_SECURABLES=1`` (or true/yes/on) to:
-      - discover models via UC `model-services` (`system.ai.<model-name>`)
-      - surface curated `system.ai.*` MCP services in `ucode configure mcp`
+    Three input precedences, callers handle the highest one first:
+      1. ``ucode configure --enable-uc / --no-enable-uc`` (resolved by the
+         CLI before this function is called and passed in via ``default``,
+         since it overrides everything).
+      2. ``UCODE_ENABLE_UC=1`` (or true/yes/on) env var.
+      3. The value persisted in state (sticky, also passed via ``default``).
 
-    The env var, when set to any value, wins. ``default`` is the fallback used
-    when the env var is unset — callers pass the value persisted in state so a
-    workspace configured with the flag stays on the UC path without the env
-    var being re-exported each time.
+    Enabling UC discovery makes ucode:
+      - resolve models via UC `model-services` as `system.ai.<model-name>`
+        instead of the per-family AI Gateway listings
+      - surface curated `system.ai.*` MCP services in `ucode configure mcp`
     """
-    raw = os.environ.get("UCODE_USE_UC_SECURABLES")
+    raw = os.environ.get("UCODE_ENABLE_UC")
     if raw is None or not raw.strip():
         return default
     return raw.strip().lower() in {"1", "true", "yes", "on"}
@@ -1161,7 +1164,7 @@ def _mcp_service_full_name(service: dict) -> str | None:
     if not name.startswith(_MCP_SERVICE_REQUIRED_PREFIX):
         return None
     status = ((service.get("config") or {}).get("connection") or {}).get("status")
-    if status != "ACTIVE":
+    if status is not None and status != "ACTIVE":
         return None
     return name
 

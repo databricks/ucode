@@ -137,35 +137,35 @@ def _model_service(model_id: str) -> dict:
     return {"name": f"model-services/{model_id}"}
 
 
-class TestUseUcSecurables:
+class TestUcEnabled:
     def test_off_by_default(self, monkeypatch):
-        monkeypatch.delenv("UCODE_USE_UC_SECURABLES", raising=False)
-        assert db_mod.use_uc_securables() is False
+        monkeypatch.delenv("UCODE_ENABLE_UC", raising=False)
+        assert db_mod.uc_enabled() is False
 
     def test_truthy_values_enable(self, monkeypatch):
         for value in ("1", "true", "TRUE", "yes", "on"):
-            monkeypatch.setenv("UCODE_USE_UC_SECURABLES", value)
-            assert db_mod.use_uc_securables() is True
+            monkeypatch.setenv("UCODE_ENABLE_UC", value)
+            assert db_mod.uc_enabled() is True
 
     def test_falsey_values_disable(self, monkeypatch):
         # A non-empty, non-truthy value explicitly disables — even over a
         # persisted default of True.
         for value in ("0", "false", "no"):
-            monkeypatch.setenv("UCODE_USE_UC_SECURABLES", value)
-            assert db_mod.use_uc_securables(default=True) is False
+            monkeypatch.setenv("UCODE_ENABLE_UC", value)
+            assert db_mod.uc_enabled(default=True) is False
 
     def test_unset_falls_back_to_default(self, monkeypatch):
         # Sticky behavior: when the env var is unset (or blank), the persisted
         # default decides.
-        monkeypatch.delenv("UCODE_USE_UC_SECURABLES", raising=False)
-        assert db_mod.use_uc_securables(default=True) is True
-        assert db_mod.use_uc_securables(default=False) is False
-        monkeypatch.setenv("UCODE_USE_UC_SECURABLES", "")
-        assert db_mod.use_uc_securables(default=True) is True
+        monkeypatch.delenv("UCODE_ENABLE_UC", raising=False)
+        assert db_mod.uc_enabled(default=True) is True
+        assert db_mod.uc_enabled(default=False) is False
+        monkeypatch.setenv("UCODE_ENABLE_UC", "")
+        assert db_mod.uc_enabled(default=True) is True
 
     def test_env_var_overrides_default(self, monkeypatch):
-        monkeypatch.setenv("UCODE_USE_UC_SECURABLES", "1")
-        assert db_mod.use_uc_securables(default=False) is True
+        monkeypatch.setenv("UCODE_ENABLE_UC", "1")
+        assert db_mod.uc_enabled(default=False) is True
 
 
 class TestDiscoverModelServices:
@@ -284,6 +284,112 @@ class TestDiscoverModelServices:
         assert reason is None
         assert ids == ["system.ai.gpt-5"]
         assert calls["n"] == 3  # two failures, third succeeds
+
+
+class TestListMcpServices:
+    def test_accepts_entries_without_connection_status(self, monkeypatch):
+        payload = {
+            "mcp_services": [
+                {
+                    "name": "mcp-services/system.ai.github",
+                    "config": {"usage_tracking": {"enabled": True}, "tracing": {"enabled": True}},
+                },
+                {
+                    "name": "mcp-services/system.ai.atlassian",
+                    "config": {},
+                },
+                {
+                    "name": "mcp-services/system.ai.slack",
+                },
+            ]
+        }
+        monkeypatch.setattr(
+            db_mod, "_http_get_json", lambda url, token, timeout=30: (payload, None)
+        )
+
+        names, reason = db_mod.list_mcp_services(WS, "token")
+
+        assert reason is None
+        assert names == ["system.ai.atlassian", "system.ai.github", "system.ai.slack"]
+
+    def test_accepts_legacy_active_status(self, monkeypatch):
+        payload = {
+            "mcp_services": [
+                {
+                    "name": "mcp-services/system.ai.github",
+                    "config": {"connection": {"status": "ACTIVE"}},
+                },
+            ]
+        }
+        monkeypatch.setattr(
+            db_mod, "_http_get_json", lambda url, token, timeout=30: (payload, None)
+        )
+
+        names, reason = db_mod.list_mcp_services(WS, "token")
+
+        assert reason is None
+        assert names == ["system.ai.github"]
+
+    def test_rejects_explicit_non_active_status(self, monkeypatch):
+        # If the field is present and non-ACTIVE, drop the entry — the
+        # backing connection is broken and the proxy will fail.
+        payload = {
+            "mcp_services": [
+                {
+                    "name": "mcp-services/system.ai.github",
+                    "config": {"connection": {"status": "ACTIVE"}},
+                },
+                {
+                    "name": "mcp-services/system.ai.broken",
+                    "config": {"connection": {"status": "FAILED"}},
+                },
+            ]
+        }
+        monkeypatch.setattr(
+            db_mod, "_http_get_json", lambda url, token, timeout=30: (payload, None)
+        )
+
+        names, _reason = db_mod.list_mcp_services(WS, "token")
+
+        assert names == ["system.ai.github"]
+
+    def test_ignores_non_system_ai_entries(self, monkeypatch):
+        payload = {
+            "mcp_services": [
+                {"name": "mcp-services/system.ai.github"},
+                {"name": "mcp-services/main.svenwb.github_mcp"},
+                {"name": "mcp-services/temp.erni.github_mcp"},
+            ]
+        }
+        monkeypatch.setattr(
+            db_mod, "_http_get_json", lambda url, token, timeout=30: (payload, None)
+        )
+
+        names, _reason = db_mod.list_mcp_services(WS, "token")
+
+        assert names == ["system.ai.github"]
+
+    def test_http_failure_propagates_reason(self, monkeypatch):
+        monkeypatch.setattr(
+            db_mod,
+            "_http_get_json",
+            lambda url, token, timeout=30: (None, "HTTP 500 Server Error"),
+        )
+
+        names, reason = db_mod.list_mcp_services(WS, "token")
+
+        assert names == []
+        assert reason == "HTTP 500 Server Error"
+
+    def test_empty_payload_reports_no_results(self, monkeypatch):
+        monkeypatch.setattr(
+            db_mod, "_http_get_json", lambda url, token, timeout=30: ({"mcp_services": []}, None)
+        )
+
+        names, reason = db_mod.list_mcp_services(WS, "token")
+
+        assert names == []
+        assert reason and "no `system.ai.*`" in reason
 
 
 def _foundation_models_payload(names):

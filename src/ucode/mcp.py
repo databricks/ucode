@@ -33,7 +33,7 @@ from ucode.databricks import (
     list_databricks_connections,
     list_genie_spaces,
     list_mcp_services,
-    use_uc_securables,
+    uc_enabled,
     workspace_hostname,
 )
 from ucode.state import load_full_state, load_state, save_state
@@ -978,16 +978,16 @@ def configure_mcp_command() -> int:
         "Databricks apps",
         lambda: discover_app_mcp_servers(workspace, profile),
     )
-    # Curated `system.ai.*` MCP services live behind a separate UC API and are
-    # gated on UCODE_USE_UC_SECURABLES (the same flag that enables model-
-    # services). When off we don't even hit the endpoint, so legacy users
-    # see no change.
+    # Curated `system.ai.*` MCP services live behind a separate UC API and
+    # are gated on the same UC opt-in that enables model-services discovery
+    # (env: UCODE_ENABLE_UC, CLI: `ucode configure --enable-uc`, persisted
+    # in state on configure).
     available_mcp_service_names = (
         _discover_mcp_source(
             "MCP services",
             lambda: discover_mcp_service_names(workspace, profile),
         )
-        if use_uc_securables()
+        if uc_enabled(default=bool(state.get("uc_enabled")))
         else []
     )
 
