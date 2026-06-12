@@ -94,29 +94,29 @@ class TestAddGeminiMcpServer:
 
         mcp.add_gemini_mcp_server("github", f"{WS}/api/2.0/mcp/external/github")
 
-        assert calls == [
-            {
-                "args": [
-                    "gemini",
-                    "mcp",
-                    "add",
-                    "github",
-                    f"{WS}/api/2.0/mcp/external/github",
-                    "--type",
-                    "http",
-                    "--scope",
-                    "user",
-                    "--header",
-                    "Authorization: Bearer ${OAUTH_TOKEN}",
-                ],
-                "kwargs": {
-                    "check": True,
-                    "capture_output": True,
-                    "text": True,
-                    "timeout": 30,
-                },
-            }
+        assert len(calls) == 1
+        call = calls[0]
+        assert call["args"] == [
+            "gemini",
+            "mcp",
+            "add",
+            "github",
+            f"{WS}/api/2.0/mcp/external/github",
+            "--type",
+            "http",
+            "--scope",
+            "user",
+            "--header",
+            "Authorization: Bearer ${OAUTH_TOKEN}",
         ]
+        kwargs = call["kwargs"]
+        assert kwargs["check"] is True
+        assert kwargs["capture_output"] is True
+        assert kwargs["text"] is True
+        assert kwargs["timeout"] == 30
+        # GEMINI_CLI_HOME must point at the launcher's home so `gemini mcp
+        # add` writes the same settings.json the ucode session reads from.
+        assert kwargs["env"]["GEMINI_CLI_HOME"] == str(mcp.gemini.GEMINI_HOME_DIR)
 
 
 class TestRemoveClaudeMcpServer:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import string
 import subprocess
@@ -23,7 +24,7 @@ from questionary.prompts.common import InquirerControl
 from questionary.question import Question
 from questionary.styles import merge_styles_default
 
-from ucode.agents import copilot, opencode
+from ucode.agents import copilot, gemini, opencode
 from ucode.config_io import restore_file
 from ucode.databricks import (
     ensure_databricks_auth,
@@ -177,6 +178,13 @@ def remove_codex_mcp_server(name: str) -> bool:
     return True
 
 
+def _gemini_cli_env() -> dict[str, str]:
+    # Pin GEMINI_CLI_HOME to the same directory the launcher.
+    env = os.environ.copy()
+    env["GEMINI_CLI_HOME"] = str(gemini.GEMINI_HOME_DIR)
+    return env
+
+
 def add_gemini_mcp_server(name: str, url: str) -> None:
     try:
         subprocess.run(
@@ -197,6 +205,7 @@ def add_gemini_mcp_server(name: str, url: str) -> None:
             capture_output=True,
             text=True,
             timeout=30,
+            env=_gemini_cli_env(),
         )
     except subprocess.CalledProcessError as exc:
         raise RuntimeError(f"Failed to add MCP server '{name}' via gemini CLI.") from exc
@@ -210,6 +219,7 @@ def remove_gemini_mcp_server(name: str) -> bool:
             capture_output=True,
             text=True,
             timeout=30,
+            env=_gemini_cli_env(),
         )
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError(f"Timed out removing MCP server '{name}' via gemini CLI.") from exc
