@@ -20,6 +20,7 @@ configure command imports agents lazily to avoid a cycle.
 from __future__ import annotations
 
 from ucode.databricks import (
+    apply_pat_environment,
     ensure_databricks_auth,
     find_uc_backed_experiment,
     get_databricks_token,
@@ -301,6 +302,7 @@ def _enable_tracing_for_state(state: dict) -> dict:
     workspace = state["workspace"]
     configured = _configured_tracing_agents(state)
     profile = state.get("profile")
+    apply_pat_environment(state)
     ensure_databricks_auth(workspace, profile)
 
     print_section("MLflow Tracing")
@@ -364,6 +366,7 @@ def _disable_tracing_command() -> int:
 
     workspace = state["workspace"]
     profile = state.get("profile")
+    apply_pat_environment(state)
     ensure_databricks_auth(workspace, profile)
 
     print_section("MLflow Tracing")

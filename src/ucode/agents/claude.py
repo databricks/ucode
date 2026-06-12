@@ -116,6 +116,7 @@ def render_overlay(
     claude_models: dict[str, str] | None = None,
     disable_web_search: bool = False,
     profile: str | None = None,
+    use_pat: bool = False,
 ) -> tuple[dict, list[list[str]]]:
     """Return (overlay, managed_key_paths) for Claude settings.json.
 
@@ -147,7 +148,10 @@ def render_overlay(
             env["ANTHROPIC_DEFAULT_SONNET_MODEL"] = _maybe_add_1m_suffix(claude_models["sonnet"])
         if claude_models.get("haiku"):
             env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = claude_models["haiku"]
-    overlay: dict = {"apiKeyHelper": build_auth_shell_command(workspace, profile), "env": env}
+    overlay: dict = {
+        "apiKeyHelper": build_auth_shell_command(workspace, profile, use_pat=use_pat),
+        "env": env,
+    }
     keys: list[list[str]] = [["apiKeyHelper"]] + [["env", k] for k in env]
 
     # Disable Claude Code's built-in WebSearch (it routes through Anthropic's
@@ -226,6 +230,7 @@ def write_tool_config(state: dict, model: str) -> dict:
         state.get("claude_models") or {},
         disable_web_search=web_search_model is not None,
         profile=state.get("profile"),
+        use_pat=bool(state.get("use_pat")),
     )
     tracing_env_vars = tracing_env(state, "claude")
     stop_hook_command = claude_tracing_stop_hook_command() if tracing_env_vars else None

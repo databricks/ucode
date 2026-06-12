@@ -101,8 +101,8 @@ def _use_legacy_layout() -> bool:
     return parsed < MINIMUM_CODEX_VERSION
 
 
-def _provider_block(workspace: str, databricks_profile: str | None) -> dict:
-    auth_command = build_auth_shell_command(workspace, databricks_profile)
+def _provider_block(workspace: str, databricks_profile: str | None, use_pat: bool = False) -> dict:
+    auth_command = build_auth_shell_command(workspace, databricks_profile, use_pat=use_pat)
     base_url = build_tool_base_url("codex", workspace)
     return {
         "name": "Databricks AI Gateway",
@@ -121,19 +121,25 @@ def _provider_block(workspace: str, databricks_profile: str | None) -> dict:
 
 
 def render_overlay(
-    workspace: str, model: str | None = None, databricks_profile: str | None = None
+    workspace: str,
+    model: str | None = None,
+    databricks_profile: str | None = None,
+    use_pat: bool = False,
 ) -> dict:
     overlay: dict = {"model_provider": CODEX_MODEL_PROVIDER_NAME}
     if model:
         overlay["model"] = model
     overlay["model_providers"] = {
-        CODEX_MODEL_PROVIDER_NAME: _provider_block(workspace, databricks_profile),
+        CODEX_MODEL_PROVIDER_NAME: _provider_block(workspace, databricks_profile, use_pat),
     }
     return overlay
 
 
 def render_legacy_overlay(
-    workspace: str, model: str | None = None, databricks_profile: str | None = None
+    workspace: str,
+    model: str | None = None,
+    databricks_profile: str | None = None,
+    use_pat: bool = False,
 ) -> dict:
     """Overlay for Codex CLI < 0.134.0, which only reads `~/.codex/config.toml`.
 
@@ -147,7 +153,7 @@ def render_legacy_overlay(
         "profile": CODEX_PROFILE_NAME,
         "profiles": {CODEX_PROFILE_NAME: profile_block},
         "model_providers": {
-            CODEX_MODEL_PROVIDER_NAME: _provider_block(workspace, databricks_profile),
+            CODEX_MODEL_PROVIDER_NAME: _provider_block(workspace, databricks_profile, use_pat),
         },
     }
 
@@ -295,7 +301,9 @@ def write_tool_config(state: dict, model: str | None = None) -> dict:
         # and skip the per-profile-file cleanup that would normally strip
         # ucode's entry from the shared file.
         backup_existing_file(LEGACY_CODEX_CONFIG_PATH, LEGACY_CODEX_BACKUP_PATH)
-        overlay = render_legacy_overlay(workspace, chosen_model, databricks_profile)
+        overlay = render_legacy_overlay(
+            workspace, chosen_model, databricks_profile, use_pat=bool(state.get("use_pat"))
+        )
         doc = read_toml_safe(LEGACY_CODEX_CONFIG_PATH)
         deep_merge_dict(doc, overlay)
         write_toml_file(LEGACY_CODEX_CONFIG_PATH, doc)
@@ -305,7 +313,9 @@ def write_tool_config(state: dict, model: str | None = None) -> dict:
 
     _remove_legacy_ucode_profile()
     backup_existing_file(CODEX_CONFIG_PATH, CODEX_BACKUP_PATH)
-    overlay = render_overlay(workspace, chosen_model, databricks_profile)
+    overlay = render_overlay(
+        workspace, chosen_model, databricks_profile, use_pat=bool(state.get("use_pat"))
+    )
     doc = read_toml_safe(CODEX_CONFIG_PATH)
     deep_merge_dict(doc, overlay)
     write_toml_file(CODEX_CONFIG_PATH, doc)

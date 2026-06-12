@@ -61,6 +61,20 @@ ucode configure --workspaces https://first.databricks.com,https://second.databri
 
 When multiple workspaces are provided, `ucode` logs into and saves state for each workspace. Launch commands such as `ucode codex` use the first workspace in the list.
 
+Alternatively, pass existing Databricks CLI profiles (from `~/.databrickscfg`) instead of workspace URLs — each profile's host supplies the workspace URL:
+
+```bash
+ucode configure --profiles DEFAULT --agents claude,codex
+```
+
+Auth behaves the same as `--workspaces`: an OAuth `databricks auth login` is forced by default.
+
+For CI or headless environments where the profile holds a personal access token (`auth_type = pat` in `~/.databrickscfg`), add `--use-pat`. It must be combined with `--profiles` — ucode never picks up a PAT implicitly — and runs no interactive login: the profile's token is used for the whole setup (and by launched agents afterwards), with workspace access verified against the AI Gateway. `--skip-validate` additionally skips the post-configure test message sent through each agent, so configure only writes config files with the freshly discovered models. Together these make setup fully non-interactive:
+
+```bash
+ucode configure --profiles DEFAULT --agents claude,codex --use-pat --skip-validate --skip-upgrade
+```
+
 ### MCP servers (optional)
 
 ```bash
@@ -90,6 +104,9 @@ Discovered external MCP connections are listed directly. MCP auth uses a Databri
 | `ucode configure --dry-run` | Preview config files without writing them |
 | `ucode configure --agents claude,codex` | Configure specific agents without the interactive picker |
 | `ucode configure --workspaces https://first.databricks.com,https://second.databricks.com` | Configure workspaces without the interactive picker |
+| `ucode configure --profiles DEFAULT` | Configure using existing Databricks CLI profiles (hosts come from `~/.databrickscfg`) |
+| `ucode configure --profiles DEFAULT --use-pat` | Authenticate with the profile's personal access token — no browser login |
+| `ucode configure --skip-validate` | Write configs without sending a test message through each agent |
 
 ## Managed Local Files
 

@@ -124,7 +124,7 @@ def build_agent_state(state: dict) -> dict[str, dict]:
     profile = state.get("profile") if isinstance(state.get("profile"), str) else None
     base_urls_value = state.get("base_urls")
     base_urls = base_urls_value if isinstance(base_urls_value, dict) else {}
-    auth_command = build_auth_shell_command(workspace, profile)
+    auth_command = build_auth_shell_command(workspace, profile, use_pat=bool(state.get("use_pat")))
     claude_models_value = state.get("claude_models")
     claude_models: dict = claude_models_value if isinstance(claude_models_value, dict) else {}
     codex_models_value = state.get("codex_models")

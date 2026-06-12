@@ -3,6 +3,7 @@ discovery, AI Gateway v2 enforcement, SQL warehouse discovery, URL builders."""
 
 from __future__ import annotations
 
+import configparser
 import functools
 import json
 import logging
@@ -591,8 +592,9 @@ def has_valid_databricks_auth(workspace: str, profile: str | None = None) -> boo
         return False
 
 
-def get_databricks_profiles() -> list[tuple[str, str]]:
-    """Return [(host_url, profile_name), ...] from Databricks CLI profiles.
+def list_profile_entries() -> list[dict]:
+    """Return raw profile dicts ({"name", "host", "auth_type", ...}) from
+    `databricks auth profiles`.
 
     Returns ``[]`` on any failure (CLI missing, timeout, non-zero exit, JSON
     decode error). When ``UCODE_DEBUG=1`` each dropout path logs *why* the
@@ -608,16 +610,22 @@ def get_databricks_profiles() -> list[tuple[str, str]]:
             timeout=20,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        _debug("get_databricks_profiles", f"subprocess error: {type(exc).__name__}: {exc}")
+        _debug("list_profile_entries", f"subprocess error: {type(exc).__name__}: {exc}")
         return []
     if result.returncode != 0:
-        _debug("get_databricks_profiles", _format_subprocess_result(result))
+        _debug("list_profile_entries", _format_subprocess_result(result))
         return []
     try:
         profiles = json.loads(result.stdout or "{}").get("profiles") or []
     except json.JSONDecodeError as exc:
-        _debug("get_databricks_profiles", f"json decode error: {exc.msg}")
+        _debug("list_profile_entries", f"json decode error: {exc.msg}")
         return []
+    return [p for p in profiles if isinstance(p, dict)]
+
+
+def get_databricks_profiles() -> list[tuple[str, str]]:
+    """Return [(host_url, profile_name), ...] from Databricks CLI profiles."""
+    profiles = list_profile_entries()
 
     # dict dedupes by host (first non-PAT profile wins).
     out: dict[str, str] = {}
@@ -646,6 +654,61 @@ def find_profile_name_for_host(workspace: str) -> str | None:
         if host == normalized:
             return name
     return None
+
+
+def profile_auth_type(profile: str) -> str | None:
+    """Return the auth_type of a Databricks CLI profile (e.g. "pat"), or None."""
+    for p in list_profile_entries():
+        if p.get("name") == profile:
+            auth_type = p.get("auth_type")
+            return auth_type if isinstance(auth_type, str) else None
+    return None
+
+
+def _read_databrickscfg_token(profile: str) -> str | None:
+    """Read the static ``token`` value for a profile from ``~/.databrickscfg``.
+
+    `databricks auth token` only knows OAuth caches; for PAT profiles the PAT
+    itself is the credential, stored in the config file. The parser's default
+    section is pointed at a name that never appears in the file so a token in
+    ``[DEFAULT]`` does not leak into every named profile."""
+    cfg_path = Path(os.environ.get("DATABRICKS_CONFIG_FILE") or "~/.databrickscfg").expanduser()
+    parser = configparser.ConfigParser(default_section="@ucode-no-defaults@", interpolation=None)
+    try:
+        if not parser.read(cfg_path, encoding="utf-8"):
+            return None
+    except (configparser.Error, OSError):
+        return None
+    if not parser.has_section(profile):
+        return None
+    token = (parser.get(profile, "token", fallback="") or "").strip()
+    return token or None
+
+
+def resolve_pat_token(profile: str | None) -> str | None:
+    """Return the static PAT of a PAT-type Databricks CLI profile, or None.
+
+    Only consulted when the user explicitly opted in via
+    ``ucode configure --profiles <name> --use-pat`` — ucode never picks up a
+    PAT implicitly."""
+    if profile and profile_auth_type(profile) == "pat":
+        return _read_databrickscfg_token(profile)
+    return None
+
+
+def apply_pat_environment(state: dict) -> None:
+    """Export the configured profile's PAT as ``DATABRICKS_BEARER`` when the
+    workspace was configured with ``--use-pat``.
+
+    Every token fetch in this process (and in launched agent subprocesses,
+    which inherit the environment) then takes the existing static-bearer
+    short-circuit instead of the OAuth-only `databricks auth token` path.
+    A bearer already present in the environment is left untouched."""
+    if not state.get("use_pat"):
+        return
+    pat = resolve_pat_token(state.get("profile"))
+    if pat:
+        os.environ.setdefault("DATABRICKS_BEARER", pat)
 
 
 def run_databricks_login(workspace: str, profile: str | None = None) -> None:
@@ -955,9 +1018,19 @@ def list_databricks_apps(workspace: str, profile: str | None = None) -> list[dic
         raise RuntimeError("Databricks apps listing returned invalid JSON.") from exc
 
 
-def build_auth_shell_command(workspace: str, profile: str | None = None) -> str:
+def build_auth_shell_command(
+    workspace: str, profile: str | None = None, *, use_pat: bool = False
+) -> str:
     workspace_arg = shlex.quote(workspace.rstrip("/"))
-    if profile:
+    if use_pat and profile:
+        # --use-pat profiles have no OAuth cache for `auth token` to read, so
+        # the persisted command reads the profile's static token instead.
+        profile_arg = shlex.quote(profile)
+        cli_command = (
+            f"databricks auth describe --profile {profile_arg} --sensitive --output json "
+            "| jq -r '.details.configuration.token.value'"
+        )
+    elif profile:
         profile_arg = shlex.quote(profile)
         cli_command = (
             f"databricks auth token --host {workspace_arg} "

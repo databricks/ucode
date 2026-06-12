@@ -11,6 +11,7 @@ from datetime import date, datetime, timedelta
 from typing import cast
 
 from ucode.databricks import (
+    apply_pat_environment,
     discover_sql_warehouse_http_path,
     ensure_databricks_auth,
     get_databricks_token,
@@ -446,6 +447,7 @@ def usage() -> int:
         raise RuntimeError("Workspace is not configured. Run `ucode configure` first.")
 
     profile = state.get("profile")
+    apply_pat_environment(state)
     ensure_databricks_auth(workspace, profile)
     with spinner("Retrieving Databricks access token..."):
         token = get_databricks_token(workspace, profile)

@@ -687,6 +687,7 @@ class TestConfigureAgentsSelection:
             force_login=False,
             enable_uc=None,
             reset_uc=False,
+            use_pat=False,
         ):
             configured_shared.append(
                 (workspace, profile, tuple(tools) if tools is not None else None, force_login)
@@ -722,6 +723,317 @@ class TestConfigureAgentsSelection:
         ]
         assert saved == ["https://first.com"]
         assert configured_tools == [("https://first.com", ["codex"])]
+
+
+class TestParseProfilesOption:
+    @staticmethod
+    def _patch_profiles(monkeypatch, entries):
+        import ucode.cli as cli_mod
+
+        monkeypatch.setattr(cli_mod, "list_profile_entries", lambda: entries)
+        return cli_mod
+
+    def test_resolves_profiles_to_workspace_entries(self, monkeypatch):
+        cli_mod = self._patch_profiles(
+            monkeypatch,
+            [
+                {"name": "DEFAULT", "host": "https://first.databricks.com/", "auth_type": "pat"},
+                {
+                    "name": "second",
+                    "host": "https://second.databricks.com",
+                    "auth_type": "databricks-cli",
+                },
+            ],
+        )
+        assert cli_mod._parse_profiles_option("DEFAULT, second") == [
+            ("https://first.databricks.com", "DEFAULT"),
+            ("https://second.databricks.com", "second"),
+        ]
+
+    def test_unknown_profile_raises_with_available_names(self, monkeypatch):
+        cli_mod = self._patch_profiles(
+            monkeypatch,
+            [{"name": "DEFAULT", "host": "https://first.databricks.com", "auth_type": "pat"}],
+        )
+        with pytest.raises(RuntimeError, match=r"'missing' was not found.*DEFAULT"):
+            cli_mod._parse_profiles_option("missing")
+
+    def test_profile_without_host_raises(self, monkeypatch):
+        cli_mod = self._patch_profiles(monkeypatch, [{"name": "DEFAULT", "auth_type": "pat"}])
+        with pytest.raises(RuntimeError, match="no host configured"):
+            cli_mod._parse_profiles_option("DEFAULT")
+
+    def test_empty_value_raises(self, monkeypatch):
+        cli_mod = self._patch_profiles(monkeypatch, [])
+        with pytest.raises(RuntimeError, match="No profiles provided"):
+            cli_mod._parse_profiles_option(" , ")
+
+
+class TestConfigureProfilesFlag:
+    PROFILE_ENTRIES = [
+        {"name": "DEFAULT", "host": "https://first.databricks.com", "auth_type": "pat"}
+    ]
+
+    def test_profiles_flag_resolves_workspaces(self):
+        with (
+            patch("ucode.cli.install_databricks_cli"),
+            patch("ucode.cli.install_tool_binary"),
+            patch("ucode.cli.list_profile_entries", return_value=self.PROFILE_ENTRIES),
+            patch("ucode.cli.configure_workspace_command") as mock_cfg,
+        ):
+            result = runner.invoke(app, ["configure", "--profiles", "DEFAULT"])
+        assert result.exit_code == 0, result.output
+        # Auth behaves like --workspaces: no skip flags are forwarded, so the
+        # default forced OAuth login applies.
+        mock_cfg.assert_called_once_with(
+            workspaces=[("https://first.databricks.com", "DEFAULT")],
+            prompt_optional_updates=True,
+            enable_uc=None,
+            reset_uc=True,
+        )
+
+    def test_profiles_flag_with_agents(self):
+        with (
+            patch("ucode.cli.install_databricks_cli"),
+            patch("ucode.cli.install_tool_binary"),
+            patch("ucode.cli.list_profile_entries", return_value=self.PROFILE_ENTRIES),
+            patch("ucode.cli.configure_workspace_command") as mock_cfg,
+        ):
+            result = runner.invoke(
+                app, ["configure", "--agents", "claude,codex", "--profiles", "DEFAULT"]
+            )
+        assert result.exit_code == 0, result.output
+        mock_cfg.assert_called_once_with(
+            selected_tools=["claude", "codex"],
+            workspaces=[("https://first.databricks.com", "DEFAULT")],
+            prompt_optional_updates=True,
+            enable_uc=None,
+            reset_uc=True,
+        )
+
+    def test_profiles_flag_with_agent(self):
+        with (
+            patch("ucode.cli.install_databricks_cli"),
+            patch("ucode.cli.install_tool_binary"),
+            patch("ucode.cli.list_profile_entries", return_value=self.PROFILE_ENTRIES),
+            patch("ucode.cli.configure_workspace_command") as mock_cfg,
+        ):
+            result = runner.invoke(app, ["configure", "--agent", "claude", "--profiles", "DEFAULT"])
+        assert result.exit_code == 0, result.output
+        mock_cfg.assert_called_once_with(
+            "claude",
+            workspaces=[("https://first.databricks.com", "DEFAULT")],
+            enable_uc=None,
+            reset_uc=True,
+        )
+
+    def test_use_pat_and_skip_validate_are_forwarded(self):
+        with (
+            patch("ucode.cli.install_databricks_cli"),
+            patch("ucode.cli.install_tool_binary"),
+            patch("ucode.cli.list_profile_entries", return_value=self.PROFILE_ENTRIES),
+            patch("ucode.cli.configure_workspace_command") as mock_cfg,
+        ):
+            result = runner.invoke(
+                app,
+                [
+                    "configure",
+                    "--agents",
+                    "claude,codex",
+                    "--profiles",
+                    "DEFAULT",
+                    "--use-pat",
+                    "--skip-validate",
+                ],
+            )
+        assert result.exit_code == 0, result.output
+        mock_cfg.assert_called_once_with(
+            selected_tools=["claude", "codex"],
+            workspaces=[("https://first.databricks.com", "DEFAULT")],
+            prompt_optional_updates=True,
+            enable_uc=None,
+            reset_uc=True,
+            use_pat=True,
+            skip_validate=True,
+        )
+
+    def test_use_pat_requires_profiles(self):
+        with (
+            patch("ucode.cli.install_databricks_cli"),
+            patch("ucode.cli.configure_workspace_command") as mock_cfg,
+        ):
+            result = runner.invoke(
+                app,
+                ["configure", "--workspaces", "https://first.databricks.com", "--use-pat"],
+            )
+        assert result.exit_code == 1
+        assert "--use-pat requires --profiles" in _strip_ansi(result.output)
+        mock_cfg.assert_not_called()
+
+    def test_profiles_and_workspaces_are_mutually_exclusive(self):
+        with (
+            patch("ucode.cli.install_databricks_cli"),
+            patch("ucode.cli.configure_workspace_command") as mock_cfg,
+        ):
+            result = runner.invoke(
+                app,
+                [
+                    "configure",
+                    "--profiles",
+                    "DEFAULT",
+                    "--workspaces",
+                    "https://first.databricks.com",
+                ],
+            )
+        assert result.exit_code == 1
+        assert "not both" in _strip_ansi(result.output)
+        mock_cfg.assert_not_called()
+
+
+class TestConfigureSharedStateUsePat:
+    """--use-pat reads the profile's PAT from ~/.databrickscfg, exports it as
+    DATABRICKS_BEARER, persists the mode, and never opens a browser."""
+
+    WS = "https://example.databricks.com"
+
+    @pytest.fixture(autouse=True)
+    def _isolated_bearer(self):
+        # configure_shared_state writes DATABRICKS_BEARER directly; restore it
+        # since monkeypatch can't track writes made by code under test.
+        import os as os_mod
+
+        original = os_mod.environ.pop("DATABRICKS_BEARER", None)
+        yield
+        if original is None:
+            os_mod.environ.pop("DATABRICKS_BEARER", None)
+        else:
+            os_mod.environ["DATABRICKS_BEARER"] = original
+
+    @staticmethod
+    def _stub_deps(monkeypatch, *, pat_token, existing_state=None):
+        import ucode.cli as cli_mod
+
+        logins: list[tuple] = []
+        ensures: list[tuple] = []
+        saved: list[dict] = []
+        monkeypatch.setattr(cli_mod, "load_state", lambda: dict(existing_state or {}))
+        monkeypatch.setattr(cli_mod, "save_state", lambda s: saved.append(dict(s)))
+        monkeypatch.setattr(cli_mod, "run_databricks_login", lambda w, p: logins.append((w, p)))
+        monkeypatch.setattr(
+            cli_mod, "ensure_databricks_auth", lambda w, p=None: ensures.append((w, p))
+        )
+        monkeypatch.setattr(cli_mod, "resolve_pat_token", lambda p: pat_token)
+        monkeypatch.setattr(cli_mod, "find_profile_name_for_host", lambda w: None)
+        monkeypatch.setattr(cli_mod, "get_databricks_token", lambda w, p: "token")
+        monkeypatch.setattr(cli_mod, "ensure_ai_gateway_v2", lambda w, t: None)
+        monkeypatch.setattr(cli_mod, "discover_claude_models", lambda w, t: ({}, None))
+        monkeypatch.setattr(cli_mod, "discover_gemini_models", lambda w, t: ([], None))
+        monkeypatch.setattr(cli_mod, "discover_codex_models", lambda w, t: ([], None))
+        monkeypatch.setattr(cli_mod, "build_shared_base_urls", lambda w: {})
+        return cli_mod, logins, ensures, saved
+
+    def test_use_pat_exports_bearer_and_skips_login(self, monkeypatch):
+        import os as os_mod
+
+        cli_mod, logins, ensures, saved = self._stub_deps(monkeypatch, pat_token="dapi-pat")
+
+        state = cli_mod.configure_shared_state(
+            self.WS, profile="DEFAULT", force_login=True, use_pat=True
+        )
+
+        assert logins == []
+        assert ensures == [(self.WS, "DEFAULT")]
+        assert os_mod.environ["DATABRICKS_BEARER"] == "dapi-pat"
+        assert state["use_pat"] is True
+        assert saved and saved[-1]["use_pat"] is True
+
+    def test_use_pat_without_pat_profile_raises(self, monkeypatch):
+        cli_mod, logins, _, _ = self._stub_deps(monkeypatch, pat_token=None)
+
+        with pytest.raises(RuntimeError, match="no personal access token"):
+            cli_mod.configure_shared_state(
+                self.WS, profile="oauth-profile", force_login=True, use_pat=True
+            )
+        assert logins == []
+
+    def test_use_pat_without_profile_raises(self, monkeypatch):
+        cli_mod, _, _, _ = self._stub_deps(monkeypatch, pat_token="dapi-pat")
+
+        with pytest.raises(RuntimeError, match="requires a Databricks CLI profile"):
+            cli_mod.configure_shared_state(self.WS, force_login=True, use_pat=True)
+
+    def test_launch_inherits_persisted_use_pat(self, monkeypatch):
+        # A launch re-run passes use_pat=None; the persisted mode for the same
+        # workspace must apply so no OAuth login is forced.
+        cli_mod, logins, ensures, _ = self._stub_deps(
+            monkeypatch,
+            pat_token="dapi-pat",
+            existing_state={"workspace": self.WS, "profile": "DEFAULT", "use_pat": True},
+        )
+
+        state = cli_mod.configure_shared_state(self.WS, profile="DEFAULT", force_login=False)
+
+        assert logins == []
+        assert state["use_pat"] is True
+
+    def test_reconfigure_without_flag_clears_use_pat(self, monkeypatch):
+        cli_mod, logins, _, _ = self._stub_deps(
+            monkeypatch,
+            pat_token="dapi-pat",
+            existing_state={"workspace": self.WS, "profile": "DEFAULT", "use_pat": True},
+        )
+
+        state = cli_mod.configure_shared_state(
+            self.WS, profile="DEFAULT", force_login=True, use_pat=False
+        )
+
+        assert logins == [(self.WS, "DEFAULT")]
+        assert "use_pat" not in state
+
+
+class TestConfigureSkipValidate:
+    def test_skip_validate_skips_agent_validation(self, monkeypatch):
+        import ucode.cli as cli_mod
+
+        state = {**MINIMAL_STATE, "workspace": "https://first.com"}
+        monkeypatch.setattr(cli_mod, "configure_shared_state", lambda *a, **k: state)
+        monkeypatch.setattr(cli_mod, "save_state", lambda s: None)
+        monkeypatch.setattr(cli_mod, "check_gateway_endpoint", lambda s, t: True)
+        monkeypatch.setattr(cli_mod, "install_tool_binary", lambda *a, **k: True)
+        monkeypatch.setattr(
+            cli_mod,
+            "configure_selected_tools",
+            lambda s, tools: {**s, "available_tools": tools},
+        )
+        validated: list = []
+        monkeypatch.setattr(cli_mod, "validate_all_tools", lambda s: validated.append(s))
+
+        result = cli_mod.configure_workspace_command(
+            selected_tools=["codex"],
+            workspaces=[("https://first.com", None)],
+            skip_validate=True,
+        )
+
+        assert result == 0
+        assert validated == []
+
+    def test_skip_validate_skips_single_tool_validation(self, monkeypatch):
+        import ucode.cli as cli_mod
+
+        state = {**MINIMAL_STATE, "workspace": "https://first.com"}
+        monkeypatch.setattr(cli_mod, "configure_shared_state", lambda *a, **k: state)
+        monkeypatch.setattr(cli_mod, "configure_single_tool", lambda t, s: s)
+        validated: list = []
+        monkeypatch.setattr(cli_mod, "validate_tool", lambda t: validated.append(t) or (True, ""))
+
+        result = cli_mod.configure_workspace_command(
+            "claude",
+            workspaces=[("https://first.com", None)],
+            skip_validate=True,
+        )
+
+        assert result == 0
+        assert validated == []
 
 
 class TestConfigureSharedStateMcpCleanup:

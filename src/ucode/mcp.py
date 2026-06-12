@@ -27,6 +27,7 @@ from questionary.styles import merge_styles_default
 from ucode.agents import copilot, gemini, opencode
 from ucode.config_io import restore_file
 from ucode.databricks import (
+    apply_pat_environment,
     build_mcp_service_url,
     ensure_databricks_auth,
     get_databricks_token,
@@ -965,6 +966,7 @@ def configure_mcp_command() -> int:
     ]
 
     profile = state.get("profile")
+    apply_pat_environment(state)
     ensure_databricks_auth(workspace, profile)
 
     print_section("MCP Servers")

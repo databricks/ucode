@@ -205,6 +205,18 @@ class TestBuildAgentState:
         result = build_agent_state({"base_urls": FAKE_URLS})
         assert result == {}
 
+    def test_use_pat_state_builds_pat_auth_command(self):
+        result = build_agent_state(
+            {
+                "workspace": "https://example.databricks.com",
+                "profile": "DEFAULT",
+                "use_pat": True,
+                "base_urls": FAKE_URLS,
+            }
+        )
+        for agent in ("claude", "codex", "pi"):
+            assert "auth describe --profile DEFAULT --sensitive" in (result[agent]["auth_command"])
+
 
 # ---------------------------------------------------------------------------
 # mark_tool_managed

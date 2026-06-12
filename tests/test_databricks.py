@@ -488,6 +488,83 @@ class TestDiscoverGeminiModels:
         assert models == ["databricks-gpt-4-1", "databricks-gpt-5-2-codex"]
 
 
+class TestResolvePatToken:
+    def test_reads_pat_profile_token_from_cfg(self, monkeypatch, tmp_path):
+        cfg = tmp_path / "databrickscfg"
+        cfg.write_text(f"[lakebox]\nhost = {WS}\ntoken = dapi-from-cfg\n")
+        monkeypatch.setenv("DATABRICKS_CONFIG_FILE", str(cfg))
+        monkeypatch.setattr(
+            db_mod,
+            "list_profile_entries",
+            lambda: [{"name": "lakebox", "host": WS, "auth_type": "pat"}],
+        )
+        assert db_mod.resolve_pat_token("lakebox") == "dapi-from-cfg"
+
+    def test_default_section_token_does_not_leak_into_named_profiles(self, monkeypatch, tmp_path):
+        cfg = tmp_path / "databrickscfg"
+        cfg.write_text(
+            f"[DEFAULT]\nhost = {WS}\ntoken = dapi-default\n"
+            "[other]\nhost = https://other.databricks.com\n"
+        )
+        monkeypatch.setenv("DATABRICKS_CONFIG_FILE", str(cfg))
+        monkeypatch.setattr(
+            db_mod,
+            "list_profile_entries",
+            lambda: [
+                {"name": "DEFAULT", "host": WS, "auth_type": "pat"},
+                {"name": "other", "host": "https://other.databricks.com", "auth_type": "pat"},
+            ],
+        )
+        assert db_mod.resolve_pat_token("DEFAULT") == "dapi-default"
+        assert db_mod.resolve_pat_token("other") is None
+
+    def test_returns_none_for_oauth_profile(self, monkeypatch):
+        monkeypatch.setattr(
+            db_mod,
+            "list_profile_entries",
+            lambda: [{"name": "oauth", "host": WS, "auth_type": "databricks-cli"}],
+        )
+        assert db_mod.resolve_pat_token("oauth") is None
+
+    def test_returns_none_without_profile(self):
+        assert db_mod.resolve_pat_token(None) is None
+
+
+class TestApplyPatEnvironment:
+    @pytest.fixture(autouse=True)
+    def _isolated_bearer(self):
+        # apply_pat_environment writes os.environ directly; restore it even
+        # though monkeypatch can't track writes made by code under test.
+        original = os.environ.pop("DATABRICKS_BEARER", None)
+        yield
+        if original is None:
+            os.environ.pop("DATABRICKS_BEARER", None)
+        else:
+            os.environ["DATABRICKS_BEARER"] = original
+
+    def test_exports_bearer_for_use_pat_state(self, monkeypatch):
+        monkeypatch.setattr(db_mod, "resolve_pat_token", lambda p: "dapi-pat")
+
+        db_mod.apply_pat_environment({"use_pat": True, "profile": "DEFAULT"})
+
+        assert os.environ["DATABRICKS_BEARER"] == "dapi-pat"
+
+    def test_noop_without_use_pat(self, monkeypatch):
+        monkeypatch.setattr(db_mod, "resolve_pat_token", lambda p: "dapi-pat")
+
+        db_mod.apply_pat_environment({"profile": "DEFAULT"})
+
+        assert "DATABRICKS_BEARER" not in os.environ
+
+    def test_existing_bearer_wins(self, monkeypatch):
+        monkeypatch.setenv("DATABRICKS_BEARER", "explicit-bearer")
+        monkeypatch.setattr(db_mod, "resolve_pat_token", lambda p: "dapi-pat")
+
+        db_mod.apply_pat_environment({"use_pat": True, "profile": "DEFAULT"})
+
+        assert os.environ["DATABRICKS_BEARER"] == "explicit-bearer"
+
+
 class TestBuildAuthShellCommand:
     def test_contains_workspace(self):
         cmd = build_auth_shell_command(WS)
@@ -551,6 +628,43 @@ class TestBuildAuthShellCommand:
         # be interpreted as a shell injection.
         assert "rm -rf /" in cmd
         assert "'weird name; rm -rf /'" in cmd
+
+    def test_use_pat_reads_profile_token_via_describe(self):
+        cmd = build_auth_shell_command(WS, profile="DEFAULT", use_pat=True)
+        assert "auth describe --profile DEFAULT --sensitive" in cmd
+        assert ".details.configuration.token.value" in cmd
+        # No OAuth attempt for PAT profiles — `auth token` cannot serve them.
+        assert "auth token" not in cmd
+        # The DATABRICKS_BEARER escape hatch still takes precedence.
+        assert "DATABRICKS_BEARER" in cmd
+
+    def test_use_pat_command_emits_token(self, tmp_path):
+        fake = tmp_path / "databricks"
+        fake.write_text(
+            "#!/bin/sh\n"
+            'case "$*" in\n'
+            '  *"auth describe"*) echo \'{"details": {"configuration": '
+            '{"token": {"value": "dapi-pat"}}}}\' ;;\n'
+            "  *) exit 1 ;;\n"
+            "esac\n"
+        )
+        fake.chmod(0o755)
+        cmd = build_auth_shell_command(WS, profile="DEFAULT", use_pat=True)
+        result = subprocess.run(
+            ["sh", "-c", cmd],
+            capture_output=True,
+            text=True,
+            env={
+                **os.environ,
+                "PATH": f"{tmp_path}:{os.environ['PATH']}",
+                "DATABRICKS_BEARER": "",
+            },
+        )
+        assert result.stdout.strip() == "dapi-pat"
+
+    def test_use_pat_without_profile_falls_back_to_oauth_command(self):
+        cmd = build_auth_shell_command(WS, use_pat=True)
+        assert "auth token" in cmd
 
 
 class TestFormatSubprocessResult:

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Annotated
 
 import typer
@@ -29,6 +30,7 @@ from ucode.agents.codex import revert_legacy_shared_config
 from ucode.agents.pi import PI_SETTINGS_BACKUP_PATH, PI_SETTINGS_PATH
 from ucode.config_io import restore_file, set_dry_run
 from ucode.databricks import (
+    apply_pat_environment,
     build_shared_base_urls,
     discover_claude_models,
     discover_codex_models,
@@ -40,7 +42,9 @@ from ucode.databricks import (
     get_databricks_profiles,
     get_databricks_token,
     install_databricks_cli,
+    list_profile_entries,
     normalize_workspace_url,
+    resolve_pat_token,
     run_databricks_login,
     uc_enabled,
 )
@@ -146,6 +150,46 @@ def _parse_workspaces_option(workspaces: str) -> list[tuple[str, str | None]]:
     return workspace_entries
 
 
+def _parse_profiles_option(profiles: str) -> list[tuple[str, str | None]]:
+    """Parse `--profiles` into [(url, profile_name), ...].
+
+    Each name must be an existing Databricks CLI profile; its host supplies
+    the workspace URL. Auth behaves the same as `--workspaces`: OAuth login is
+    forced unless `--use-pat` is also passed."""
+    available = {str(p.get("name")): p for p in list_profile_entries() if p.get("name")}
+    workspace_entries: list[tuple[str, str | None]] = []
+    seen: set[str] = set()
+    for raw_name in profiles.split(","):
+        name = raw_name.strip()
+        if not name:
+            continue
+        entry = available.get(name)
+        if entry is None:
+            known = ", ".join(sorted(available)) or "none"
+            raise RuntimeError(
+                f"Databricks CLI profile '{name}' was not found (available: {known}). "
+                "Check `databricks auth profiles` or add the profile to ~/.databrickscfg."
+            )
+        host = str(entry.get("host") or "").strip()
+        if not host:
+            raise RuntimeError(
+                f"Databricks CLI profile '{name}' has no host configured in ~/.databrickscfg."
+            )
+        try:
+            workspace = normalize_workspace_url(host)
+        except ValueError as exc:
+            raise RuntimeError(str(exc)) from exc
+        if workspace not in seen:
+            seen.add(workspace)
+            workspace_entries.append((workspace, name))
+    if not workspace_entries:
+        raise RuntimeError(
+            "No profiles provided for --profiles. Use a comma-separated list like "
+            "`--profiles DEFAULT`."
+        )
+    return workspace_entries
+
+
 def configure_shared_state(
     workspace: str,
     profile: str | None = None,
@@ -153,11 +197,16 @@ def configure_shared_state(
     force_login: bool = False,
     enable_uc: bool | None = None,
     reset_uc: bool = False,
+    use_pat: bool | None = None,
 ) -> dict:
     """Log into Databricks, enforce AI Gateway v2, fetch model lists, persist state.
 
     If tools is provided, only fetch models for those tools. Otherwise fetch all.
     If force_login is True, always run databricks auth login (used by explicit configure).
+    If use_pat is True (explicit `configure --profiles <name> --use-pat`), the
+    profile's personal access token from ~/.databrickscfg is used instead of
+    OAuth and no interactive login ever runs. ``None`` means "inherit": a
+    launch re-run keeps the mode the workspace was configured with.
     ``profile`` is the Databricks CLI profile name to address — passed via
     ``--profile`` to every CLI invocation so ambiguous `~/.databrickscfg`
     entries (e.g. DEFAULT and a named profile both pointing at the same host)
@@ -184,8 +233,27 @@ def configure_shared_state(
         else:
             target_ws_state = load_full_state().get("workspaces", {}).get(workspace) or {}
             enable_uc = uc_enabled(default=bool(target_ws_state.get("uc_enabled")))
+    if use_pat is None:
+        use_pat = bool(prior_state.get("use_pat")) and previous_workspace == workspace
     fetch_all = tools is None
-    if force_login:
+    if use_pat:
+        if not profile:
+            raise RuntimeError(
+                "--use-pat requires a Databricks CLI profile. Pass one via `--profiles <name>`."
+            )
+        pat = resolve_pat_token(profile)
+        if not pat:
+            raise RuntimeError(
+                f"--use-pat: profile '{profile}' has no personal access token in "
+                "~/.databrickscfg (its auth_type must be `pat`). Add a `token = <PAT>` "
+                f"entry under [{profile}], or re-run without --use-pat to use OAuth."
+            )
+        # Export the PAT for this process and launched agent subprocesses so
+        # every token fetch takes the static-bearer path; a bearer already in
+        # the environment wins.
+        os.environ.setdefault("DATABRICKS_BEARER", pat)
+        ensure_databricks_auth(workspace, profile)
+    elif force_login:
         run_databricks_login(workspace, profile)
     else:
         ensure_databricks_auth(workspace, profile)
@@ -246,6 +314,12 @@ def configure_shared_state(
     # Persist the resolved flag so subsequent launches stay on the same
     # discovery path without the env var or CLI flag being re-passed.
     state["uc_enabled"] = enable_uc
+    # Persist the auth mode so launches rebuild the same (PAT-based) agent
+    # auth command; an explicit re-configure without --use-pat clears it.
+    if use_pat:
+        state["use_pat"] = True
+    else:
+        state.pop("use_pat", None)
     state["base_urls"] = build_shared_base_urls(workspace)
     if want_claude:
         state["claude_models"] = claude_models
@@ -277,6 +351,7 @@ def _configure_shared_workspace_states(
     force_login: bool,
     enable_uc: bool | None = None,
     reset_uc: bool = False,
+    use_pat: bool = False,
 ) -> list[dict]:
     if not workspaces:
         raise RuntimeError("At least one workspace must be provided.")
@@ -290,6 +365,7 @@ def _configure_shared_workspace_states(
                 force_login=force_login,
                 enable_uc=enable_uc,
                 reset_uc=reset_uc,
+                use_pat=use_pat,
             )
         )
     return states
@@ -303,6 +379,8 @@ def configure_workspace_command(
     prompt_optional_updates: bool = True,
     enable_uc: bool | None = None,
     reset_uc: bool = False,
+    use_pat: bool = False,
+    skip_validate: bool = False,
 ) -> int:
     if tool is not None and selected_tools is not None:
         raise RuntimeError("Use either --agent or --agents, not both.")
@@ -311,7 +389,12 @@ def configure_workspace_command(
 
     if tool is not None:
         states = _configure_shared_workspace_states(
-            workspace_entries, [tool], force_login=True, enable_uc=enable_uc, reset_uc=reset_uc
+            workspace_entries,
+            [tool],
+            force_login=True,
+            enable_uc=enable_uc,
+            reset_uc=reset_uc,
+            use_pat=use_pat,
         )
         state = states[0]
         state = configure_single_tool(tool, state)
@@ -325,6 +408,9 @@ def configure_workspace_command(
                 expand=False,
             )
         )
+        if skip_validate:
+            print_note(f"Skipping {spec['display']} validation (--skip-validate).")
+            return 0
         with spinner(f"Validating {spec['display']}..."):
             ok, err = validate_tool(tool)
         if ok:
@@ -345,6 +431,7 @@ def configure_workspace_command(
         force_login=True,
         enable_uc=enable_uc,
         reset_uc=reset_uc,
+        use_pat=use_pat,
     )
     state = states[0]
     save_state(state)
@@ -402,6 +489,9 @@ def configure_workspace_command(
         )
     )
 
+    if skip_validate:
+        print_note("Skipping agent validation (--skip-validate).")
+        return 0
     # Limit validation to just-configured tools so we don't re-validate
     # previously-configured tools the user didn't touch this run.
     validate_state = {**state, "available_tools": picked}
@@ -581,6 +671,10 @@ def _launch_tool(tool_name: str, ctx: typer.Context) -> None:
     try:
         tool = normalize_tool(tool_name)
         existing = load_state()
+        # Workspaces configured with --use-pat export the profile's PAT as
+        # DATABRICKS_BEARER up front so every auth check below (and the
+        # launched agent itself) uses the static token instead of OAuth.
+        apply_pat_environment(existing)
         needs_auto_configure = not existing.get("workspace") or tool not in (
             existing.get("available_tools") or []
         )
@@ -680,6 +774,35 @@ def configure(
             help="Configure a comma-separated list of workspaces without prompting.",
         ),
     ] = None,
+    profiles: Annotated[
+        str | None,
+        typer.Option(
+            "--profiles",
+            help="Configure a comma-separated list of existing Databricks CLI profiles "
+            "without the workspace prompt. Each profile's host from ~/.databrickscfg "
+            "supplies the workspace URL. Auth behaves like --workspaces: OAuth login "
+            "is forced unless --use-pat is also passed.",
+        ),
+    ] = None,
+    use_pat: Annotated[
+        bool,
+        typer.Option(
+            "--use-pat",
+            help="Authenticate with the personal access token stored in "
+            "~/.databrickscfg for the selected profile(s) instead of OAuth. "
+            "Requires --profiles; no interactive login is run. Intended for "
+            "CI / headless environments.",
+        ),
+    ] = False,
+    skip_validate: Annotated[
+        bool,
+        typer.Option(
+            "--skip-validate",
+            help="Skip the post-configure validation step that sends a quick test "
+            "message through each agent. Config files are still written with the "
+            "freshly discovered models.",
+        ),
+    ] = False,
     tracing: Annotated[
         bool,
         typer.Option(
@@ -734,7 +857,23 @@ def configure(
         install_databricks_cli()
         if agent is not None and agents is not None:
             raise RuntimeError("Use either --agent or --agents, not both.")
+        if workspaces is not None and profiles is not None:
+            raise RuntimeError("Use either --workspaces or --profiles, not both.")
+        if use_pat and profiles is None:
+            raise RuntimeError(
+                "--use-pat requires --profiles. Pass the PAT-backed Databricks CLI "
+                "profile(s) explicitly, e.g. `ucode configure --profiles DEFAULT --use-pat`."
+            )
         workspace_entries = _parse_workspaces_option(workspaces) if workspaces is not None else None
+        if profiles is not None:
+            workspace_entries = _parse_profiles_option(profiles)
+        # Only forward the opt-in flags when set so existing call expectations
+        # (and defaults) stay unchanged for the common interactive path.
+        skip_kwargs: dict = {}
+        if use_pat:
+            skip_kwargs["use_pat"] = True
+        if skip_validate:
+            skip_kwargs["skip_validate"] = True
         if agent is not None:
             tool = normalize_tool(agent)
             install_tool_binary(
@@ -744,13 +883,16 @@ def configure(
                 prompt_optional_updates=prompt_optional_updates,
             )
             if workspace_entries is None:
-                configure_workspace_command(tool, enable_uc=flag_enable_uc, reset_uc=True)
+                configure_workspace_command(
+                    tool, enable_uc=flag_enable_uc, reset_uc=True, **skip_kwargs
+                )
             else:
                 configure_workspace_command(
                     tool,
                     workspaces=workspace_entries,
                     enable_uc=flag_enable_uc,
                     reset_uc=True,
+                    **skip_kwargs,
                 )
         elif agents is not None:
             selected_tools = _parse_agents_option(agents)
@@ -760,6 +902,7 @@ def configure(
                     prompt_optional_updates=prompt_optional_updates,
                     enable_uc=flag_enable_uc,
                     reset_uc=True,
+                    **skip_kwargs,
                 )
             else:
                 configure_workspace_command(
@@ -768,6 +911,7 @@ def configure(
                     prompt_optional_updates=prompt_optional_updates,
                     enable_uc=flag_enable_uc,
                     reset_uc=True,
+                    **skip_kwargs,
                 )
         else:
             # Tool binaries are installed after the user picks which agents
@@ -777,6 +921,7 @@ def configure(
                     prompt_optional_updates=prompt_optional_updates,
                     enable_uc=flag_enable_uc,
                     reset_uc=True,
+                    **skip_kwargs,
                 )
             else:
                 configure_workspace_command(
@@ -784,6 +929,7 @@ def configure(
                     prompt_optional_updates=prompt_optional_updates,
                     enable_uc=flag_enable_uc,
                     reset_uc=True,
+                    **skip_kwargs,
                 )
         if tracing:
             # The workspaces were just configured, so enable tracing for them
