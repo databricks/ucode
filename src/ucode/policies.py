@@ -17,6 +17,20 @@ DEFAULT_POLICY_NAME = "coding-agents-default"
 DEFAULT_ON_BUDGET_EXHAUSTED: OnBudgetExhausted = "block"
 VALID_ON_BUDGET_EXHAUSTED: frozenset[str] = frozenset({"block", "warn", "allow"})
 
+# Friendly display names for serving endpoints, shown wherever a model id would
+# otherwise appear raw (policy summary, `ucode status`, the budget-switch
+# prompt, and the OpenCode model picker). Unlisted endpoints fall back to their
+# raw id.
+ENDPOINT_VANITY_NAMES: dict[str, str] = {
+    "databricks-gpt-5-5": "GPT-5",
+    "databricks-kimi-k2-6": "Databricks Kimi 2.7",
+    "databricks-kimi-k2-6-colo": "Databricks Kimi-2.7",
+}
+
+
+def endpoint_vanity_name(model: str) -> str:
+    return ENDPOINT_VANITY_NAMES.get(model, model)
+
 
 def _parse_on_budget_exhausted(raw: object) -> str | dict:
     """Parse on_budget_exhausted into a normalized string or switch dict.

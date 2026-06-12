@@ -77,6 +77,9 @@ from ucode.policies import (
     policy_cache_path,
     save_workspace_policy,
 )
+from ucode.policies import (
+    endpoint_vanity_name as _endpoint_vanity_name,
+)
 from ucode.state import (
     STATE_PATH,
     clear_state,
@@ -145,7 +148,7 @@ def _tier_display(tier: dict) -> str:
     harness = str(tier.get("harness") or "agent")
     model = str(tier.get("model") or "model")
     display = TOOL_SPECS.get(harness, {}).get("display", harness)
-    return f"{display} / {model}"
+    return f"{display} / {_endpoint_vanity_name(model)}"
 
 
 def _print_discovery_diagnostics(state: dict) -> None:
@@ -630,7 +633,7 @@ def _render_policy_summary_lines(
         target_model = str(target.get("model") or "") if isinstance(target, dict) else ""
         on_exhausted_line = (
             f"  [dim]·[/dim] [bold]at 100%[/bold] "
-            f"→ {_harness_display(target_harness)} · [magenta]{target_model}[/magenta]"
+            f"→ {_harness_display(target_harness)} · [magenta]{_endpoint_vanity_name(target_model)}[/magenta]"
         )
     elif isinstance(on_exhausted_raw, str) and on_exhausted_raw in VALID_ON_BUDGET_EXHAUSTED:
         on_exhausted_line = (
@@ -657,7 +660,7 @@ def _render_policy_summary_lines(
             model = str(tier.get("model") or "?")
             lines.append(
                 f"  [dim]·[/dim] [bold]{tier_name}[/bold] [dim]({pct})[/dim] "
-                f"→ {_harness_display(harness)} · [magenta]{model}[/magenta]"
+                f"→ {_harness_display(harness)} · [magenta]{_endpoint_vanity_name(model)}[/magenta]"
             )
     lines.append(on_exhausted_line)
     return lines
@@ -874,7 +877,9 @@ def status() -> int:
             target = on_exhausted.get("target") or {}
             target_harness = target.get("harness", "") if isinstance(target, dict) else ""
             target_model = target.get("model", "") if isinstance(target, dict) else ""
-            on_exhausted_display = f"switch → {target_harness} ({target_model})"
+            on_exhausted_display = (
+                f"switch → {target_harness} ({_endpoint_vanity_name(target_model)})"
+            )
         elif isinstance(on_exhausted, str) and on_exhausted in VALID_ON_BUDGET_EXHAUSTED:
             on_exhausted_display = on_exhausted
         else:
@@ -896,7 +901,7 @@ def status() -> int:
                 model = str(tier.get("model") or "?")
                 print_kv(
                     f"Tier · {tier_name} ({pct})",
-                    f"{_harness_display(harness)} → {model}",
+                    f"{_harness_display(harness)} → {_endpoint_vanity_name(model)}",
                 )
         else:
             print_kv("Tiers", "none")

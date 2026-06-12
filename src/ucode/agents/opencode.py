@@ -23,7 +23,7 @@ from ucode.databricks import (
     build_opencode_base_urls,
     get_databricks_token,
 )
-from ucode.policies import resolve_policy_default_model
+from ucode.policies import endpoint_vanity_name, resolve_policy_default_model
 from ucode.state import mark_tool_managed, save_state
 from ucode.telemetry import agent_version, ucode_version
 
@@ -215,6 +215,19 @@ def _resolve_model_selector(model: str, opencode_models: dict[str, list[str]]) -
     return model
 
 
+def _models_with_names(model_ids: list[str], base: dict) -> dict:
+    """Map each model id to its own copy of ``base``, adding a vanity ``name``
+    (OpenCode's model-picker label) whenever one differs from the raw id."""
+    entries: dict[str, dict] = {}
+    for mid in model_ids:
+        entry = dict(base)
+        vanity = endpoint_vanity_name(mid)
+        if vanity != mid:
+            entry["name"] = vanity
+        entries[mid] = entry
+    return entries
+
+
 def render_overlay(
     model: str,
     token: str,
@@ -254,7 +267,7 @@ def render_overlay(
                 "apiKey": token,
                 "headers": auth_headers,
             },
-            "models": dict.fromkeys(anthropic_models, anthropic_model_overlay),
+            "models": _models_with_names(anthropic_models, anthropic_model_overlay),
         }
         keys.append(["provider", "databricks-anthropic"])
     if gemini_models:
@@ -265,7 +278,7 @@ def render_overlay(
                 "apiKey": token,
                 "headers": auth_headers,
             },
-            "models": {m: {"headers": ua_header} for m in gemini_models},
+            "models": _models_with_names(gemini_models, {"headers": ua_header}),
         }
         keys.append(["provider", "databricks-google"])
     if open_responses_models:
@@ -294,7 +307,7 @@ def render_overlay(
                     "X-Axon-LB-Mode": "DICER",
                 },
             },
-            "models": {m: {"headers": ua_header} for m in open_responses_models},
+            "models": _models_with_names(open_responses_models, {"headers": ua_header}),
         }
         keys.append(["provider", "databricks-open-responses"])
 
