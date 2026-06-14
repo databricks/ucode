@@ -383,9 +383,7 @@ class TestConfigureAgentFlag:
         ):
             result = runner.invoke(app, ["configure"])
         assert result.exit_code == 0, result.output
-        mock_cfg.assert_called_once_with(
-            prompt_optional_updates=True, enable_uc=None, reset_uc=True
-        )
+        mock_cfg.assert_called_once_with(prompt_optional_updates=True)
 
     def test_agents_flag_calls_configure_with_tools(self):
         with (
@@ -399,8 +397,6 @@ class TestConfigureAgentFlag:
         mock_cfg.assert_called_once_with(
             selected_tools=["claude", "codex"],
             prompt_optional_updates=True,
-            enable_uc=None,
-            reset_uc=True,
         )
 
     def test_agents_flag_normalizes_aliases_and_dedupes(self):
@@ -414,8 +410,6 @@ class TestConfigureAgentFlag:
         mock_cfg.assert_called_once_with(
             selected_tools=["claude", "codex"],
             prompt_optional_updates=True,
-            enable_uc=None,
-            reset_uc=True,
         )
 
     def test_workspaces_flag_calls_configure_with_workspaces(self):
@@ -439,8 +433,6 @@ class TestConfigureAgentFlag:
                 ("https://second.databricks.com", None),
             ],
             prompt_optional_updates=True,
-            enable_uc=None,
-            reset_uc=True,
         )
 
     def test_agents_and_workspaces_flags_call_configure_with_both(self):
@@ -458,8 +450,6 @@ class TestConfigureAgentFlag:
             selected_tools=["claude", "codex"],
             workspaces=[("https://first.com", None)],
             prompt_optional_updates=True,
-            enable_uc=None,
-            reset_uc=True,
         )
 
     def test_agent_and_workspaces_flags_call_configure_with_both(self):
@@ -476,9 +466,7 @@ class TestConfigureAgentFlag:
         mock_install.assert_called_once_with(
             "claude", strict=True, update_existing=True, prompt_optional_updates=True
         )
-        mock_cfg.assert_called_once_with(
-            "claude", workspaces=[("https://first.com", None)], enable_uc=None, reset_uc=True
-        )
+        mock_cfg.assert_called_once_with("claude", workspaces=[("https://first.com", None)])
 
     def test_agent_flag_calls_configure_with_tool(self):
         with (
@@ -491,7 +479,7 @@ class TestConfigureAgentFlag:
         mock_install.assert_called_once_with(
             "claude", strict=True, update_existing=True, prompt_optional_updates=True
         )
-        mock_cfg.assert_called_once_with("claude", enable_uc=None, reset_uc=True)
+        mock_cfg.assert_called_once_with("claude")
 
     def test_skip_upgrade_flag_disables_optional_update_prompt(self):
         with (
@@ -501,9 +489,7 @@ class TestConfigureAgentFlag:
         ):
             result = runner.invoke(app, ["configure", "--skip-upgrade"])
         assert result.exit_code == 0, result.output
-        mock_cfg.assert_called_once_with(
-            prompt_optional_updates=False, enable_uc=None, reset_uc=True
-        )
+        mock_cfg.assert_called_once_with(prompt_optional_updates=False)
 
     def test_skip_upgrade_flag_with_agent_skips_optional_update(self):
         with (
@@ -528,8 +514,6 @@ class TestConfigureAgentFlag:
         mock_cfg.assert_called_once_with(
             selected_tools=["claude", "codex"],
             prompt_optional_updates=False,
-            enable_uc=None,
-            reset_uc=True,
         )
 
     def test_agent_flag_normalizes_alias(self):
@@ -540,7 +524,7 @@ class TestConfigureAgentFlag:
         ):
             result = runner.invoke(app, ["configure", "--agent", "claude-code"])
         assert result.exit_code == 0, result.output
-        mock_cfg.assert_called_once_with("claude", enable_uc=None, reset_uc=True)
+        mock_cfg.assert_called_once_with("claude")
 
     def test_upgrade_runs_uv_tool_install(self):
         with patch("subprocess.run") as mock_run:
@@ -685,8 +669,6 @@ class TestConfigureAgentsSelection:
             profile=None,
             tools=None,
             force_login=False,
-            enable_uc=None,
-            reset_uc=False,
             use_pat=False,
         ):
             configured_shared.append(
@@ -788,8 +770,6 @@ class TestConfigureProfilesFlag:
         mock_cfg.assert_called_once_with(
             workspaces=[("https://first.databricks.com", "DEFAULT")],
             prompt_optional_updates=True,
-            enable_uc=None,
-            reset_uc=True,
         )
 
     def test_profiles_flag_with_agents(self):
@@ -807,8 +787,6 @@ class TestConfigureProfilesFlag:
             selected_tools=["claude", "codex"],
             workspaces=[("https://first.databricks.com", "DEFAULT")],
             prompt_optional_updates=True,
-            enable_uc=None,
-            reset_uc=True,
         )
 
     def test_profiles_flag_with_agent(self):
@@ -823,8 +801,6 @@ class TestConfigureProfilesFlag:
         mock_cfg.assert_called_once_with(
             "claude",
             workspaces=[("https://first.databricks.com", "DEFAULT")],
-            enable_uc=None,
-            reset_uc=True,
         )
 
     def test_use_pat_and_skip_validate_are_forwarded(self):
@@ -851,8 +827,6 @@ class TestConfigureProfilesFlag:
             selected_tools=["claude", "codex"],
             workspaces=[("https://first.databricks.com", "DEFAULT")],
             prompt_optional_updates=True,
-            enable_uc=None,
-            reset_uc=True,
             use_pat=True,
             skip_validate=True,
         )
@@ -926,6 +900,7 @@ class TestConfigureSharedStateUsePat:
         monkeypatch.setattr(cli_mod, "find_profile_name_for_host", lambda w: None)
         monkeypatch.setattr(cli_mod, "get_databricks_token", lambda w, p: "token")
         monkeypatch.setattr(cli_mod, "ensure_ai_gateway_v2", lambda w, t: None)
+        monkeypatch.setattr(cli_mod, "discover_model_services", lambda w, t: ({}, [], [], None))
         monkeypatch.setattr(cli_mod, "discover_claude_models", lambda w, t: ({}, None))
         monkeypatch.setattr(cli_mod, "discover_gemini_models", lambda w, t: ([], None))
         monkeypatch.setattr(cli_mod, "discover_codex_models", lambda w, t: ([], None))
@@ -990,6 +965,51 @@ class TestConfigureSharedStateUsePat:
         assert logins == [(self.WS, "DEFAULT")]
         assert "use_pat" not in state
 
+    def test_uc_models_used_without_legacy_fallback(self, monkeypatch):
+        # When model-services returns models, they're used and the legacy
+        # per-family discovery is never consulted.
+        cli_mod, *_ = self._stub_deps(monkeypatch, pat_token="dapi-pat")
+        monkeypatch.setattr(
+            cli_mod,
+            "discover_model_services",
+            lambda w, t: ({"opus": "system.ai.claude-opus-4-8"}, ["system.ai.gpt-5"], [], None),
+        )
+        legacy_called: list[str] = []
+        monkeypatch.setattr(
+            cli_mod,
+            "discover_claude_models",
+            lambda w, t: legacy_called.append("claude") or ({}, None),
+        )
+
+        state = cli_mod.configure_shared_state(self.WS, profile="DEFAULT")
+
+        assert state["claude_models"] == {"opus": "system.ai.claude-opus-4-8"}
+        assert state["codex_models"] == ["system.ai.gpt-5"]
+        assert legacy_called == []
+        assert "uc_enabled" not in state
+
+    def test_falls_back_to_legacy_when_uc_empty(self, monkeypatch):
+        # No UC model-services: each family falls back to the legacy listing.
+        cli_mod, *_ = self._stub_deps(monkeypatch, pat_token="dapi-pat")
+        monkeypatch.setattr(
+            cli_mod, "discover_model_services", lambda w, t: ({}, [], [], "no model services")
+        )
+        monkeypatch.setattr(
+            cli_mod,
+            "discover_claude_models",
+            lambda w, t: (
+                {"opus": "databricks-claude-opus-4-8", "sonnet": "databricks-claude-sonnet-4-6"},
+                None,
+            ),
+        )
+
+        state = cli_mod.configure_shared_state(self.WS, profile="DEFAULT")
+
+        assert state["claude_models"] == {
+            "opus": "databricks-claude-opus-4-8",
+            "sonnet": "databricks-claude-sonnet-4-6",
+        }
+
 
 class TestConfigureSkipValidate:
     def test_skip_validate_skips_agent_validation(self, monkeypatch):
@@ -1050,6 +1070,7 @@ class TestConfigureSharedStateMcpCleanup:
         monkeypatch.setattr(cli_mod, "find_profile_name_for_host", lambda w: None)
         monkeypatch.setattr(cli_mod, "get_databricks_token", lambda w, p: "token")
         monkeypatch.setattr(cli_mod, "ensure_ai_gateway_v2", lambda w, t: None)
+        monkeypatch.setattr(cli_mod, "discover_model_services", lambda w, t: ({}, [], [], None))
         monkeypatch.setattr(cli_mod, "discover_claude_models", lambda w, t: ({}, None))
         monkeypatch.setattr(cli_mod, "discover_gemini_models", lambda w, t: ([], None))
         monkeypatch.setattr(cli_mod, "discover_codex_models", lambda w, t: ([], None))

@@ -137,37 +137,6 @@ def _model_service(model_id: str) -> dict:
     return {"name": f"model-services/{model_id}"}
 
 
-class TestUcEnabled:
-    def test_off_by_default(self, monkeypatch):
-        monkeypatch.delenv("UCODE_ENABLE_UC", raising=False)
-        assert db_mod.uc_enabled() is False
-
-    def test_truthy_values_enable(self, monkeypatch):
-        for value in ("1", "true", "TRUE", "yes", "on"):
-            monkeypatch.setenv("UCODE_ENABLE_UC", value)
-            assert db_mod.uc_enabled() is True
-
-    def test_falsey_values_disable(self, monkeypatch):
-        # A non-empty, non-truthy value explicitly disables — even over a
-        # persisted default of True.
-        for value in ("0", "false", "no"):
-            monkeypatch.setenv("UCODE_ENABLE_UC", value)
-            assert db_mod.uc_enabled(default=True) is False
-
-    def test_unset_falls_back_to_default(self, monkeypatch):
-        # Sticky behavior: when the env var is unset (or blank), the persisted
-        # default decides.
-        monkeypatch.delenv("UCODE_ENABLE_UC", raising=False)
-        assert db_mod.uc_enabled(default=True) is True
-        assert db_mod.uc_enabled(default=False) is False
-        monkeypatch.setenv("UCODE_ENABLE_UC", "")
-        assert db_mod.uc_enabled(default=True) is True
-
-    def test_env_var_overrides_default(self, monkeypatch):
-        monkeypatch.setenv("UCODE_ENABLE_UC", "1")
-        assert db_mod.uc_enabled(default=False) is True
-
-
 class TestDiscoverModelServices:
     def test_buckets_families_by_name(self, monkeypatch):
         payload = {
@@ -267,6 +236,23 @@ class TestDiscoverModelServices:
         assert claude == {}  # temp.erni.claude-* must not be bucketed
         assert gemini == []
 
+    def test_requests_bounded_page_size(self, monkeypatch):
+        # The endpoint 499s without a bounded page_size, so every request must
+        # carry one.
+        urls: list[str] = []
+
+        def fake_get(url, token, timeout=10):
+            urls.append(url)
+            return {"model_services": [_model_service("system.ai.gpt-5")]}, None
+
+        monkeypatch.setattr(db_mod, "_http_get_json", fake_get)
+
+        ids, reason = db_mod.list_model_services(WS, "token")
+
+        assert ids == ["system.ai.gpt-5"]
+        assert reason is None
+        assert all("page_size=" in u for u in urls)
+
     def test_retries_page_before_giving_up(self, monkeypatch):
         payload = {"model_services": [_model_service("system.ai.gpt-5")]}
         calls = {"n": 0}
@@ -274,7 +260,7 @@ class TestDiscoverModelServices:
         def flaky_get(url, token, timeout=10):
             calls["n"] += 1
             if calls["n"] < 3:
-                return None, "HTTP 504 Gateway Timeout"
+                return None, "HTTP 499 Unknown"
             return payload, None
 
         monkeypatch.setattr(db_mod, "_http_get_json", flaky_get)
