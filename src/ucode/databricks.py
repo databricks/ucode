@@ -1050,27 +1050,6 @@ def build_auth_shell_command(
     )
 
 
-def uc_enabled(default: bool = False) -> bool:
-    """True when the opt-in UC-securables discovery path is enabled.
-
-    Three input precedences, callers handle the highest one first:
-      1. ``ucode configure --enable-uc / --no-enable-uc`` (resolved by the
-         CLI before this function is called and passed in via ``default``,
-         since it overrides everything).
-      2. ``UCODE_ENABLE_UC=1`` (or true/yes/on) env var.
-      3. The value persisted in state (sticky, also passed via ``default``).
-
-    Enabling UC discovery makes ucode:
-      - resolve models via UC `model-services` as `system.ai.<model-name>`
-        instead of the per-family AI Gateway listings
-      - surface curated `system.ai.*` MCP services in `ucode configure mcp`
-    """
-    raw = os.environ.get("UCODE_ENABLE_UC")
-    if raw is None or not raw.strip():
-        return default
-    return raw.strip().lower() in {"1", "true", "yes", "on"}
-
-
 # A model-service's `name` is `model-services/system.ai.<model-name>`; the
 # part after the prefix is exactly the model string agents send (no
 # `databricks-` infix — that only appears on the inner destination name).
@@ -1097,11 +1076,12 @@ def _model_service_id(service: dict) -> str | None:
     return name or None
 
 
-# The model-services metastore listing is slow and flaky — large pages
-# routinely 504 with `Timeout listing model services under metastore`. A small
-# page is far more likely to come back, and each page gets a few retries before
-# we give up.
-_MODEL_SERVICES_PAGE_SIZE = 10
+# The model-services metastore listing REQUIRES a bounded `page_size`:
+# unparameterized or large-page requests (verified against
+# eng-ml-agent-platform.staging 2026-06-14) return `HTTP 499` with an empty
+# body, while pages of 10–100 come back reliably. A page can still 499
+# intermittently under load, so each gets a few retries before we give up.
+_MODEL_SERVICES_PAGE_SIZE = 100
 _MODEL_SERVICES_PAGE_RETRIES = 4
 
 
@@ -1110,9 +1090,9 @@ def _get_model_services_page(
 ) -> tuple[dict | list | None, str | None]:
     """GET one model-services page, retrying on failure.
 
-    The endpoint frequently 504s under load; a retry usually succeeds. Returns
-    the same (payload, reason) shape as ``_http_get_json`` — the last attempt's
-    result when all retries are exhausted."""
+    The endpoint intermittently 499/504s under load; a retry usually succeeds.
+    Returns the same (payload, reason) shape as ``_http_get_json`` — the last
+    attempt's result when all retries are exhausted."""
     payload: dict | list | None = None
     reason: str | None = None
     for attempt in range(retries):
@@ -1133,11 +1113,10 @@ def list_model_services(
     """List all `system.ai.*` model ids via the UC model-services API.
 
     Pages through ``/api/2.1/unity-catalog/model-services`` (metastore scope)
-    and returns the de-duplicated, sorted list of ``system.ai.<model-name>``
-    ids. Uses a small page size with per-page retries because the endpoint is
-    slow and frequently 504s. Returns (ids, reason); reason is None on success,
-    otherwise it describes why the list is empty (HTTP/network error or no
-    services).
+    with a bounded ``page_size`` (the endpoint 499s without one) and returns the
+    de-duplicated, sorted list of ``system.ai.<model-name>`` ids. Returns
+    (ids, reason); reason is None on success, otherwise it describes why the
+    list is empty (HTTP/network error or no services).
     """
     hostname = workspace_hostname(workspace)
     ids: list[str] = []

@@ -1,8 +1,9 @@
-"""End-to-end tests for the `--enable-uc` / `UCODE_ENABLE_UC` opt-in.
+"""End-to-end tests for UC-securables discovery (now always-on).
 
-Verifies UC-securables discovery (model-services + MCP services) and the
-flag-precedence ladder (CLI flag > env var > persisted state) against a
-live Databricks workspace.
+Verifies that `configure_shared_state` discovers models via UC model-services
+(`system.ai.*`) by default, falls back to the legacy per-family AI Gateway
+listings when UC model-services are absent, and surfaces only `system.ai.*`
+entries from the UC primitives.
 
 Run with:
     UCODE_TEST_WORKSPACE=https://your-workspace.databricks.com \
@@ -17,7 +18,6 @@ from ucode.cli import configure_shared_state
 from ucode.databricks import (
     discover_model_services,
     list_mcp_services,
-    uc_enabled,
 )
 from ucode.state import load_state
 
@@ -67,150 +67,35 @@ class TestListMcpServicesE2E:
 
 
 # ---------------------------------------------------------------------------
-# `uc_enabled` precedence — env var alone (no `default` arg).
+# `configure_shared_state` end-to-end: UC discovery is the default, with a
+# best-effort fallback to the legacy `databricks-*` listings per family.
 # ---------------------------------------------------------------------------
 
 
-class TestUcEnabledEnvE2E:
-    def test_env_on_overrides_default_off(self, monkeypatch):
-        monkeypatch.setenv("UCODE_ENABLE_UC", "1")
-        assert uc_enabled(default=False) is True
-
-    def test_env_off_overrides_default_on(self, monkeypatch):
-        monkeypatch.setenv("UCODE_ENABLE_UC", "0")
-        assert uc_enabled(default=True) is False
-
-
-# ---------------------------------------------------------------------------
-# `configure_shared_state` end-to-end: flag resolution + persistence to
-# `state["uc_enabled"]` + which discovery path runs (UC vs legacy).
-# ---------------------------------------------------------------------------
-
-
-class TestConfigureSharedStateEnableUcE2E:
-    """Resolution ladder: CLI flag > env var > persisted state. Each test
-    runs the full configure path against the live workspace and asserts on
-    the resolved flag and the actual model namespaces written to state."""
-
-    def test_explicit_true_persists_and_discovers_system_ai(
-        self, monkeypatch, e2e_workspace, e2e_token
-    ):
+class TestConfigureSharedStateE2E:
+    def test_default_discovers_system_ai(self, monkeypatch, e2e_workspace, e2e_token):
+        """No flag, no env: a workspace with UC model-services resolves
+        `system.ai.*` ids and never persists a `uc_enabled` flag."""
         if not _has_uc_models(e2e_workspace, e2e_token):
             pytest.skip("Workspace has no system.ai.* model services.")
-        monkeypatch.delenv("UCODE_ENABLE_UC", raising=False)
 
-        state = configure_shared_state(e2e_workspace, force_login=False, enable_uc=True)
-        assert state["uc_enabled"] is True
-        assert load_state()["uc_enabled"] is True
+        state = configure_shared_state(e2e_workspace, force_login=False)
+        assert "uc_enabled" not in load_state()
         ids = _all_resolved_model_ids(state)
         assert any(m.startswith("system.ai.") for m in ids), (
             f"Expected at least one system.ai.* model id, got: {ids[:5]}"
         )
 
-    def test_env_off_overrides_persisted_true(self, monkeypatch, e2e_workspace):
-        monkeypatch.delenv("UCODE_ENABLE_UC", raising=False)
-        # Pre-seed the target workspace's state with uc_enabled=True.
-        configure_shared_state(e2e_workspace, force_login=False, enable_uc=True)
-        assert load_state()["uc_enabled"] is True
+    def test_falls_back_to_legacy_when_no_uc_models(self, monkeypatch, e2e_workspace, e2e_token):
+        """A workspace without UC model-services must still configure, via the
+        legacy per-family AI Gateway listings (`databricks-*` ids)."""
+        if _has_uc_models(e2e_workspace, e2e_token):
+            pytest.skip("Workspace has system.ai.* model services; fallback not exercised.")
 
-        # Now opt back out via env var, no CLI flag.
-        monkeypatch.setenv("UCODE_ENABLE_UC", "0")
-        state = configure_shared_state(e2e_workspace, force_login=False, enable_uc=None)
-        assert state["uc_enabled"] is False
-        assert load_state()["uc_enabled"] is False
+        state = configure_shared_state(e2e_workspace, force_login=False)
         ids = _all_resolved_model_ids(state)
+        assert ids, "Fallback discovery returned no models at all."
         assert all(not m.startswith("system.ai.") for m in ids), (
-            f"Legacy discovery leaked system.ai entries: "
-            f"{[m for m in ids if m.startswith('system.ai.')][:5]}"
-        )
-
-    def test_env_resolves_when_cli_flag_omitted(self, monkeypatch, e2e_workspace, e2e_token):
-        if not _has_uc_models(e2e_workspace, e2e_token):
-            pytest.skip("Workspace has no system.ai.* model services.")
-        monkeypatch.setenv("UCODE_ENABLE_UC", "1")
-
-        state = configure_shared_state(e2e_workspace, force_login=False, enable_uc=None)
-        assert state["uc_enabled"] is True
-        ids = _all_resolved_model_ids(state)
-        assert any(m.startswith("system.ai.") for m in ids)
-
-    def test_plain_configure_resets_persisted_uc_enabled(
-        self, monkeypatch, e2e_workspace, e2e_token
-    ):
-        """`ucode configure` without `--enable-uc` and without
-        UCODE_ENABLE_UC is a clean slate: a previously-persisted
-        `uc_enabled=True` is flipped back to False, and discovery returns
-        to legacy `databricks-*` ids."""
-        if not _has_uc_models(e2e_workspace, e2e_token):
-            pytest.skip("Workspace has no system.ai.* model services.")
-        monkeypatch.delenv("UCODE_ENABLE_UC", raising=False)
-
-        # First configure persists `uc_enabled=True`.
-        configure_shared_state(e2e_workspace, force_login=False, enable_uc=True)
-        assert load_state()["uc_enabled"] is True
-
-        # Second configure with reset_uc=True (the explicit `ucode configure`
-        # path) clears the flag.
-        state = configure_shared_state(
-            e2e_workspace, force_login=False, enable_uc=None, reset_uc=True
-        )
-        assert state["uc_enabled"] is False
-        assert load_state()["uc_enabled"] is False
-        ids = _all_resolved_model_ids(state)
-        assert all(not m.startswith("system.ai.") for m in ids), (
-            f"Reset run still pulled UC ids: {[m for m in ids if m.startswith('system.ai.')][:5]}"
-        )
-
-    def test_launch_path_preserves_persisted_uc_enabled(
-        self, monkeypatch, e2e_workspace, e2e_token
-    ):
-        """Launch-time refetches (`ucode <agent>`) call configure_shared_state
-        without `reset_uc`. They must keep an existing persisted True so a
-        Claude/Codex/Gemini launch right after `--enable-uc` doesn't silently
-        drop UC discovery."""
-        if not _has_uc_models(e2e_workspace, e2e_token):
-            pytest.skip("Workspace has no system.ai.* model services.")
-        monkeypatch.delenv("UCODE_ENABLE_UC", raising=False)
-
-        # User runs `ucode configure --enable-uc`.
-        configure_shared_state(e2e_workspace, force_login=False, enable_uc=True)
-        assert load_state()["uc_enabled"] is True
-
-        # User then runs `ucode claude` — same call shape as
-        # _launch_tool's refetch (no reset_uc, no enable_uc, no env).
-        state = configure_shared_state(e2e_workspace, force_login=False, enable_uc=None)
-        assert state["uc_enabled"] is True
-        assert any(m.startswith("system.ai.") for m in _all_resolved_model_ids(state))
-
-    def test_default_off_when_no_flag_no_env_no_state(self, monkeypatch, e2e_workspace):
-        # Fresh state (autouse fixture redirects STATE_PATH per test) plus
-        # no env var means the flag falls through to its default of False.
-        monkeypatch.delenv("UCODE_ENABLE_UC", raising=False)
-
-        state = configure_shared_state(e2e_workspace, force_login=False, enable_uc=None)
-        assert state["uc_enabled"] is False
-        ids = _all_resolved_model_ids(state)
-        assert all(not m.startswith("system.ai.") for m in ids)
-
-    def test_other_workspace_flag_does_not_leak_into_target(self, monkeypatch, e2e_workspace):
-        """Regression: enabling UC on workspace A must not silently turn it
-        on for a fresh `ucode configure` on workspace B. The default has to
-        come from B's own persisted state, not A's (which is whatever
-        happens to be `current_workspace`)."""
-        from ucode.state import save_state
-
-        monkeypatch.delenv("UCODE_ENABLE_UC", raising=False)
-
-        other_ws = "https://other-workspace.cloud.databricks.com"
-        save_state({"workspace": other_ws, "uc_enabled": True})
-
-        state = configure_shared_state(e2e_workspace, force_login=False, enable_uc=None)
-        assert state["uc_enabled"] is False, (
-            "Cross-workspace leak: another workspace's uc_enabled bled into "
-            "the target workspace's default."
-        )
-        ids = _all_resolved_model_ids(state)
-        assert all(not m.startswith("system.ai.") for m in ids), (
-            f"Discovery used UC despite per-workspace default being False: "
+            f"Fallback unexpectedly returned UC ids: "
             f"{[m for m in ids if m.startswith('system.ai.')][:5]}"
         )

@@ -408,6 +408,10 @@ def _patch_mcp_choices(monkeypatch, *values: str) -> None:
         "prompt_for_mcp_server_choices",
         lambda *args, **kwargs: list(values),
     )
+    # Curated system.ai.* MCP-services discovery now always runs; stub it so
+    # configure_mcp_command tests don't shell out to the `databricks` CLI.
+    # Tests that exercise it override this after calling the helper.
+    monkeypatch.setattr(mcp, "discover_mcp_service_names", lambda workspace, profile=None: [])
 
 
 class TestConfigureMcpCommand:
