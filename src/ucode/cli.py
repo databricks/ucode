@@ -2529,7 +2529,6 @@ def usage_budget_watch_cmd(
     sync_workspace = workspace if isinstance(workspace, str) else None
 
     last_status: dict[str, object] | None = None
-    last_size: os.terminal_size | None = None
     resize_pending = False
 
     def _on_resize(_signum: int, _frame: object) -> None:
@@ -2537,20 +2536,26 @@ def usage_budget_watch_cmd(
         resize_pending = True
 
     def _redraw(status: dict[str, object]) -> None:
-        nonlocal last_size
         size = shutil.get_terminal_size((80, 40))
-        # Full-clear on the first paint and on resize (size change): a smaller
-        # pane would otherwise leave stale characters to the right of / below
-        # the new frame. When the size is unchanged (a routine refresh tick)
-        # redraw in place — home, overwrite, erase-below — so there's no flicker.
-        if size != last_size:
-            console.file.write("\033[2J\033[H")
-        else:
-            console.file.write("\033[H")
-        last_size = size
-        for renderable in _build_budget_renderables(status, sync_workspace, pane_cols=size.columns):
-            console.print(renderable)
-        console.file.write("\033[J")
+        with console.capture() as capture:
+            for renderable in _build_budget_renderables(
+                status, sync_workspace, pane_cols=size.columns
+            ):
+                console.print(renderable)
+        # Fully clear the screen on every frame rather than overwriting in place.
+        # An in-place redraw only homes the cursor and trusts the cursor column to
+        # track Rich's width model, but glyphs like ⚠️ (which the terminal renders
+        # narrower than Rich measures) desync the two — so an erase-to-end-of-line
+        # would clear from the wrong column and leave stale characters (e.g. a
+        # stray digit beside the warning sign). A full clear can't leave residue.
+        #
+        # The clear+redraw is wrapped in synchronized-output mode (DEC 2026) so
+        # supporting terminals — including tmux, where the watch pane lives —
+        # present the whole frame atomically with no flicker; terminals without it
+        # ignore the markers and fall back to a plain full-clear.
+        console.file.write("\033[?2026h\033[2J\033[H")
+        console.file.write(capture.get())
+        console.file.write("\033[?2026l")
         console.file.flush()
 
     signal.signal(signal.SIGWINCH, _on_resize)

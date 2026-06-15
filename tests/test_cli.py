@@ -1720,6 +1720,52 @@ class TestWatchFlag:
         # Rendered twice: once on the initial timer tick, once on the resize.
         assert mock_build.call_count == 2
 
+    def test_budget_watch_full_clears_each_frame(self):
+        """Each redraw must fully clear the screen, wrapped in synchronized-output
+        mode. An in-place overwrite would trust the cursor column to track Rich's
+        width model, but glyphs like ⚠️ that the terminal renders narrower than
+        Rich measures desync the two and leave stale characters (the stray digit
+        seen beside the warning sign at 80%). A full clear can't leave residue."""
+        import io as _io
+
+        from rich.console import Console
+        from rich.panel import Panel
+
+        sleeps = {"n": 0}
+
+        def fake_sleep(_secs):
+            sleeps["n"] += 1
+            raise KeyboardInterrupt
+
+        buf = _io.StringIO()
+        watch_console = Console(file=buf, force_terminal=True, width=80)
+
+        with (
+            patch("ucode.cli.console", watch_console),
+            patch("ucode.cli.load_state", return_value={"workspace": "ws"}),
+            patch("ucode.cli.sync_opencode_usage_from_messages"),
+            patch("ucode.cli.sync_opencode_usage_from_state"),
+            patch("ucode.cli.sync_codex_usage_recent"),
+            patch("ucode.cli.local_budget_status", return_value={"state": "warn"}),
+            patch(
+                "ucode.cli._build_budget_renderables",
+                return_value=[Panel("line one\nline two")],
+            ),
+            patch("ucode.cli.signal.signal"),
+            patch("ucode.cli.time.sleep", side_effect=fake_sleep),
+        ):
+            runner.invoke(app, ["usage", "budget-watch", "--interval", "1"])
+
+        frame = buf.getvalue()
+        # Full erase-screen + home, wrapped in synchronized-output begin/end so
+        # the clear and repaint present atomically (no flicker) on supporting
+        # terminals, including the tmux pane the watcher runs in.
+        assert "\033[2J\033[H" in frame
+        begin = frame.index("\033[?2026h")
+        clear = frame.index("\033[2J\033[H")
+        end = frame.index("\033[?2026l")
+        assert begin < clear < end
+
     def test_watch_strips_flags_from_agent_args(self):
         with (
             patch("ucode.cli._tmux_available", return_value=True),
