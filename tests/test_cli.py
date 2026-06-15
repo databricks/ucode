@@ -1776,10 +1776,35 @@ class TestWatchFlag:
             runner.invoke(app, ["claude", "--watch", "--watch-interval", "20", "--resume"])
         argv = self._tmux_argv(mock_run)
         # The left-pane agent command keeps real agent args but not the watch flags.
-        agent_cmd = next(part for part in argv if part.startswith("ucode claude"))
+        agent_cmd = next(part for part in argv if "ucode claude" in part)
         assert "--resume" in agent_cmd
         assert "--watch" not in agent_cmd
         assert "--watch-interval" not in agent_cmd
+        # The agent pane is tagged so it suppresses its own config/budget panels —
+        # the watcher pane already shows that information.
+        assert agent_cmd.startswith(f"{cli.WATCH_PANE_ENV}=1 ")
+
+    def test_watch_pane_suppresses_config_and_budget_panels(self):
+        """The agent (left) pane in a watch split skips the configuration and
+        budget panels — only a lightweight launch header is printed — so the same
+        info isn't duplicated alongside the live watcher pane."""
+        patches = _patch_launch("claude")
+        with (
+            patches[0],
+            patches[1],
+            patches[2],
+            patches[3],
+            patches[4],
+            patches[5],
+            patches[6],
+            patch("ucode.cli._in_watch_pane", return_value=True),
+            patch("ucode.cli._render_configuration_panel") as mock_cfg,
+            patch("ucode.cli.render_local_budget_panel") as mock_budget,
+        ):
+            result = runner.invoke(app, ["claude"])
+        assert result.exit_code == 0, result.output
+        mock_cfg.assert_not_called()
+        mock_budget.assert_not_called()
 
     def test_watch_falls_back_when_no_tmux(self):
         patches = _patch_launch("claude")

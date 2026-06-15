@@ -1257,6 +1257,17 @@ def _in_tmux() -> bool:
     return bool(os.environ.get("TMUX"))
 
 
+# Set on the agent (left) pane's command when launched inside a `--watch` tmux
+# split. The split's right pane already shows the budget + policy panels live, so
+# the left pane suppresses its own configuration/budget panels to avoid showing
+# the same information twice.
+WATCH_PANE_ENV = "UCODE_WATCH_PANE"
+
+
+def _in_watch_pane() -> bool:
+    return bool(os.environ.get(WATCH_PANE_ENV))
+
+
 def _tmux_available() -> bool:
     return shutil.which("tmux") is not None
 
@@ -1290,7 +1301,9 @@ def _launch_in_tmux_split(tool_name: str, agent_args: list[str], interval: int) 
     ``interval`` seconds and redraws immediately on resize (SIGWINCH) so a zoom
     reflows the panel to the new pane width instead of leaving a stale frame.
     """
-    agent_cmd = shlex.join(["ucode", tool_name, *agent_args])
+    # Mark the agent pane so it suppresses its own config/budget panels — the
+    # watcher pane on the right already shows that information live.
+    agent_cmd = f"{WATCH_PANE_ENV}=1 " + shlex.join(["ucode", tool_name, *agent_args])
     watch_cmd = shlex.join(["ucode", "usage", "budget-watch", "--interval", str(interval)])
     print_success(
         f"Launching {TOOL_SPECS[tool_name]['display']} in a tmux split "
@@ -1382,7 +1395,14 @@ def _launch_tool(
         state, resolved_model = resolve_launch_model(tool, state, explicit_model)
         state = configure_tool(tool, state, resolved_model)
         display = TOOL_SPECS[tool]["display"]
-        if not _budget_redirected:
+        if not _budget_redirected and _in_watch_pane():
+            # Inside a `--watch` tmux split: the watcher pane on the right already
+            # shows the budget + policy panels live, so skip them here and print
+            # only a lightweight launch header to avoid duplicating that info.
+            print_section(f"ucode with {display}")
+            if resolved_model:
+                print_kv("Model", resolved_model)
+        elif not _budget_redirected:
             _render_configuration_panel(state)
             if tool in BUDGET_TRACKED_AGENTS:
                 # The daily budget is a single global pool shared across all tools,
