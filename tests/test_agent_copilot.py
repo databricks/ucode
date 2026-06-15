@@ -159,6 +159,16 @@ class TestMcpServerConfig:
 
 
 class TestDefaultModel:
+    def test_selected_model_wins(self):
+        state = {
+            "selected_models": {"copilot": "gpt-5"},
+            "claude_model_options": ["s4"],
+            "claude_models": {"sonnet": "s4"},
+            "codex_models": ["gpt-5"],
+        }
+
+        assert copilot.default_model(state) == "gpt-5"
+
     def test_prefers_claude_sonnet(self):
         state = {
             "claude_models": {"sonnet": "s4", "opus": "o4", "haiku": "h4"},

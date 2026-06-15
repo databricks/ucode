@@ -85,6 +85,7 @@ class TestHelp:
         flat = re.sub(r"[│╭╮╯╰─\s]+", " ", output)
         assert "--agents" in output
         assert "comma-separated list of agents" in flat
+        assert "without the agent picker" in flat
         assert "--workspaces" in output
 
 
@@ -227,6 +228,18 @@ class TestStatus:
         assert "gemini mcp list" not in result.output
         assert "https://example.databricks.com/ai-gateway/anthropic" not in result.output
         assert "https://example.databricks.com/ai-gateway/gemini" not in result.output
+
+    def test_status_shows_selected_model_for_configured_agents(self):
+        state = {
+            **MINIMAL_STATE,
+            "selected_models": {"codex": "databricks-gpt-5"},
+            "codex_models": ["databricks-gpt-5", "databricks-gpt-5-5"],
+        }
+        with patch("ucode.cli.load_state", return_value=state):
+            result = runner.invoke(app, ["status"])
+
+        assert result.exit_code == 0, result.output
+        assert "Model: databricks-gpt-5" in result.output
 
 
 class TestRevert:
@@ -596,6 +609,117 @@ class TestConfigureAgentFlag:
 
 
 class TestConfigureAgentsSelection:
+    def test_selected_tools_prompt_for_models_and_persist_choices(self, monkeypatch):
+        import ucode.cli as cli_mod
+
+        state = {
+            **MINIMAL_STATE,
+            "available_tools": [],
+            "claude_model_options": [
+                "databricks-claude-opus-4-7",
+                "databricks-claude-opus-4-6",
+            ],
+            "claude_models": {"opus": "databricks-claude-opus-4-7"},
+            "codex_models": ["databricks-gpt-5", "databricks-gpt-5-5"],
+        }
+        monkeypatch.setattr(
+            cli_mod,
+            "_prompt_for_configuration",
+            lambda tool=None: ("https://example.com", None),
+        )
+        monkeypatch.setattr(cli_mod, "configure_shared_state", lambda *args, **kwargs: state)
+        monkeypatch.setattr(cli_mod, "check_gateway_endpoint", lambda state, tool: True)
+        monkeypatch.setattr(cli_mod, "install_tool_binary", lambda *args, **kwargs: True)
+        monkeypatch.setattr(cli_mod, "validate_all_tools", lambda state: None)
+        prompts: list[tuple[str, list[str], str | None]] = []
+
+        def fake_prompt_for_model(display, options, default=None):
+            prompts.append((display, options, default))
+            return {
+                "Claude Code": "databricks-claude-opus-4-6",
+                "Codex": "databricks-gpt-5",
+            }[display]
+
+        monkeypatch.setattr(cli_mod, "prompt_for_model", fake_prompt_for_model, raising=False)
+        configured: list[dict] = []
+        monkeypatch.setattr(
+            cli_mod,
+            "configure_selected_tools",
+            lambda state, tools: (
+                configured.append(dict(state)) or {**state, "available_tools": tools}
+            ),
+        )
+
+        assert cli_mod.configure_workspace_command(selected_tools=["claude", "codex"]) == 0
+
+        assert prompts == [
+            (
+                "Claude Code",
+                ["databricks-claude-opus-4-7", "databricks-claude-opus-4-6"],
+                "databricks-claude-opus-4-7",
+            ),
+            (
+                "Codex",
+                ["databricks-gpt-5", "databricks-gpt-5-5"],
+                "databricks-gpt-5-5",
+            ),
+        ]
+        assert configured[0]["selected_models"] == {
+            "claude": "databricks-claude-opus-4-6",
+            "codex": "databricks-gpt-5",
+        }
+
+    def test_prompt_models_false_persists_defaults_without_prompting(self, monkeypatch):
+        import ucode.cli as cli_mod
+
+        state = {
+            **MINIMAL_STATE,
+            "available_tools": [],
+            "claude_model_options": [
+                "databricks-claude-opus-4-7",
+                "databricks-claude-opus-4-6",
+            ],
+            "claude_models": {"opus": "databricks-claude-opus-4-7"},
+            "codex_models": ["databricks-gpt-5", "databricks-gpt-5-5"],
+        }
+        monkeypatch.setattr(
+            cli_mod,
+            "_prompt_for_configuration",
+            lambda tool=None: ("https://example.com", None),
+        )
+        monkeypatch.setattr(cli_mod, "configure_shared_state", lambda *args, **kwargs: state)
+        monkeypatch.setattr(cli_mod, "check_gateway_endpoint", lambda state, tool: True)
+        monkeypatch.setattr(cli_mod, "install_tool_binary", lambda *args, **kwargs: True)
+        monkeypatch.setattr(cli_mod, "validate_all_tools", lambda state: None)
+        monkeypatch.setattr(
+            cli_mod,
+            "prompt_for_model",
+            lambda *args, **kwargs: pytest.fail("prompt_for_model should not be called"),
+            raising=False,
+        )
+        configured: list[dict] = []
+        monkeypatch.setattr(
+            cli_mod,
+            "configure_selected_tools",
+            lambda state, tools: (
+                configured.append(dict(state)) or {**state, "available_tools": tools}
+            ),
+        )
+
+        assert (
+            cli_mod.configure_workspace_command(
+                selected_tools=["claude", "codex"],
+                prompt_models=False,
+                skip_validate=True,
+            )
+            == 0
+        )
+
+        assert configured[0]["selected_models"] == {
+            "claude": "databricks-claude-opus-4-7",
+            "codex": "databricks-gpt-5-5",
+        }
+
     def test_selected_tools_skip_picker(self, monkeypatch):
         import ucode.cli as cli_mod
 
@@ -829,6 +953,7 @@ class TestConfigureProfilesFlag:
             prompt_optional_updates=True,
             use_pat=True,
             skip_validate=True,
+            prompt_models=False,
         )
 
     def test_use_pat_requires_profiles(self):
@@ -900,8 +1025,12 @@ class TestConfigureSharedStateUsePat:
         monkeypatch.setattr(cli_mod, "find_profile_name_for_host", lambda w: None)
         monkeypatch.setattr(cli_mod, "get_databricks_token", lambda w, p: "token")
         monkeypatch.setattr(cli_mod, "ensure_ai_gateway_v2", lambda w, t: None)
-        monkeypatch.setattr(cli_mod, "discover_model_services", lambda w, t: ({}, [], [], None))
-        monkeypatch.setattr(cli_mod, "discover_claude_models", lambda w, t: ({}, None))
+        monkeypatch.setattr(
+            cli_mod, "discover_model_services_with_options", lambda w, t: ({}, [], [], [], None)
+        )
+        monkeypatch.setattr(
+            cli_mod, "discover_claude_models_with_options", lambda w, t: ({}, [], None)
+        )
         monkeypatch.setattr(cli_mod, "discover_gemini_models", lambda w, t: ([], None))
         monkeypatch.setattr(cli_mod, "discover_codex_models", lambda w, t: ([], None))
         monkeypatch.setattr(cli_mod, "build_shared_base_urls", lambda w: {})
@@ -971,19 +1100,26 @@ class TestConfigureSharedStateUsePat:
         cli_mod, *_ = self._stub_deps(monkeypatch, pat_token="dapi-pat")
         monkeypatch.setattr(
             cli_mod,
-            "discover_model_services",
-            lambda w, t: ({"opus": "system.ai.claude-opus-4-8"}, ["system.ai.gpt-5"], [], None),
+            "discover_model_services_with_options",
+            lambda w, t: (
+                {"opus": "system.ai.claude-opus-4-8"},
+                ["system.ai.claude-opus-4-8"],
+                ["system.ai.gpt-5"],
+                [],
+                None,
+            ),
         )
         legacy_called: list[str] = []
         monkeypatch.setattr(
             cli_mod,
-            "discover_claude_models",
-            lambda w, t: legacy_called.append("claude") or ({}, None),
+            "discover_claude_models_with_options",
+            lambda w, t: legacy_called.append("claude") or ({}, [], None),
         )
 
         state = cli_mod.configure_shared_state(self.WS, profile="DEFAULT")
 
         assert state["claude_models"] == {"opus": "system.ai.claude-opus-4-8"}
+        assert state["claude_model_options"] == ["system.ai.claude-opus-4-8"]
         assert state["codex_models"] == ["system.ai.gpt-5"]
         assert legacy_called == []
         assert "uc_enabled" not in state
@@ -992,13 +1128,16 @@ class TestConfigureSharedStateUsePat:
         # No UC model-services: each family falls back to the legacy listing.
         cli_mod, *_ = self._stub_deps(monkeypatch, pat_token="dapi-pat")
         monkeypatch.setattr(
-            cli_mod, "discover_model_services", lambda w, t: ({}, [], [], "no model services")
+            cli_mod,
+            "discover_model_services_with_options",
+            lambda w, t: ({}, [], [], [], "no model services"),
         )
         monkeypatch.setattr(
             cli_mod,
-            "discover_claude_models",
+            "discover_claude_models_with_options",
             lambda w, t: (
                 {"opus": "databricks-claude-opus-4-8", "sonnet": "databricks-claude-sonnet-4-6"},
+                ["databricks-claude-opus-4-8", "databricks-claude-sonnet-4-6"],
                 None,
             ),
         )
@@ -1009,6 +1148,10 @@ class TestConfigureSharedStateUsePat:
             "opus": "databricks-claude-opus-4-8",
             "sonnet": "databricks-claude-sonnet-4-6",
         }
+        assert state["claude_model_options"] == [
+            "databricks-claude-opus-4-8",
+            "databricks-claude-sonnet-4-6",
+        ]
 
 
 class TestConfigureSkipValidate:
@@ -1070,8 +1213,12 @@ class TestConfigureSharedStateMcpCleanup:
         monkeypatch.setattr(cli_mod, "find_profile_name_for_host", lambda w: None)
         monkeypatch.setattr(cli_mod, "get_databricks_token", lambda w, p: "token")
         monkeypatch.setattr(cli_mod, "ensure_ai_gateway_v2", lambda w, t: None)
-        monkeypatch.setattr(cli_mod, "discover_model_services", lambda w, t: ({}, [], [], None))
-        monkeypatch.setattr(cli_mod, "discover_claude_models", lambda w, t: ({}, None))
+        monkeypatch.setattr(
+            cli_mod, "discover_model_services_with_options", lambda w, t: ({}, [], [], [], None)
+        )
+        monkeypatch.setattr(
+            cli_mod, "discover_claude_models_with_options", lambda w, t: ({}, [], None)
+        )
         monkeypatch.setattr(cli_mod, "discover_gemini_models", lambda w, t: ([], None))
         monkeypatch.setattr(cli_mod, "discover_codex_models", lambda w, t: ([], None))
         monkeypatch.setattr(cli_mod, "build_shared_base_urls", lambda w: {})

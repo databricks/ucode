@@ -6,6 +6,7 @@ import json
 
 from ucode.config_io import APP_DIR, is_dry_run
 from ucode.databricks import build_auth_shell_command, build_shared_base_urls
+from ucode.model_selection import available_models_for_tool, selected_model_for_tool
 
 STATE_PATH = APP_DIR / "state.json"
 STATE_VERSION = 3
@@ -127,16 +128,19 @@ def build_agent_state(state: dict) -> dict[str, dict]:
     auth_command = build_auth_shell_command(workspace, profile, use_pat=bool(state.get("use_pat")))
     claude_models_value = state.get("claude_models")
     claude_models: dict = claude_models_value if isinstance(claude_models_value, dict) else {}
-    codex_models_value = state.get("codex_models")
-    codex_models = codex_models_value if isinstance(codex_models_value, list) else []
     gemini_models_value = state.get("gemini_models")
     gemini_models = gemini_models_value if isinstance(gemini_models_value, list) else []
 
-    claude_model = (
+    claude_model = selected_model_for_tool("claude", state) or (
         claude_models.get("opus") or claude_models.get("sonnet") or claude_models.get("haiku")
     )
-    codex_model = codex_models[0] if codex_models else None
-    pi_model = claude_model or codex_model or (gemini_models[0] if gemini_models else None)
+    codex_options = available_models_for_tool("codex", state)
+    codex_model = selected_model_for_tool("codex", state) or (
+        codex_options[0] if codex_options else None
+    )
+    pi_model = selected_model_for_tool("pi", state) or (
+        claude_model or codex_model or (gemini_models[0] if gemini_models else None)
+    )
 
     agents: dict[str, dict] = {
         "claude": {

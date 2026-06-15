@@ -20,6 +20,7 @@ from ucode.config_io import ToolSpec
 from ucode.databricks import (
     install_databricks_cli,
 )
+from ucode.model_selection import available_models_for_tool as available_models_for_tool
 from ucode.state import load_state, save_state
 from ucode.telemetry import agent_version
 from ucode.ui import (
@@ -288,7 +289,7 @@ def check_gateway_endpoint(state: dict, tool: str) -> bool:
     if tool == "opencode":
         return bool(state.get("opencode_models"))
     if tool == "codex":
-        return bool(state.get("codex_models"))
+        return bool(available_models_for_tool("codex", state))
     if tool == "gemini":
         return bool(state.get("gemini_models"))
     if tool == "copilot":

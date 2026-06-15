@@ -11,10 +11,12 @@ from rich.panel import Panel
 
 from ucode.agents import (
     TOOL_SPECS,
+    available_models_for_tool,
     check_gateway_endpoint,
     configure_selected_tools,
     configure_single_tool,
     configure_tool,
+    default_model_for_tool,
     ensure_bootstrap_dependencies,
     ensure_provider_state,
     install_tool_binary,
@@ -32,10 +34,10 @@ from ucode.config_io import restore_file, set_dry_run
 from ucode.databricks import (
     apply_pat_environment,
     build_shared_base_urls,
-    discover_claude_models,
+    discover_claude_models_with_options,
     discover_codex_models,
     discover_gemini_models,
-    discover_model_services,
+    discover_model_services_with_options,
     ensure_ai_gateway_v2,
     ensure_databricks_auth,
     find_profile_name_for_host,
@@ -64,6 +66,7 @@ from ucode.ui import (
     print_note,
     print_section,
     print_success,
+    prompt_for_model,
     prompt_for_tools,
     prompt_for_workspace,
     set_verbosity,
@@ -255,6 +258,7 @@ def configure_shared_state(
     gemini_reason: str | None = None
     codex_reason: str | None = None
     claude_models = {}
+    claude_model_options = []
     gemini_models = []
     codex_models = []
     # UC-first, best-effort: one UC model-services call yields all families as
@@ -262,11 +266,19 @@ def configure_shared_state(
     # empty (workspace without UC model-services, or the listing failed), fall
     # back to the per-family AI Gateway listing for that family only.
     with spinner("Fetching available models..."):
-        ms_claude, ms_codex, ms_gemini, ms_reason = discover_model_services(workspace, token)
+        ms_claude, ms_claude_options, ms_codex, ms_gemini, ms_reason = (
+            discover_model_services_with_options(workspace, token)
+        )
         if want_claude:
-            claude_models, claude_reason = ms_claude, ms_reason
+            claude_models, claude_model_options, claude_reason = (
+                ms_claude,
+                ms_claude_options,
+                ms_reason,
+            )
             if not claude_models:
-                claude_models, claude_reason = discover_claude_models(workspace, token)
+                claude_models, claude_model_options, claude_reason = (
+                    discover_claude_models_with_options(workspace, token)
+                )
         if want_gemini:
             gemini_models, gemini_reason = ms_gemini, ms_reason
             if not gemini_models:
@@ -276,7 +288,9 @@ def configure_shared_state(
             if not codex_models:
                 codex_models, codex_reason = discover_codex_models(workspace, token)
     opencode_models: dict[str, list[str]] = {}
-    if claude_models:
+    if claude_model_options:
+        opencode_models["anthropic"] = claude_model_options
+    elif claude_models:
         opencode_models["anthropic"] = list(claude_models.values())
     if gemini_models:
         opencode_models["gemini"] = gemini_models
@@ -299,6 +313,7 @@ def configure_shared_state(
     state["base_urls"] = build_shared_base_urls(workspace)
     if want_claude:
         state["claude_models"] = claude_models
+        state["claude_model_options"] = claude_model_options
     if want_gemini:
         state["gemini_models"] = gemini_models
     if want_codex:
@@ -343,6 +358,29 @@ def _configure_shared_workspace_states(
     return states
 
 
+def _prompt_for_selected_models(state: dict, tools: list[str], *, prompt: bool = True) -> dict:
+    """Prompt for and persist per-agent model selections for configured tools."""
+    selected_models_value = state.get("selected_models")
+    selected_models = dict(selected_models_value) if isinstance(selected_models_value, dict) else {}
+
+    for tool in tools:
+        options = available_models_for_tool(tool, state)
+        if not options:
+            continue
+        default = default_model_for_tool(tool, state)
+        if default not in options:
+            default = options[0]
+        if len(options) == 1 or not prompt:
+            selected = default
+        else:
+            selected = prompt_for_model(TOOL_SPECS[tool]["display"], options, default)
+        selected_models[tool] = selected
+
+    if selected_models:
+        state["selected_models"] = selected_models
+    return state
+
+
 def configure_workspace_command(
     tool: str | None = None,
     selected_tools: list[str] | None = None,
@@ -351,6 +389,7 @@ def configure_workspace_command(
     prompt_optional_updates: bool = True,
     use_pat: bool = False,
     skip_validate: bool = False,
+    prompt_models: bool = True,
 ) -> int:
     if tool is not None and selected_tools is not None:
         raise RuntimeError("Use either --agent or --agents, not both.")
@@ -365,6 +404,7 @@ def configure_workspace_command(
             use_pat=use_pat,
         )
         state = states[0]
+        state = _prompt_for_selected_models(state, [tool], prompt=prompt_models)
         state = configure_single_tool(tool, state)
         spec = TOOL_SPECS[tool]
         console.print(
@@ -432,6 +472,8 @@ def configure_workspace_command(
         print_note("No coding agents selected — nothing to configure.")
         return 0
 
+    state = _prompt_for_selected_models(state, picked, prompt=prompt_models)
+
     for tool_name in picked:
         install_tool_binary(
             tool_name,
@@ -495,6 +537,10 @@ def status() -> int:
         print_kv("Coding Agent", spec["display"])
         print_kv("Configured", "yes" if configured else "no")
         print_kv("Base URL", base_url)
+        if configured:
+            model = default_model_for_tool(tool, state)
+            if model:
+                print_kv("Model", model)
         if configured and tool in MCP_CLIENTS:
             tool_mcp_servers = [
                 str(server.get("name"))
@@ -730,7 +776,8 @@ def configure(
         str | None,
         typer.Option(
             "--agents",
-            help="Configure a comma-separated list of agents without prompting (e.g. claude,codex).",
+            help="Configure a comma-separated list of agents without the agent picker "
+            "(e.g. claude,codex).",
         ),
     ] = None,
     workspaces: Annotated[
@@ -824,6 +871,13 @@ def configure(
             skip_kwargs["use_pat"] = True
         if skip_validate:
             skip_kwargs["skip_validate"] = True
+        if (
+            use_pat
+            and skip_validate
+            and workspace_entries is not None
+            and (agent is not None or agents is not None)
+        ):
+            skip_kwargs["prompt_models"] = False
         if agent is not None:
             tool = normalize_tool(agent)
             install_tool_binary(

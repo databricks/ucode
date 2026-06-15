@@ -71,7 +71,12 @@ class TestCheckGatewayEndpoint:
         assert check_gateway_endpoint({}, "claude") is False
 
     def test_codex_available(self):
-        assert check_gateway_endpoint({"codex_models": ["model-a"]}, "codex") is True
+        assert check_gateway_endpoint({"codex_models": ["databricks-gpt-5"]}, "codex") is True
+
+    def test_codex_unavailable_when_discovered_models_are_not_gpt_parseable(self):
+        state = {"codex_models": ["moonshotai/kimi-k2.5", "claude-sonnet-4"]}
+
+        assert check_gateway_endpoint(state, "codex") is False
 
     def test_gemini_available(self):
         assert check_gateway_endpoint({"gemini_models": ["gemini-2"]}, "gemini") is True
@@ -107,6 +112,27 @@ class TestCheckGatewayEndpoint:
 
 
 class TestDefaultModelForTool:
+    def test_selected_model_wins_when_still_available(self):
+        state = {
+            "selected_models": {"claude": "databricks-claude-opus-4-6"},
+            "claude_model_options": [
+                "databricks-claude-opus-4-7",
+                "databricks-claude-opus-4-6",
+            ],
+            "claude_models": {"opus": "databricks-claude-opus-4-7"},
+        }
+
+        assert default_model_for_tool("claude", state) == "databricks-claude-opus-4-6"
+
+    def test_stale_selected_model_falls_back_to_default(self):
+        state = {
+            "selected_models": {"claude": "databricks-claude-opus-4-5"},
+            "claude_model_options": ["databricks-claude-opus-4-7"],
+            "claude_models": {"opus": "databricks-claude-opus-4-7"},
+        }
+
+        assert default_model_for_tool("claude", state) == "databricks-claude-opus-4-7"
+
     def test_codex_returns_highest_gpt_model(self):
         models = ["databricks-gpt-5", "databricks-gpt-5-5"]
         assert default_model_for_tool("codex", {"codex_models": models}) == "databricks-gpt-5-5"
@@ -158,6 +184,58 @@ class TestDefaultModelForTool:
 
     def test_pi_returns_none_when_no_models(self):
         assert default_model_for_tool("pi", {}) is None
+
+
+class TestAvailableModelsForTool:
+    def test_claude_uses_full_model_options(self):
+        state = {
+            "claude_model_options": ["databricks-claude-opus-4-7", "databricks-claude-opus-4-6"],
+            "claude_models": {"opus": "databricks-claude-opus-4-7"},
+        }
+
+        assert agents_mod.available_models_for_tool("claude", state) == [
+            "databricks-claude-opus-4-7",
+            "databricks-claude-opus-4-6",
+        ]
+
+    def test_codex_only_includes_gpt_parseable_models(self):
+        state = {
+            "codex_models": [
+                "moonshotai/kimi-k2.5",
+                "databricks-gpt-5",
+                "system.ai.gpt-5-5",
+                "claude-sonnet-4",
+            ]
+        }
+
+        assert agents_mod.available_models_for_tool("codex", state) == [
+            "databricks-gpt-5",
+            "system.ai.gpt-5-5",
+        ]
+
+    def test_composite_tools_get_supported_model_families(self):
+        state = {
+            "claude_model_options": ["claude-opus", "claude-sonnet"],
+            "codex_models": ["gpt-5"],
+            "gemini_models": ["gemini-2"],
+            "opencode_models": {"anthropic": ["claude-opus"], "gemini": ["gemini-2"]},
+        }
+
+        assert agents_mod.available_models_for_tool("opencode", state) == [
+            "claude-opus",
+            "gemini-2",
+        ]
+        assert agents_mod.available_models_for_tool("copilot", state) == [
+            "claude-opus",
+            "claude-sonnet",
+            "gpt-5",
+        ]
+        assert agents_mod.available_models_for_tool("pi", state) == [
+            "claude-opus",
+            "claude-sonnet",
+            "gpt-5",
+            "gemini-2",
+        ]
 
 
 class TestResolveLaunchModel:

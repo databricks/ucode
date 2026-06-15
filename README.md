@@ -45,7 +45,7 @@ To configure all tools at once:
 ucode configure
 ```
 
-To configure specific tools without the picker, pass a comma-separated list:
+To configure specific tools without the agent picker, pass a comma-separated list:
 
 ```bash
 ucode configure --agents claude,codex
@@ -102,8 +102,8 @@ Discovered external MCP connections are listed directly. MCP auth uses a Databri
 | `ucode usage` | Show AI Gateway usage summary |
 | `ucode revert` | Clear saved state and restore backed-up config files |
 | `ucode configure --dry-run` | Preview config files without writing them |
-| `ucode configure --agents claude,codex` | Configure specific agents without the interactive picker |
-| `ucode configure --workspaces https://first.databricks.com,https://second.databricks.com` | Configure workspaces without the interactive picker |
+| `ucode configure --agents claude,codex` | Configure specific agents without the interactive agent picker |
+| `ucode configure --workspaces https://first.databricks.com,https://second.databricks.com` | Configure workspaces without the interactive workspace picker |
 | `ucode configure --profiles DEFAULT` | Configure using existing Databricks CLI profiles (hosts come from `~/.databrickscfg`) |
 | `ucode configure --profiles DEFAULT --use-pat` | Authenticate with the profile's personal access token — no browser login |
 | `ucode configure --skip-validate` | Write configs without sending a test message through each agent |

@@ -35,6 +35,7 @@ from ucode.databricks import (
     build_copilot_base_url,
     get_databricks_token,
 )
+from ucode.model_selection import selected_model_for_tool
 from ucode.state import mark_tool_managed, save_state
 
 COPILOT_CONFIG_DIR = Path.home() / ".copilot"
@@ -72,6 +73,9 @@ def is_update_available() -> tuple[str, str] | None:
 
 def default_model(state: dict) -> str | None:
     """Prefer Claude sonnet, then opus/haiku, then codex."""
+    selected = selected_model_for_tool("copilot", state)
+    if selected:
+        return selected
     claude_models = state.get("claude_models") or {}
     for family in ("sonnet", "opus", "haiku"):
         if claude_models.get(family):

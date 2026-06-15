@@ -260,6 +260,14 @@ class TestBuildRuntimeEnv:
 
 
 class TestOpencodeDefaultModel:
+    def test_selected_model_wins(self):
+        state = {
+            "selected_models": {"opencode": "gemini-2"},
+            "opencode_models": {"anthropic": ["claude-sonnet"], "gemini": ["gemini-2"]},
+        }
+
+        assert opencode.default_model(state) == "gemini-2"
+
     def test_prefers_anthropic(self):
         state = {"opencode_models": {"anthropic": ["claude-sonnet"], "gemini": ["gemini-2"]}}
         assert opencode.default_model(state) == "claude-sonnet"

@@ -46,6 +46,7 @@ from ucode.databricks import (
     build_pi_base_urls,
     get_databricks_token,
 )
+from ucode.model_selection import claude_model_options, selected_model_for_tool
 from ucode.state import mark_tool_managed, save_state
 from ucode.telemetry import agent_version, ucode_version
 
@@ -81,9 +82,20 @@ def is_update_available() -> tuple[str, str] | None:
     return available_npm_package_update(SPEC["package"])
 
 
+def _unique_models(models: list[str]) -> list[str]:
+    seen: set[str] = set()
+    unique: list[str] = []
+    for model in models:
+        model = model.strip()
+        if model and model not in seen:
+            seen.add(model)
+            unique.append(model)
+    return unique
+
+
 def _resolve_model_selector(
     model: str,
-    claude_models: dict[str, str],
+    claude_models: list[str],
     codex_models: list[str],
     gemini_models: list[str],
 ) -> str:
@@ -91,7 +103,7 @@ def _resolve_model_selector(
     for name in PROVIDER_NAMES:
         if model.startswith(f"{name}/"):
             return model
-    if model in claude_models.values():
+    if model in claude_models:
         return f"databricks-claude/{model}"
     if model in codex_models:
         return f"databricks-openai/{model}"
@@ -107,6 +119,7 @@ def render_overlay(
     claude_models: dict[str, str],
     codex_models: list[str],
     gemini_models: list[str],
+    selectable_claude_models: list[str] | None = None,
 ) -> tuple[dict, list[list[str]]]:
     """Return (overlay, managed_key_paths) for ~/.pi/agent/models.json."""
     providers: dict = {}
@@ -115,7 +128,7 @@ def render_overlay(
     # `/` and a space so it can never collide — safe to pass as a literal.
     ua_headers = {"User-Agent": f"ucode/{ucode_version()} pi/{agent_version('pi')}"}
 
-    claude_ids = sorted(set(claude_models.values()))
+    claude_ids = _unique_models(selectable_claude_models or list(claude_models.values()))
     if claude_ids:
         providers["databricks-claude"] = {
             "baseUrl": pi_base_urls["claude"],
@@ -151,7 +164,7 @@ def render_overlay(
         }
         keys.append(["providers", "databricks-gemini"])
     overlay: dict = {
-        "model": _resolve_model_selector(model, claude_models, codex_models, gemini_models),
+        "model": _resolve_model_selector(model, claude_ids, codex_models, gemini_models),
     }
     if providers:
         overlay["providers"] = providers
@@ -178,6 +191,7 @@ def write_tool_config(
         state.get("claude_models") or {},
         state.get("codex_models") or [],
         state.get("gemini_models") or [],
+        claude_model_options(state),
     )
     existing = read_json_safe(PI_CONFIG_PATH)
     providers = existing.get("providers")
@@ -207,6 +221,9 @@ def _write_settings(model_selector: str) -> None:
 
 def default_model(state: dict) -> str | None:
     """Prefer Claude opus → sonnet → haiku; fall back to codex, gemini."""
+    selected = selected_model_for_tool("pi", state)
+    if selected:
+        return selected
     claude_models = state.get("claude_models") or {}
     for family in ("opus", "sonnet", "haiku"):
         if claude_models.get(family):

@@ -183,6 +183,36 @@ class TestHydrateState:
         assert result["agents"]["pi"]["model"] == "claude-opus"
         assert result["agents"]["pi"]["base_urls"] == FAKE_URLS["pi"]
 
+    def test_populates_agent_state_with_selected_models(self):
+        result = hydrate_state(
+            {
+                "workspace": FAKE_WS,
+                "selected_models": {
+                    "claude": "claude-opus-4-6",
+                    "codex": "gpt-5",
+                    "pi": "gemini-2",
+                },
+                "claude_model_options": ["claude-opus-4-7", "claude-opus-4-6"],
+                "claude_models": {"opus": "claude-opus-4-7"},
+                "codex_models": ["gpt-5", "gpt-5-5"],
+                "gemini_models": ["gemini-2"],
+            }
+        )
+
+        assert result["agents"]["claude"]["model"] == "claude-opus-4-6"
+        assert result["agents"]["codex"]["model"] == "gpt-5"
+        assert result["agents"]["pi"]["model"] == "gemini-2"
+
+    def test_codex_agent_state_omits_non_gpt_models(self):
+        result = hydrate_state(
+            {
+                "workspace": FAKE_WS,
+                "codex_models": ["moonshotai/kimi-k2.5"],
+            }
+        )
+
+        assert "model" not in result["agents"]["codex"]
+
     def test_normalizes_managed_configs_dict_entry(self):
         state = {"managed_configs": {"claude": {"keys": [["env", "X"]]}}}
         result = hydrate_state(state)
