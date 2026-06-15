@@ -35,6 +35,8 @@ from ucode.databricks import (
     list_databricks_connections,
     list_genie_spaces,
     list_mcp_services,
+    list_uc_functions_catalog_schemas,
+    list_vector_search_catalog_schemas,
     workspace_hostname,
 )
 from ucode.state import load_full_state, load_state, save_state
@@ -43,6 +45,7 @@ from ucode.ui import (
     print_section,
     print_success,
     print_warning,
+    spinner,
 )
 
 MCP_AUTH_TOKEN_ENV_VAR = "OAUTH_TOKEN"
@@ -81,6 +84,8 @@ SQL_MCP_VALUE = "managed:sql"
 GENIE_SPACE_SELECTION_PREFIX = "genie-space:"
 APP_MCP_SELECTION_PREFIX = "app:"
 MCP_SERVICE_SELECTION_PREFIX = "mcp-service:"
+VECTOR_SEARCH_SELECTION_PREFIX = "vector-search:"
+UC_FUNCTIONS_SELECTION_PREFIX = "uc-functions:"
 MCP_ADD_PREFIX = "add:"
 MCP_CONNECTION_MARKERS = (
     "is_mcp",
@@ -460,6 +465,73 @@ def discover_app_mcp_servers(workspace: str, profile: str | None = None) -> list
     return app_mcp_servers(list_databricks_apps(workspace, profile))
 
 
+def _catalog_schema_server_name(prefix: str, catalog: str, schema: str, taken: set[str]) -> str:
+    """Stable server name for a per-(catalog, schema) managed MCP entry.
+
+    Prefers the lowercase alphanumeric slug; falls back to a numeric suffix on
+    collision so two schemas that slug to the same value still both render."""
+    slug = f"{_normalize_workspace_title(catalog)}-{_normalize_workspace_title(schema)}".strip("-")
+    candidate = f"{prefix}-{slug}" if slug else prefix
+    if candidate not in taken:
+        return candidate
+    counter = 2
+    while f"{candidate}-{counter}" in taken:
+        counter += 1
+    return f"{candidate}-{counter}"
+
+
+def vector_search_mcp_servers(pairs: list[tuple[str, str]], workspace: str) -> list[dict]:
+    servers: list[dict] = []
+    seen_names: set[str] = set()
+    for catalog, schema in pairs:
+        if not catalog or not schema:
+            continue
+        name = _catalog_schema_server_name("databricks-vector-search", catalog, schema, seen_names)
+        seen_names.add(name)
+        servers.append(
+            {
+                "name": name,
+                "title": f"{catalog}.{schema}",
+                "catalog": catalog,
+                "schema": schema,
+                "url": f"{workspace}/api/2.0/mcp/vector-search/{catalog}/{schema}",
+            }
+        )
+    return sorted(servers, key=lambda server: str(server["title"]).lower())
+
+
+def discover_vector_search_mcp_servers(workspace: str, profile: str | None = None) -> list[dict]:
+    token = get_databricks_token(workspace, profile)
+    pairs, _reason = list_vector_search_catalog_schemas(workspace, token)
+    return vector_search_mcp_servers(pairs, workspace)
+
+
+def uc_functions_mcp_servers(pairs: list[tuple[str, str]], workspace: str) -> list[dict]:
+    servers: list[dict] = []
+    seen_names: set[str] = set()
+    for catalog, schema in pairs:
+        if not catalog or not schema:
+            continue
+        name = _catalog_schema_server_name("databricks-functions", catalog, schema, seen_names)
+        seen_names.add(name)
+        servers.append(
+            {
+                "name": name,
+                "title": f"{catalog}.{schema}",
+                "catalog": catalog,
+                "schema": schema,
+                "url": f"{workspace}/api/2.0/mcp/functions/{catalog}/{schema}",
+            }
+        )
+    return sorted(servers, key=lambda server: str(server["title"]).lower())
+
+
+def discover_uc_functions_mcp_servers(workspace: str, profile: str | None = None) -> list[dict]:
+    token = get_databricks_token(workspace, profile)
+    pairs, _reason = list_uc_functions_catalog_schemas(workspace, token)
+    return uc_functions_mcp_servers(pairs, workspace)
+
+
 def _picker_style() -> questionary.Style:
     return questionary.Style(
         [
@@ -694,6 +766,8 @@ def build_mcp_picker_choices(
     available_app_servers: list[dict],
     original_servers: list[dict],
     available_mcp_service_names: list[str] | None = None,
+    available_vector_search_servers: list[dict] | None = None,
+    available_uc_functions_servers: list[dict] | None = None,
 ) -> list[questionary.Choice | questionary.Separator]:
     original_by_name = _servers_by_name(original_servers)
     known_names = set(original_by_name)
@@ -759,6 +833,42 @@ def build_mcp_picker_choices(
             )
         displayed_names.add(name)
 
+    for server in available_vector_search_servers or []:
+        name = _server_name(server)
+        catalog = server.get("catalog")
+        schema = server.get("schema")
+        if not name or not isinstance(catalog, str) or not isinstance(schema, str):
+            continue
+        display_title = f"Vector Search: {catalog}.{schema}"
+        if name in known_names:
+            choices.append(_server_choice(name, True, display_title))
+        else:
+            choices.append(
+                _add_choice(
+                    f"{VECTOR_SEARCH_SELECTION_PREFIX}{catalog}.{schema}",
+                    display_title,
+                )
+            )
+        displayed_names.add(name)
+
+    for server in available_uc_functions_servers or []:
+        name = _server_name(server)
+        catalog = server.get("catalog")
+        schema = server.get("schema")
+        if not name or not isinstance(catalog, str) or not isinstance(schema, str):
+            continue
+        display_title = f"UC Functions: {catalog}.{schema}"
+        if name in known_names:
+            choices.append(_server_choice(name, True, display_title))
+        else:
+            choices.append(
+                _add_choice(
+                    f"{UC_FUNCTIONS_SELECTION_PREFIX}{catalog}.{schema}",
+                    display_title,
+                )
+            )
+        displayed_names.add(name)
+
     for name in sorted(known_names - displayed_names):
         choices.append(_server_choice(name, True))
     return choices
@@ -770,6 +880,8 @@ def prompt_for_mcp_server_choices(
     available_app_servers: list[dict],
     original_servers: list[dict],
     available_mcp_service_names: list[str] | None = None,
+    available_vector_search_servers: list[dict] | None = None,
+    available_uc_functions_servers: list[dict] | None = None,
 ) -> list[str] | None:
     selection = _scrolling_checkbox(
         "MCP:",
@@ -779,6 +891,8 @@ def prompt_for_mcp_server_choices(
             available_app_servers,
             original_servers,
             available_mcp_service_names,
+            available_vector_search_servers,
+            available_uc_functions_servers,
         ),
         style=_picker_style(),
         instruction="(space to toggle, enter to save, type to filter)",
@@ -797,6 +911,8 @@ def _resolve_mcp_selection(
     workspace: str,
     available_app_servers: list[dict] | None = None,
     available_genie_servers: list[dict] | None = None,
+    available_vector_search_servers: list[dict] | None = None,
+    available_uc_functions_servers: list[dict] | None = None,
 ) -> tuple[str, str]:
     if selection.startswith(APP_MCP_SELECTION_PREFIX):
         app_name = selection.removeprefix(APP_MCP_SELECTION_PREFIX)
@@ -837,15 +953,63 @@ def _resolve_mcp_selection(
         # URL keeps the UC `<cat>.<schema>.<id>` form; entry name uses dashes.
         return full_name.replace(".", "-"), build_mcp_service_url(workspace, full_name)
 
+    if selection.startswith(VECTOR_SEARCH_SELECTION_PREFIX):
+        return _resolve_catalog_schema_selection(
+            selection.removeprefix(VECTOR_SEARCH_SELECTION_PREFIX),
+            kind="vector search",
+            url_path="vector-search",
+            name_prefix="databricks-vector-search",
+            workspace=workspace,
+            available_servers=available_vector_search_servers,
+        )
+
+    if selection.startswith(UC_FUNCTIONS_SELECTION_PREFIX):
+        return _resolve_catalog_schema_selection(
+            selection.removeprefix(UC_FUNCTIONS_SELECTION_PREFIX),
+            kind="UC functions",
+            url_path="functions",
+            name_prefix="databricks-functions",
+            workspace=workspace,
+            available_servers=available_uc_functions_servers,
+        )
+
     if selection == SQL_MCP_VALUE:
         return "databricks-sql", f"{workspace}/api/2.0/mcp/sql"
 
     raise RuntimeError(f"unrecognized selection prefix in `{selection}`")
 
 
+def _resolve_catalog_schema_selection(
+    payload: str,
+    *,
+    kind: str,
+    url_path: str,
+    name_prefix: str,
+    workspace: str,
+    available_servers: list[dict] | None,
+) -> tuple[str, str]:
+    """Map a `catalog.schema` picker value back to the discovered server's name
+    and URL, falling back to a deterministic slug when discovery has been lost
+    (e.g. picker reopened on a stale workspace)."""
+    if not payload or "." not in payload:
+        raise RuntimeError(f"missing catalog.schema for {kind}")
+    catalog, _, schema = payload.partition(".")
+    if not catalog or not schema:
+        raise RuntimeError(f"missing catalog.schema for {kind}")
+    for server in available_servers or []:
+        if server.get("catalog") == catalog and server.get("schema") == schema:
+            name = _server_name(server)
+            url = server.get("url")
+            if name and isinstance(url, str) and url:
+                return name, url
+    name = _catalog_schema_server_name(name_prefix, catalog, schema, set())
+    return name, f"{workspace}/api/2.0/mcp/{url_path}/{catalog}/{schema}"
+
+
 def _discover_mcp_source(label: str, discover: Callable[[], list[Any]]) -> list[Any]:
     try:
-        return discover()
+        with spinner(f"Discovering {label}..."):
+            return discover()
     except RuntimeError:
         print_warning(f"Skipped {label}.")
         return []
@@ -996,6 +1160,15 @@ def configure_mcp_command() -> int:
         "MCP services",
         lambda: discover_mcp_service_names(workspace, profile),
     )
+    # Per-(catalog, schema) managed MCP servers (Vector Search + UC Functions).
+    available_vector_search_servers = _discover_mcp_source(
+        "Vector Search",
+        lambda: discover_vector_search_mcp_servers(workspace, profile),
+    )
+    available_uc_functions_servers = _discover_mcp_source(
+        "UC functions",
+        lambda: discover_uc_functions_mcp_servers(workspace, profile),
+    )
 
     original_mcp_servers: list[dict] = list(state.get("mcp_servers") or [])
     original_by_name = _servers_by_name(original_mcp_servers)
@@ -1005,6 +1178,8 @@ def configure_mcp_command() -> int:
         available_app_mcp_servers,
         original_mcp_servers,
         available_mcp_service_names,
+        available_vector_search_servers,
+        available_uc_functions_servers,
     )
     if selections is None:
         return 0
@@ -1028,6 +1203,8 @@ def configure_mcp_command() -> int:
                 workspace,
                 available_app_mcp_servers,
                 available_genie_mcp_servers,
+                available_vector_search_servers,
+                available_uc_functions_servers,
             )
         except RuntimeError as exc:
             print_warning(f"Skipped MCP selection `{selection}`: {exc}.")
