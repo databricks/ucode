@@ -290,6 +290,31 @@ def prompt_for_choice(prompt: str, options: list[tuple[str, str]]) -> str:
         print_err("Please enter a valid option number.")
 
 
+def prompt_for_model(agent_display: str, options: list[str], default: str | None = None) -> str:
+    """Ask the user which model this coding agent should use."""
+    if not options:
+        raise RuntimeError(f"No models available for {agent_display}.")
+
+    default_value = default if default in options else options[0]
+    style = questionary.Style(
+        [
+            ("pointer", "fg:cyan bold"),
+            ("highlighted", "fg:white noinherit"),
+            ("selected", "fg:white noinherit"),
+            ("answer", "fg:cyan"),
+        ]
+    )
+    answer = questionary.select(
+        f"Select model for {agent_display}:",
+        choices=[questionary.Choice(title=model, value=model) for model in options],
+        default=default_value,
+        style=style,
+        pointer="›",
+        qmark="",
+    ).ask()
+    return answer if isinstance(answer, str) and answer else default_value
+
+
 def prompt_for_client_id() -> str:
     while True:
         client_id = console.input(f"{label('OAuth client ID')} {muted('›')} ").strip()

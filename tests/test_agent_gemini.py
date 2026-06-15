@@ -110,6 +110,14 @@ class TestBuildRuntimeEnv:
 
 
 class TestGeminiDefaultModel:
+    def test_selected_model_wins(self):
+        state = {
+            "selected_models": {"gemini": "gemini-1"},
+            "gemini_models": ["gemini-2", "gemini-1"],
+        }
+
+        assert gemini.default_model(state) == "gemini-1"
+
     def test_returns_first_model(self):
         state = {"gemini_models": ["gemini-2", "gemini-1"]}
         assert gemini.default_model(state) == "gemini-2"

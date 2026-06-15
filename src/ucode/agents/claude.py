@@ -23,6 +23,7 @@ from ucode.databricks import (
     build_tool_base_url,
     get_databricks_token,
 )
+from ucode.model_selection import selected_model_for_tool
 from ucode.state import mark_tool_managed, save_state
 from ucode.telemetry import agent_version, ucode_version
 from ucode.tracing import tracing_env
@@ -428,6 +429,9 @@ def _ensure_mlflow_cli() -> bool:
 
 
 def default_model(state: dict) -> str | None:
+    selected = selected_model_for_tool("claude", state)
+    if selected:
+        return selected
     claude_models = state.get("claude_models") or {}
     return claude_models.get("opus") or claude_models.get("sonnet") or claude_models.get("haiku")
 

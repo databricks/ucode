@@ -168,6 +168,15 @@ class TestResolveWebSearchModel:
 
 
 class TestClaudeDefaultModel:
+    def test_selected_model_wins(self):
+        state = {
+            "selected_models": {"claude": "o4-6"},
+            "claude_model_options": ["o4-7", "o4-6"],
+            "claude_models": {"opus": "o4-7"},
+        }
+
+        assert claude.default_model(state) == "o4-6"
+
     def test_prefers_opus(self):
         state = {"claude_models": {"sonnet": "s4", "opus": "o4", "haiku": "h4"}}
         assert claude.default_model(state) == "o4"

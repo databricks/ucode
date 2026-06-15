@@ -297,6 +297,14 @@ class TestCodexRevertLegacySharedConfig:
 
 
 class TestCodexDefaultModel:
+    def test_selected_model_wins(self):
+        state = {
+            "selected_models": {"codex": "databricks-gpt-5"},
+            "codex_models": ["databricks-gpt-5", "databricks-gpt-5-5"],
+        }
+
+        assert codex.default_model(state) == "databricks-gpt-5"
+
     def test_picks_highest_semver_over_alpha(self):
         state = {"codex_models": ["databricks-gpt-5", "databricks-gpt-5-5"]}
 

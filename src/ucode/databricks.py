@@ -1154,15 +1154,48 @@ def list_model_services(
     return [], last_reason or "model-services listing returned no models"
 
 
-def discover_model_services(
+_CLAUDE_FAMILY_ORDER = ("opus", "sonnet", "haiku")
+
+
+def _claude_family(model_id: str) -> str | None:
+    for family in _CLAUDE_FAMILY_ORDER:
+        if f"claude-{family}-" in model_id:
+            return family
+    return None
+
+
+def _sort_claude_model_options(model_ids: list[str]) -> list[str]:
+    def _key(model_id: str) -> tuple:
+        family = _claude_family(model_id)
+        family_index = _CLAUDE_FAMILY_ORDER.index(family) if family else len(_CLAUDE_FAMILY_ORDER)
+        return (family_index, model_version_sort_key(model_id))
+
+    return sorted([model_id for model_id in set(model_ids) if _claude_family(model_id)], key=_key)
+
+
+def _newest_claude_models_by_family(model_ids: list[str]) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for family in _CLAUDE_FAMILY_ORDER:
+        candidates = sorted(
+            [model_id for model_id in model_ids if f"claude-{family}-" in model_id],
+            key=model_version_sort_key,
+        )
+        if candidates:
+            result[family] = candidates[0]
+    return result
+
+
+def discover_model_services_with_options(
     workspace: str, token: str
-) -> tuple[dict[str, str], list[str], list[str], str | None]:
+) -> tuple[dict[str, str], list[str], list[str], list[str], str | None]:
     """Discover models via UC model-services and bucket them by family name.
 
-    Returns (claude_models, codex_models, gemini_models, reason):
+    Returns (claude_models, claude_model_options, codex_models, gemini_models, reason):
 
     - ``claude_models`` maps ``opus``/``sonnet``/``haiku`` to the newest
       matching ``system.ai.claude-*`` id (mirrors ``discover_claude_models``).
+    - ``claude_model_options`` is the full selectable Claude model list, grouped
+      by family preference and newest version first.
     - ``codex_models`` is the list of ``system.ai.*gpt-*`` ids.
     - ``gemini_models`` is the list of ``system.ai.*gemini-*`` ids, newest first.
 
@@ -1172,16 +1205,10 @@ def discover_model_services(
     """
     ids, reason = list_model_services(workspace, token)
     if not ids:
-        return {}, [], [], reason
+        return {}, [], [], [], reason
 
-    claude_models: dict[str, str] = {}
-    for family in ("opus", "sonnet", "haiku"):
-        candidates = sorted(
-            [m for m in ids if f"claude-{family}-" in m],
-            reverse=True,
-        )
-        if candidates:
-            claude_models[family] = candidates[0]
+    claude_model_options = _sort_claude_model_options(ids)
+    claude_models = _newest_claude_models_by_family(claude_model_options)
 
     codex_models = [m for m in ids if "gpt-" in m]
     gemini_models = sorted([m for m in ids if "gemini-" in m], key=model_version_sort_key)
@@ -1192,12 +1219,23 @@ def discover_model_services(
             {},
             [],
             [],
+            [],
             (
                 "model-services returned model ids but none matched "
                 f"claude/gpt/gemini families (got: {sample})"
             ),
         )
-    return claude_models, codex_models, gemini_models, None
+    return claude_models, claude_model_options, codex_models, gemini_models, None
+
+
+def discover_model_services(
+    workspace: str, token: str
+) -> tuple[dict[str, str], list[str], list[str], str | None]:
+    """Backwards-compatible wrapper for callers that only need default buckets."""
+    claude_models, _claude_model_options, codex_models, gemini_models, reason = (
+        discover_model_services_with_options(workspace, token)
+    )
+    return claude_models, codex_models, gemini_models, reason
 
 
 # --- MCP services (parallel to model services) -----------------------------
@@ -1251,17 +1289,18 @@ def build_mcp_service_url(workspace: str, full_name: str) -> str:
     return f"{workspace}/ai-gateway/mcp-services/{full_name}"
 
 
-def discover_claude_models(workspace: str, token: str) -> tuple[dict[str, str], str | None]:
+def discover_claude_models_with_options(
+    workspace: str, token: str
+) -> tuple[dict[str, str], list[str], str | None]:
     """Discover Claude families on this workspace's AI Gateway.
 
-    Returns (models_by_family, reason). reason is None on success; otherwise it
-    describes why the dict is empty (HTTP error, network error, or no models
-    matching the expected naming convention).
+    Returns (models_by_family, selectable_models, reason). reason is None on
+    success; otherwise it describes why no matching Claude models were found.
     """
     hostname = workspace_hostname(workspace)
     payload, reason = _http_get_json(f"https://{hostname}/ai-gateway/anthropic/v1/models", token)
     if payload is None:
-        return {}, reason
+        return {}, [], reason
 
     data = cast(dict, payload) if isinstance(payload, dict) else {}
     raw_ids = [
@@ -1270,23 +1309,27 @@ def discover_claude_models(workspace: str, token: str) -> tuple[dict[str, str], 
         if isinstance(m.get("id"), str) and not m["id"].endswith("-anthropic")
     ]
 
-    result: dict[str, str] = {}
-    for family, key in [("opus", "opus"), ("sonnet", "sonnet"), ("haiku", "haiku")]:
-        candidates = sorted(
-            [m for m in raw_ids if f"databricks-claude-{family}-" in m],
-            reverse=True,
-        )
-        if candidates:
-            result[key] = candidates[0]
+    selectable = _sort_claude_model_options(raw_ids)
+    result = _newest_claude_models_by_family(selectable)
     if result:
-        return result, None
+        return result, selectable, None
     if not raw_ids:
-        return {}, "AI Gateway returned no Claude model ids"
+        return {}, [], "AI Gateway returned no Claude model ids"
     sample = ", ".join(raw_ids[:5])
-    return {}, (
-        "AI Gateway returned model ids but none matched "
-        f"`databricks-claude-{{opus,sonnet,haiku}}-*` (got: {sample})"
+    return (
+        {},
+        [],
+        (
+            "AI Gateway returned model ids but none matched "
+            f"`databricks-claude-{{opus,sonnet,haiku}}-*` (got: {sample})"
+        ),
     )
+
+
+def discover_claude_models(workspace: str, token: str) -> tuple[dict[str, str], str | None]:
+    """Backwards-compatible wrapper that returns only family defaults."""
+    models, _selectable, reason = discover_claude_models_with_options(workspace, token)
+    return models, reason
 
 
 def fetch_ai_gateway_claude_models(workspace: str, token: str) -> dict[str, str]:

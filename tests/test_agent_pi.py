@@ -208,6 +208,17 @@ class TestRenderOverlayModelSelector:
 
 
 class TestPiDefaultModel:
+    def test_selected_model_wins(self):
+        state = {
+            "selected_models": {"pi": "gemini-2"},
+            "claude_model_options": ["o4"],
+            "claude_models": {"opus": "o4"},
+            "codex_models": ["gpt-5"],
+            "gemini_models": ["gemini-2"],
+        }
+
+        assert pi.default_model(state) == "gemini-2"
+
     def test_prefers_claude_opus(self):
         state = {"claude_models": {"opus": "o4", "sonnet": "s4", "haiku": "h4"}}
         assert pi.default_model(state) == "o4"
@@ -355,6 +366,27 @@ class TestWriteToolConfig:
         written = json.loads(config_file.read_text())
         assert written["model"] == "databricks-claude/claude-sonnet"
         assert written["providers"]["databricks-claude"]["apiKey"] == "tok"
+
+    def test_selected_claude_option_is_registered_in_provider(self, tmp_path, monkeypatch):
+        pi_mod, config_file, _, _ = self._setup(tmp_path, monkeypatch)
+        state = self._state(
+            claude_models={"opus": "claude-opus-4-7"},
+            claude_model_options=["claude-opus-4-7", "claude-opus-4-6"],
+            selected_models={"pi": "claude-opus-4-6"},
+        )
+
+        with (
+            patch("ucode.agents.pi.get_databricks_token", return_value="tok"),
+            patch("ucode.agents.pi.save_state"),
+        ):
+            pi_mod.write_tool_config(state, "claude-opus-4-6", token="tok")
+
+        written = json.loads(config_file.read_text())
+        assert written["model"] == "databricks-claude/claude-opus-4-6"
+        provider_models = {
+            model["id"] for model in written["providers"]["databricks-claude"]["models"]
+        }
+        assert provider_models == {"claude-opus-4-7", "claude-opus-4-6"}
 
     def test_settings_pins_default_provider_and_model(self, tmp_path, monkeypatch):
         # Without this, Pi's `findInitialModel` can fall through to a built-in

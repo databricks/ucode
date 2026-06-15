@@ -21,6 +21,7 @@ from ucode.databricks import (
     build_opencode_base_urls,
     get_databricks_token,
 )
+from ucode.model_selection import selected_model_for_tool
 from ucode.state import mark_tool_managed, save_state
 from ucode.telemetry import agent_version, ucode_version
 
@@ -192,6 +193,9 @@ def remove_mcp_server_config(name: str) -> bool:
 
 
 def default_model(state: dict) -> str | None:
+    selected = selected_model_for_tool("opencode", state)
+    if selected:
+        return selected
     opencode_models = state.get("opencode_models") or {}
     anthropic = opencode_models.get("anthropic") or []
     if anthropic:

@@ -131,6 +131,27 @@ class TestDiscoverClaudeModels:
         assert reason is None
         assert models["opus"] == "databricks-claude-opus-4-8"
 
+    def test_preserves_all_selectable_claude_models(self, monkeypatch):
+        payload = {
+            "data": [
+                {"id": "databricks-claude-opus-4-6"},
+                {"id": "databricks-claude-opus-4-7"},
+                {"id": "databricks-claude-sonnet-4-6"},
+                {"id": "databricks-claude-opus-4-7-anthropic"},
+            ]
+        }
+        monkeypatch.setattr(db_mod, "_http_get_json", lambda url, token: (payload, None))
+
+        models, selectable, reason = db_mod.discover_claude_models_with_options(WS, "token")
+
+        assert reason is None
+        assert models["opus"] == "databricks-claude-opus-4-7"
+        assert selectable == [
+            "databricks-claude-opus-4-7",
+            "databricks-claude-opus-4-6",
+            "databricks-claude-sonnet-4-6",
+        ]
+
 
 def _model_service(model_id: str) -> dict:
     """A model-services entry whose `name` strips to `model_id`."""
@@ -167,6 +188,36 @@ class TestDiscoverModelServices:
         assert gemini[0] == "system.ai.gemini-3-5-flash"
         # llama is not bucketed into any of the three families.
         assert "system.ai.llama-4-maverick" not in codex + gemini
+
+    def test_preserves_all_selectable_claude_model_services(self, monkeypatch):
+        payload = {
+            "model_services": [
+                _model_service("system.ai.claude-opus-4-6"),
+                _model_service("system.ai.claude-opus-4-7"),
+                _model_service("system.ai.claude-sonnet-4-6"),
+                _model_service("system.ai.gpt-5"),
+            ]
+        }
+        monkeypatch.setattr(
+            db_mod, "_http_get_json", lambda url, token, timeout=10: (payload, None)
+        )
+
+        claude, selectable, codex, gemini, reason = db_mod.discover_model_services_with_options(
+            WS, "token"
+        )
+
+        assert reason is None
+        assert claude == {
+            "opus": "system.ai.claude-opus-4-7",
+            "sonnet": "system.ai.claude-sonnet-4-6",
+        }
+        assert selectable == [
+            "system.ai.claude-opus-4-7",
+            "system.ai.claude-opus-4-6",
+            "system.ai.claude-sonnet-4-6",
+        ]
+        assert codex == ["system.ai.gpt-5"]
+        assert gemini == []
 
     def test_paginates_via_next_page_token(self, monkeypatch):
         pages = {

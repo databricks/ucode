@@ -20,6 +20,7 @@ from ucode.databricks import (
     build_tool_base_url,
     get_databricks_token,
 )
+from ucode.model_selection import selected_model_for_tool
 from ucode.state import mark_tool_managed, save_state
 from ucode.telemetry import agent_version, ucode_version
 
@@ -336,6 +337,10 @@ def default_model(state: dict) -> str | None:
     would be rejected with a Unity Catalog endpoint-name error. When no
     candidate parses as GPT we return None rather than pinning an unroutable id.
     """
+    selected = selected_model_for_tool("codex", state)
+    if selected and _parse_gpt(selected) is not None:
+        return selected
+
     codex_models = state.get("codex_models") or []
     parsed: list[tuple[str, tuple[int, int | None, int | None, str]]] = [
         (mid, gpt) for mid in codex_models if (gpt := _parse_gpt(mid)) is not None
