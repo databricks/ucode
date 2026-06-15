@@ -7,7 +7,9 @@ import json
 import os
 import shlex
 import shutil
+import signal
 import subprocess
+import time
 from pathlib import Path
 from typing import Annotated, cast
 
@@ -1203,7 +1205,7 @@ def _apply_budget_gate(
     return "default", None, None
 
 
-DEFAULT_WATCH_INTERVAL = 10
+DEFAULT_WATCH_INTERVAL = 5
 WATCH_AGENT_MIN_WIDTH = 88
 WATCH_PANE_PREFERRED_WIDTH = 56
 # Hard floor for the watch pane: narrow enough to fit a zoomed-in terminal, but
@@ -1284,19 +1286,12 @@ def _launch_in_tmux_split(tool_name: str, agent_args: list[str], interval: int) 
     """Launch the agent in a tmux split with a live budget-status watcher.
 
     Left pane runs ``ucode <agent> [args]`` (without the watch flags); the
-    right pane re-renders ``ucode usage budget-status`` every ``interval``
-    seconds.
+    right pane runs ``ucode usage budget-watch``, which re-fetches spend every
+    ``interval`` seconds and redraws immediately on resize (SIGWINCH) so a zoom
+    reflows the panel to the new pane width instead of leaving a stale frame.
     """
     agent_cmd = shlex.join(["ucode", tool_name, *agent_args])
-    # Redraw in place instead of clearing first: \033[2J clears once on
-    # startup, then each loop homes the cursor (\033[H), overwrites the old
-    # frame, and erases any leftover trailing lines (\033[J). Clearing before
-    # each render blanks the pane to an empty frame, which reads as a flicker.
-    watch_cmd = (
-        "printf '\\033[2J'; "
-        f"while true; do printf '\\033[H'; ucode usage budget-status; "
-        f"printf '\\033[J'; sleep {interval}; done"
-    )
+    watch_cmd = shlex.join(["ucode", "usage", "budget-watch", "--interval", str(interval)])
     print_success(
         f"Launching {TOOL_SPECS[tool_name]['display']} in a tmux split "
         f"with a budget watcher (refreshing every {interval}s)."
@@ -2424,27 +2419,26 @@ def usage_record_cmd(
     print_success(f"Today's local spend overwritten to ${cost:.2f}.")
 
 
-@usage_app.command("budget-status")
-def usage_budget_status_cmd() -> None:
-    """Show the current local spend budget state and the active policy.
+def _budget_panel_width(pane_cols: int) -> int | None:
+    """Pin the panels to the pane width only when it is narrower than their
+    natural (preferred) width; otherwise let Rich size them to content.
 
-    The daily budget is a single pool shared across all coding tools, so this
-    renders one combined view. A second panel summarises the policy (budget,
-    tiers, on-exhausted action) and the tier the current spend has activated."""
-    state = load_state()
-    workspace = state.get("workspace")
-    sync_workspace = workspace if isinstance(workspace, str) else None
-    sync_opencode_usage_from_messages(workspace=sync_workspace)
-    sync_opencode_usage_from_state(workspace=sync_workspace)
-    sync_codex_usage_recent(workspace=sync_workspace)
-    status = local_budget_status()
-    # Fit both panels to the current pane: in a zoomed-in/narrow tmux watch
-    # split the panels render compactly instead of overflowing the columns.
-    pane_cols = shutil.get_terminal_size((80, 40)).columns
-    panel_width = pane_cols if pane_cols < WATCH_PANE_PREFERRED_WIDTH else None
-    console.print(
+    Measured against the *live* column count each render, so a zoom re-fits the
+    panels instead of leaving a frame sized for the old pane."""
+    return pane_cols if pane_cols < WATCH_PANE_PREFERRED_WIDTH else None
+
+
+def _build_budget_renderables(
+    status: dict[str, object], sync_workspace: str | None, *, pane_cols: int
+) -> list[object]:
+    """Build the budget + policy panels for the current pane width.
+
+    Shared by ``budget-status`` (one-shot) and ``budget-watch`` (live loop) so
+    both fit the pane the same way."""
+    panel_width = _budget_panel_width(pane_cols)
+    renderables: list[object] = [
         render_local_budget_panel(status, title="Daily Budget · All Tools", width=panel_width)
-    )
+    ]
     policy_lines = _render_policy_summary_lines(sync_workspace)
     if policy_lines:
         name_line = policy_lines[0].replace("[bold]Policy:[/bold] ", "[bold]")
@@ -2475,7 +2469,7 @@ def usage_budget_status_cmd() -> None:
                     f"[bold]You've used {percent}% of today's budget. "
                     f"Recommended harness is {active_display} with model {active_model}.[/bold]"
                 )
-        console.print(
+        renderables.append(
             Panel(
                 Text.from_markup("\n".join(body_lines)),
                 title=Text("Policy", style="bold cyan"),
@@ -2485,6 +2479,106 @@ def usage_budget_status_cmd() -> None:
                 padding=(1, 1, 0, 1) if panel_width else (1, 2, 0, 2),
             )
         )
+    return renderables
+
+
+@usage_app.command("budget-status")
+def usage_budget_status_cmd() -> None:
+    """Show the current local spend budget state and the active policy.
+
+    The daily budget is a single pool shared across all coding tools, so this
+    renders one combined view. A second panel summarises the policy (budget,
+    tiers, on-exhausted action) and the tier the current spend has activated."""
+    state = load_state()
+    workspace = state.get("workspace")
+    sync_workspace = workspace if isinstance(workspace, str) else None
+    sync_opencode_usage_from_messages(workspace=sync_workspace)
+    sync_opencode_usage_from_state(workspace=sync_workspace)
+    sync_codex_usage_recent(workspace=sync_workspace)
+    status = local_budget_status()
+    # Fit both panels to the current pane: in a zoomed-in/narrow tmux watch
+    # split the panels render compactly instead of overflowing the columns.
+    pane_cols = shutil.get_terminal_size((80, 40)).columns
+    for renderable in _build_budget_renderables(status, sync_workspace, pane_cols=pane_cols):
+        console.print(renderable)
+
+
+# Polling slice for the watch loop. The interval governs how often spend data is
+# re-fetched; resize redraws are picked up within one slice (≤ this many seconds)
+# so a zoom reflows the panel almost immediately instead of after a full interval.
+WATCH_RESIZE_POLL_SECONDS = 0.25
+
+
+@usage_app.command("budget-watch")
+def usage_budget_watch_cmd(
+    interval: Annotated[
+        int,
+        typer.Option("--interval", help="Seconds between spend-data refreshes."),
+    ] = DEFAULT_WATCH_INTERVAL,
+) -> None:
+    """Continuously render the budget panel for the ``--watch`` tmux split.
+
+    Spend data is re-fetched every ``interval`` seconds. The panel also redraws
+    immediately on terminal resize (``SIGWINCH``) — e.g. when you zoom — so it
+    always fits the current pane instead of showing a frame sized for the old
+    one until the next refresh tick."""
+    if interval <= 0:
+        interval = DEFAULT_WATCH_INTERVAL
+    state = load_state()
+    workspace = state.get("workspace")
+    sync_workspace = workspace if isinstance(workspace, str) else None
+
+    last_status: dict[str, object] | None = None
+    last_size: os.terminal_size | None = None
+    resize_pending = False
+
+    def _on_resize(_signum: int, _frame: object) -> None:
+        nonlocal resize_pending
+        resize_pending = True
+
+    def _redraw(status: dict[str, object]) -> None:
+        nonlocal last_size
+        size = shutil.get_terminal_size((80, 40))
+        # Full-clear on the first paint and on resize (size change): a smaller
+        # pane would otherwise leave stale characters to the right of / below
+        # the new frame. When the size is unchanged (a routine refresh tick)
+        # redraw in place — home, overwrite, erase-below — so there's no flicker.
+        if size != last_size:
+            console.file.write("\033[2J\033[H")
+        else:
+            console.file.write("\033[H")
+        last_size = size
+        for renderable in _build_budget_renderables(status, sync_workspace, pane_cols=size.columns):
+            console.print(renderable)
+        console.file.write("\033[J")
+        console.file.flush()
+
+    signal.signal(signal.SIGWINCH, _on_resize)
+    console.file.write("\033[?25l")  # hide the cursor while watching
+    console.file.flush()
+    try:
+        while True:
+            sync_opencode_usage_from_messages(workspace=sync_workspace)
+            sync_opencode_usage_from_state(workspace=sync_workspace)
+            sync_codex_usage_recent(workspace=sync_workspace)
+            last_status = local_budget_status()
+            resize_pending = False
+            _redraw(last_status)
+            # Wait for the next refresh, but break the wait into short slices so
+            # a SIGWINCH (resize) triggers a cheap reflow of the cached status
+            # without waiting out the full interval.
+            waited = 0.0
+            while waited < interval:
+                if resize_pending and last_status is not None:
+                    resize_pending = False
+                    _redraw(last_status)
+                time.sleep(WATCH_RESIZE_POLL_SECONDS)
+                waited += WATCH_RESIZE_POLL_SECONDS
+    except KeyboardInterrupt:
+        pass
+    finally:
+        console.file.write("\033[?25h")  # restore the cursor
+        console.file.flush()
 
 
 @usage_app.command("budget-check")

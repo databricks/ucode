@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import os
 import re
+import signal
 from unittest.mock import patch
 
 import pytest
@@ -1620,7 +1621,7 @@ class TestWatchFlag:
         assert "-h" in argv
         assert "-l" in argv
         assert str(cli.WATCH_PANE_PREFERRED_WIDTH) in argv
-        assert any("budget-status" in part for part in argv)
+        assert any("budget-watch" in part for part in argv)
         # Mouse mode is enabled so the wheel scrolls pane history.
         assert "set-option" in argv
         assert "mouse" in argv
@@ -1648,7 +1649,7 @@ class TestWatchFlag:
             ["select-pane", "-L"],
         )
 
-    def test_watch_default_interval_is_10(self):
+    def test_watch_default_interval_is_5(self):
         with (
             patch("ucode.cli._tmux_available", return_value=True),
             patch("ucode.cli._in_tmux", return_value=False),
@@ -1657,7 +1658,7 @@ class TestWatchFlag:
             mock_run.return_value.returncode = 0
             runner.invoke(app, ["claude", "--watch"])
         argv = self._tmux_argv(mock_run)
-        assert any("sleep 10" in part for part in argv)
+        assert any("budget-watch --interval 5" in part for part in argv)
 
     def test_watch_interval_custom(self):
         with (
@@ -1668,7 +1669,7 @@ class TestWatchFlag:
             mock_run.return_value.returncode = 0
             runner.invoke(app, ["claude", "--watch", "--watch-interval", "30"])
         argv = self._tmux_argv(mock_run)
-        assert any("sleep 30" in part for part in argv)
+        assert any("budget-watch --interval 30" in part for part in argv)
 
     def test_watch_interval_equals_form(self):
         with (
@@ -1679,7 +1680,45 @@ class TestWatchFlag:
             mock_run.return_value.returncode = 0
             runner.invoke(app, ["claude", "--watch", "--watch-interval=45"])
         argv = self._tmux_argv(mock_run)
-        assert any("sleep 45" in part for part in argv)
+        assert any("budget-watch --interval 45" in part for part in argv)
+
+    def test_budget_watch_refetches_on_timer_and_reflows_on_resize(self):
+        captured: dict[str, object] = {}
+        sleeps = {"n": 0}
+
+        def fake_signal(signum, handler):
+            captured["signum"] = signum
+            captured["handler"] = handler
+
+        def fake_sleep(_secs):
+            # First poll slice: fire the resize handler the command registered.
+            # Second slice: break out of the (otherwise infinite) loop.
+            sleeps["n"] += 1
+            if sleeps["n"] == 1:
+                captured["handler"](signal.SIGWINCH, None)
+            else:
+                raise KeyboardInterrupt
+
+        with (
+            patch("ucode.cli.load_state", return_value={"workspace": "ws"}),
+            patch("ucode.cli.sync_opencode_usage_from_messages"),
+            patch("ucode.cli.sync_opencode_usage_from_state"),
+            patch("ucode.cli.sync_codex_usage_recent"),
+            patch("ucode.cli.local_budget_status", return_value={"state": "ok"}) as mock_status,
+            patch("ucode.cli._build_budget_renderables", return_value=[]) as mock_build,
+            patch("ucode.cli.signal.signal", side_effect=fake_signal),
+            patch("ucode.cli.time.sleep", side_effect=fake_sleep),
+        ):
+            result = runner.invoke(app, ["usage", "budget-watch", "--interval", "1"])
+
+        assert result.exit_code == 0, result.output
+        # Registered a SIGWINCH handler so resizes drive redraws.
+        assert captured["signum"] == signal.SIGWINCH
+        # Spend data is fetched once on the timer; the resize redraw reuses the
+        # cached status rather than re-fetching.
+        assert mock_status.call_count == 1
+        # Rendered twice: once on the initial timer tick, once on the resize.
+        assert mock_build.call_count == 2
 
     def test_watch_strips_flags_from_agent_args(self):
         with (
