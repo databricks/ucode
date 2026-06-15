@@ -1205,9 +1205,12 @@ def _apply_budget_gate(
 
 DEFAULT_WATCH_INTERVAL = 10
 WATCH_AGENT_MIN_WIDTH = 88
-WATCH_PANE_MIN_WIDTH = 46
 WATCH_PANE_PREFERRED_WIDTH = 56
-WATCH_PANE_HEIGHT = 12
+# Hard floor for the watch pane: narrow enough to fit a zoomed-in terminal, but
+# still wide enough that the (adaptive) budget panel renders without wrapping.
+WATCH_PANE_NARROW_WIDTH = 30
+# Never shrink the agent pane below this — the watch pane yields columns first.
+WATCH_AGENT_FLOOR = 40
 
 
 def _extract_watch_flags(args: list[str]) -> tuple[bool, int, list[str]]:
@@ -1256,14 +1259,25 @@ def _tmux_available() -> bool:
     return shutil.which("tmux") is not None
 
 
-def _watch_tmux_layout_args(columns: int | None = None) -> tuple[list[str], list[str]]:
+def _watch_pane_width(columns: int | None = None) -> int:
+    """Pick the watch pane's column width for the side-by-side split.
+
+    The watcher always sits on the right (never the bottom), so when the
+    terminal is narrow — e.g. zoomed in — the watch pane yields columns to the
+    agent first, down to ``WATCH_PANE_NARROW_WIDTH``. The budget panel renders
+    adaptively at whatever width it gets, so a squished pane stays legible
+    instead of breaking the layout."""
     if columns is None:
         columns = shutil.get_terminal_size((160, 40)).columns
-    available_watch_width = columns - WATCH_AGENT_MIN_WIDTH
-    if available_watch_width >= WATCH_PANE_MIN_WIDTH:
-        watch_width = min(WATCH_PANE_PREFERRED_WIDTH, available_watch_width)
-        return ["split-window", "-h", "-l", str(watch_width)], ["select-pane", "-L"]
-    return ["split-window", "-v", "-l", str(WATCH_PANE_HEIGHT)], ["select-pane", "-U"]
+    # Give the agent pane priority: only what's left past its floor goes to the
+    # watcher, capped at the preferred width and floored so the panel still fits.
+    available = columns - WATCH_AGENT_FLOOR
+    return max(WATCH_PANE_NARROW_WIDTH, min(WATCH_PANE_PREFERRED_WIDTH, available))
+
+
+def _watch_tmux_layout_args(columns: int | None = None) -> tuple[list[str], list[str]]:
+    watch_width = _watch_pane_width(columns)
+    return ["split-window", "-h", "-l", str(watch_width)], ["select-pane", "-L"]
 
 
 def _launch_in_tmux_split(tool_name: str, agent_args: list[str], interval: int) -> None:
@@ -2424,7 +2438,13 @@ def usage_budget_status_cmd() -> None:
     sync_opencode_usage_from_state(workspace=sync_workspace)
     sync_codex_usage_recent(workspace=sync_workspace)
     status = local_budget_status()
-    console.print(render_local_budget_panel(status, title="Daily Budget · All Tools"))
+    # Fit both panels to the current pane: in a zoomed-in/narrow tmux watch
+    # split the panels render compactly instead of overflowing the columns.
+    pane_cols = shutil.get_terminal_size((80, 40)).columns
+    panel_width = pane_cols if pane_cols < WATCH_PANE_PREFERRED_WIDTH else None
+    console.print(
+        render_local_budget_panel(status, title="Daily Budget · All Tools", width=panel_width)
+    )
     policy_lines = _render_policy_summary_lines(sync_workspace)
     if policy_lines:
         name_line = policy_lines[0].replace("[bold]Policy:[/bold] ", "[bold]")
@@ -2461,7 +2481,8 @@ def usage_budget_status_cmd() -> None:
                 title=Text("Policy", style="bold cyan"),
                 border_style="cyan",
                 expand=False,
-                padding=(1, 2, 0, 2),
+                width=panel_width,
+                padding=(1, 1, 0, 1) if panel_width else (1, 2, 0, 2),
             )
         )
 

@@ -973,11 +973,18 @@ def _budget_header_line(state: str, display_tool: str | None) -> str | None:
     return None
 
 
+# Below this pane width the panel switches to a compact layout: a thinner fill
+# bar, the spend/percent split across two lines, and stacked (not inline)
+# footer values — so it stays legible in a zoomed-in / narrow tmux watch pane.
+BUDGET_PANEL_NARROW_WIDTH = 44
+
+
 def render_local_budget_panel(
     status: dict[str, object],
     *,
     title: str | None = None,
     extra_lines: list[str] | None = None,
+    width: int | None = None,
 ) -> Panel:
     """Render a budget status as a bordered Rich panel with a color-coded fill
     bar. Used by `ucode usage budget-status` and the launch budget summary.
@@ -986,7 +993,11 @@ def render_local_budget_panel(
     title. Pass ``extra_lines`` to inject Rich-markup lines into the body
     between the progress bar and the Remaining/Tokens/Sessions footer — used
     by the warn-state switch prompt to surface a "currently X, recommend Y"
-    sentence inside the same panel."""
+    sentence inside the same panel.
+
+    Pass ``width`` to pin the panel to a fixed column width (e.g. the tmux watch
+    pane width). When the available body is narrow, the layout degrades to a
+    compact form so it renders cleanly instead of wrapping."""
     state = str(status.get("state") or "ok")
     raw_tool = status.get("tool")
     tool = str(raw_tool) if raw_tool else ""
@@ -1001,30 +1012,48 @@ def render_local_budget_panel(
     tokens_label = f"{display_tool} Tokens" if display_tool else "Total Tokens"
     sessions_label = f"{display_tool} Sessions" if display_tool else "Total Sessions"
 
+    narrow = width is not None and width < BUDGET_PANEL_NARROW_WIDTH
+    # Fit the bar to the body (panel width minus borders + horizontal padding).
+    bar_width = max(8, width - 6) if narrow and width is not None else 28
+
     lines: list[str] = []
     header = _budget_header_line(state, display_tool)
     if header:
         lines.append(header)
         lines.append("")
-    lines.append(
-        f"[bold]${spend_usd:,.2f}[/bold] / ${limit_usd:,.2f}    [{color}]{percent}% used[/{color}]"
-    )
-    lines.append(_budget_bar_markup(percent, color))
+    if narrow:
+        # Stack spend and percent so neither gets truncated in a thin pane.
+        lines.append(f"[bold]${spend_usd:,.2f}[/bold] / ${limit_usd:,.2f}")
+        lines.append(f"[{color}]{percent}% used[/{color}]")
+    else:
+        lines.append(
+            f"[bold]${spend_usd:,.2f}[/bold] / ${limit_usd:,.2f}    "
+            f"[{color}]{percent}% used[/{color}]"
+        )
+    lines.append(_budget_bar_markup(percent, color, width=bar_width))
     lines.append("")
     if extra_lines:
         for extra in extra_lines:
             lines.append(extra)
         lines.append("")
-    lines.append(f"[bold]Remaining[/bold]   ${remaining_usd:,.2f}")
-    lines.append(f"[bold]{tokens_label}[/bold]   {format_token_count(tokens)}")
-    lines.append(f"[bold]{sessions_label}[/bold]   {sessions}")
+    if narrow:
+        # Label and value on separate lines so the value never wraps mid-number.
+        lines.append(f"[bold]Remaining[/bold]\n${remaining_usd:,.2f}")
+        lines.append(f"[bold]{tokens_label}[/bold]\n{format_token_count(tokens)}")
+        lines.append(f"[bold]{sessions_label}[/bold]\n{sessions}")
+    else:
+        lines.append(f"[bold]Remaining[/bold]   ${remaining_usd:,.2f}")
+        lines.append(f"[bold]{tokens_label}[/bold]   {format_token_count(tokens)}")
+        lines.append(f"[bold]{sessions_label}[/bold]   {sessions}")
 
+    padding = (1, 1, 0, 1) if narrow else (1, 2, 0, 2)
     return Panel(
         Text.from_markup("\n".join(lines)),
         title=Text(title or f"{display_tool or 'Agent'} · Daily Budget", style=f"bold {color}"),
         border_style=color,
         expand=False,
-        padding=(1, 2, 0, 2),
+        width=width,
+        padding=padding,
     )
 
 

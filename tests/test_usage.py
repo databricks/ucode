@@ -898,6 +898,22 @@ class TestRenderLocalBudgetPanel:
         # Over-limit spend caps the percentage display at the bar, not the number.
         assert "120% used" in text
 
+    def test_narrow_panel_fits_width_and_stays_legible(self):
+        # A zoomed-in tmux watch pane: render the panel at a narrow fixed width
+        # and confirm no line overflows and the key figures still appear.
+        from rich.console import Console
+
+        panel = render_local_budget_panel(self._status("ok", 120.0, 500.0), width=30)
+        console = Console(width=80, no_color=True)
+        with console.capture() as capture:
+            console.print(panel)
+        text = capture.get()
+        # Every rendered line fits within the pinned width.
+        assert all(len(line) <= 30 for line in text.splitlines())
+        assert "$120.00 / $500.00" in text
+        assert "24% used" in text
+        assert "Remaining" in text and "$380.00" in text
+
     def test_bar_fill_scales_with_percent(self):
         assert usage_mod._budget_bar_markup(0, "green").count("█") == 0
         assert usage_mod._budget_bar_markup(100, "red").count("█") == 28

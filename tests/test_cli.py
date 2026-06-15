@@ -1634,15 +1634,18 @@ class TestWatchFlag:
         )
 
     def test_watch_uses_available_width_when_terminal_is_tight_but_still_wide_enough(self):
-        assert cli._watch_tmux_layout_args(140) == (
-            ["split-window", "-h", "-l", "52"],
+        # 90 cols - 40 agent floor = 50 available, capped at the preferred width.
+        assert cli._watch_tmux_layout_args(90) == (
+            ["split-window", "-h", "-l", "50"],
             ["select-pane", "-L"],
         )
 
-    def test_watch_uses_bottom_pane_when_terminal_is_narrow(self):
-        assert cli._watch_tmux_layout_args(120) == (
-            ["split-window", "-v", "-l", str(cli.WATCH_PANE_HEIGHT)],
-            ["select-pane", "-U"],
+    def test_watch_stays_on_right_when_terminal_is_narrow(self):
+        # Zoomed-in / narrow terminal: still a right-side split (never bottom),
+        # floored at the narrow width so the adaptive panel still fits.
+        assert cli._watch_tmux_layout_args(60) == (
+            ["split-window", "-h", "-l", str(cli.WATCH_PANE_NARROW_WIDTH)],
+            ["select-pane", "-L"],
         )
 
     def test_watch_default_interval_is_10(self):
