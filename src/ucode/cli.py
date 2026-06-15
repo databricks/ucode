@@ -1165,7 +1165,7 @@ def _apply_budget_gate(
         suggestion = (
             f"[yellow]Currently launching[/yellow] [bold]{current_display}[/bold] "
             f"[yellow]— policy recommends switching to[/yellow] "
-            f"[bold]{target_display}[/bold] ([italic]{target_model}[/italic]) "
+            f"[bold]{target_display}[/bold] ([italic]{_endpoint_vanity_name(target_model)}[/italic]) "
             f"[yellow]{tier_label}.[/yellow]"
         )
         console.print(

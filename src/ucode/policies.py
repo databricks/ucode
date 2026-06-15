@@ -22,7 +22,7 @@ VALID_ON_BUDGET_EXHAUSTED: frozenset[str] = frozenset({"block", "warn", "allow"}
 # prompt, and the OpenCode model picker). Unlisted endpoints fall back to their
 # raw id.
 ENDPOINT_VANITY_NAMES: dict[str, str] = {
-    "databricks-gpt-5-5": "GPT-5",
+    "databricks-gpt-5-5": "GPT-5.5",
     "databricks-kimi-k2-6": "Databricks Kimi 2.7",
     "databricks-kimi-k2-6-colo": "Databricks Kimi-2.7",
 }
