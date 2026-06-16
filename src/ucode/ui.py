@@ -243,9 +243,9 @@ def prompt_for_workspace(
         choices.append(questionary.Choice(title="Enter a different URL", value=None))
         style = questionary.Style(
             [
-                ("highlighted", "fg:cyan bold"),
-                ("pointer", "fg:cyan bold"),
-                ("answer", "fg:cyan"),
+                ("highlighted", "fg:#2a6885 bold"),
+                ("pointer", "fg:#2a6885 bold"),
+                ("answer", "fg:#2a6885"),
             ]
         )
         choice = questionary.select(
@@ -281,10 +281,10 @@ def prompt_for_tools(
             # `highlighted` to the cursor row — overriding both to plain
             # white means only the indicator and the `›` pointer carry
             # signal, instead of the entire row inverting.
-            ("pointer", "fg:cyan bold"),
+            ("pointer", "fg:#2a6885 bold"),
             ("highlighted", "fg:white noinherit"),
             ("selected", "fg:white noinherit"),
-            ("answer", "fg:cyan"),
+            ("answer", "fg:#2a6885"),
         ]
     )
     preselected_set: set[str] | None = (
@@ -344,10 +344,10 @@ def prompt_for_default_agent(available: list[tuple[str, str]]) -> str:
 
     style = questionary.Style(
         [
-            ("pointer", "fg:cyan bold"),
+            ("pointer", "fg:#2a6885 bold"),
             ("highlighted", "fg:white noinherit"),
             ("selected", "fg:white noinherit"),
-            ("answer", "fg:cyan"),
+            ("answer", "fg:#2a6885"),
         ]
     )
     while True:
@@ -389,9 +389,9 @@ def prompt_budget_warn_choice(
     labels for the available choices."""
     style = questionary.Style(
         [
-            ("highlighted", "fg:cyan bold"),
-            ("pointer", "fg:cyan bold"),
-            ("answer", "fg:cyan"),
+            ("highlighted", "fg:#2a6885 bold"),
+            ("pointer", "fg:#2a6885 bold"),
+            ("answer", "fg:#2a6885"),
         ]
     )
     choices = []
@@ -414,9 +414,9 @@ def prompt_budget_warn_choice(
 def prompt_for_choice(prompt: str, options: list[tuple[str, str]]) -> str:
     style = questionary.Style(
         [
-            ("highlighted", "fg:cyan bold"),
-            ("pointer", "fg:cyan bold"),
-            ("answer", "fg:cyan"),
+            ("highlighted", "fg:#2a6885 bold"),
+            ("pointer", "fg:#2a6885 bold"),
+            ("answer", "fg:#2a6885"),
         ]
     )
     choices = [
