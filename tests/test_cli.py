@@ -2574,6 +2574,197 @@ policy:
         assert installed == []
 
 
+class TestManagedMcpRegistration:
+    """A pulled managed config carries `mcp_servers` as data; the pull must
+    register them with the installed+configured agent CLIs so a launch sees
+    them without the interactive `ucode configure mcp` picker."""
+
+    @staticmethod
+    def _stub_external_deps(monkeypatch):
+        import ucode.cli as cli_mod
+
+        monkeypatch.setattr(cli_mod, "normalize_workspace_url", lambda w: w)
+        monkeypatch.setattr(cli_mod, "run_databricks_login", lambda w, p: None)
+        monkeypatch.setattr(cli_mod, "ensure_databricks_auth", lambda w, p=None: None)
+        monkeypatch.setattr(cli_mod, "find_profile_name_for_host", lambda w: None)
+        monkeypatch.setattr(cli_mod, "get_databricks_token", lambda w, p: "token")
+        monkeypatch.setattr(cli_mod, "ensure_ai_gateway_v2", lambda w, t: None)
+        monkeypatch.setattr(cli_mod, "discover_claude_models", lambda w, t: ({}, None))
+        monkeypatch.setattr(cli_mod, "discover_gemini_models", lambda w, t: ([], None))
+        monkeypatch.setattr(cli_mod, "discover_codex_models", lambda w, t: ([], None))
+        monkeypatch.setattr(cli_mod, "build_shared_base_urls", lambda w: {})
+        monkeypatch.setattr(cli_mod, "download_managed_policies", lambda w, p: None)
+        monkeypatch.setattr(cli_mod, "delete_workspace_policy", lambda w: None)
+        monkeypatch.setattr(cli_mod, "save_state", lambda state: None)
+        monkeypatch.setattr(cli_mod, "install_tracing_runtime", lambda state: None)
+        monkeypatch.setattr(cli_mod, "available_mcp_clients", lambda: ["claude"])
+        monkeypatch.setattr(cli_mod, "configured_mcp_clients", lambda state, installed: ["claude"])
+
+    def test_registers_pulled_mcp_servers(self, monkeypatch):
+        import ucode.cli as cli_mod
+
+        ws = "https://example.databricks.com"
+        self._stub_external_deps(monkeypatch)
+        monkeypatch.setattr(
+            cli_mod,
+            "download_managed_config",
+            lambda w, p: {
+                "workspace": ws,
+                "available_tools": ["claude"],
+                "mcp_servers": [
+                    {
+                        "name": "databricks-sql",
+                        "url": f"{ws}/api/2.0/mcp/sql",
+                        "clients": ["claude"],
+                    }
+                ],
+            },
+        )
+        applied: list[tuple] = []
+        monkeypatch.setattr(
+            cli_mod,
+            "apply_mcp_server_changes",
+            lambda original, working, clients: applied.append((original, working, clients)),
+        )
+
+        cli_mod.configure_shared_state(ws)
+
+        assert len(applied) == 1
+        original, working, clients = applied[0]
+        assert original == []
+        assert working[0]["name"] == "databricks-sql"
+        assert clients == ["claude"]
+
+    def test_skips_clients_not_installed(self, monkeypatch):
+        import ucode.cli as cli_mod
+
+        ws = "https://example.databricks.com"
+        self._stub_external_deps(monkeypatch)
+        # gemini is recorded on the server entry but is not installed/configured.
+        monkeypatch.setattr(cli_mod, "available_mcp_clients", lambda: ["claude"])
+        monkeypatch.setattr(cli_mod, "configured_mcp_clients", lambda state, installed: ["claude"])
+        monkeypatch.setattr(
+            cli_mod,
+            "download_managed_config",
+            lambda w, p: {
+                "workspace": ws,
+                "available_tools": ["claude"],
+                "mcp_servers": [
+                    {
+                        "name": "github-mcp",
+                        "url": f"{ws}/api/2.0/mcp/external/github-mcp",
+                        "clients": ["gemini"],
+                    }
+                ],
+            },
+        )
+        applied: list[tuple] = []
+        monkeypatch.setattr(
+            cli_mod,
+            "apply_mcp_server_changes",
+            lambda original, working, clients: applied.append((original, working, clients)),
+        )
+
+        cli_mod.configure_shared_state(ws)
+
+        assert applied == []
+
+    def test_noops_without_managed_pull(self, monkeypatch):
+        import ucode.cli as cli_mod
+
+        self._stub_external_deps(monkeypatch)
+        monkeypatch.setattr(cli_mod, "download_managed_config", lambda w, p: None)
+        applied: list[tuple] = []
+        monkeypatch.setattr(
+            cli_mod,
+            "apply_mcp_server_changes",
+            lambda original, working, clients: applied.append((original, working, clients)),
+        )
+
+        cli_mod.configure_shared_state("https://example.databricks.com")
+
+        assert applied == []
+
+    def test_skips_registration_when_servers_unchanged(self, monkeypatch):
+        # The hot path: a pull brings back the same server set we already saved
+        # for this workspace, so nothing should touch the (slow) agent CLIs.
+        import ucode.cli as cli_mod
+
+        ws = "https://example.databricks.com"
+        self._stub_external_deps(monkeypatch)
+        servers = [
+            {"name": "databricks-sql", "url": f"{ws}/api/2.0/mcp/sql", "clients": ["claude"]}
+        ]
+        # Prior saved state for this workspace already has the same servers.
+        monkeypatch.setattr(
+            cli_mod, "load_state", lambda: {"workspace": ws, "mcp_servers": servers}
+        )
+        monkeypatch.setattr(
+            cli_mod,
+            "download_managed_config",
+            lambda w, p: {
+                "workspace": ws,
+                "available_tools": ["claude"],
+                "mcp_servers": servers,
+            },
+        )
+        applied: list[tuple] = []
+        monkeypatch.setattr(
+            cli_mod,
+            "apply_mcp_server_changes",
+            lambda original, working, clients: applied.append((original, working, clients)),
+        )
+
+        cli_mod.configure_shared_state(ws)
+
+        assert applied == []
+
+    def test_registers_only_changed_servers(self, monkeypatch):
+        # An unchanged server is skipped; a re-published (changed) one and a new
+        # one are re-registered.
+        import ucode.cli as cli_mod
+
+        ws = "https://example.databricks.com"
+        self._stub_external_deps(monkeypatch)
+        prior = [
+            {"name": "databricks-sql", "url": f"{ws}/api/2.0/mcp/sql", "clients": ["claude"]},
+            {
+                "name": "github-mcp",
+                "url": f"{ws}/api/2.0/mcp/external/github-mcp",
+                "clients": ["claude"],
+            },
+        ]
+        monkeypatch.setattr(cli_mod, "load_state", lambda: {"workspace": ws, "mcp_servers": prior})
+        pulled = [
+            # unchanged
+            {"name": "databricks-sql", "url": f"{ws}/api/2.0/mcp/sql", "clients": ["claude"]},
+            # changed URL
+            {
+                "name": "github-mcp",
+                "url": f"{ws}/api/2.0/mcp/external/github-v2",
+                "clients": ["claude"],
+            },
+        ]
+        monkeypatch.setattr(
+            cli_mod,
+            "download_managed_config",
+            lambda w, p: {"workspace": ws, "available_tools": ["claude"], "mcp_servers": pulled},
+        )
+        applied: list[tuple] = []
+        monkeypatch.setattr(
+            cli_mod,
+            "apply_mcp_server_changes",
+            lambda original, working, clients: applied.append((original, working, clients)),
+        )
+
+        cli_mod.configure_shared_state(ws)
+
+        assert len(applied) == 1
+        _, working, _ = applied[0]
+        assert working[0]["name"] == "github-mcp"
+        assert working[0]["url"].endswith("github-v2")
+
+
 class TestPolicyModelOptionsOpencode:
     def test_surfaces_open_responses_kimi_model(self):
         import ucode.cli as cli_mod

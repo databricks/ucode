@@ -64,7 +64,9 @@ from ucode.databricks import (
 from ucode.mcp import (
     MCP_CLIENTS,
     apply_mcp_server_changes,
+    available_mcp_clients,
     configure_mcp_command,
+    configured_mcp_clients,
     purge_cross_workspace_mcp_residue,
     revert_mcp_configs,
 )
@@ -306,6 +308,55 @@ def _union_discovered_models(
         state["opencode_models"] = merged_oc
 
 
+def _register_managed_mcp_servers(state: dict, previous_servers: list[dict]) -> None:
+    """Register the MCP servers carried by a pulled managed config with the
+    locally installed+configured agent CLIs.
+
+    The managed pull only drops ``mcp_servers`` into local state as data; nothing
+    else on the launch path runs ``claude mcp add-json`` (and the equivalents) for
+    them. Mirror ``install_tracing_runtime``: apply on pull so any later agent
+    launch sees the published servers. Each server is registered for the clients
+    recorded on its own entry, intersected with what is installed and configured
+    here, so we never try to drive an agent CLI that isn't present.
+
+    Registering drives the agent CLIs over subprocesses (Claude alone is a
+    remove-across-scopes + add per server — several slow Node spawns each), and
+    this runs on *every* launch. So diff the pulled set against what we last
+    saved for this workspace and no-op when nothing changed, which is the common
+    case: only a first pull or a re-published URL/client change does any work."""
+    servers = state.get("mcp_servers")
+    if not isinstance(servers, list) or not servers:
+        return
+    if servers == previous_servers:
+        return
+    installed = available_mcp_clients()
+    eligible = set(configured_mcp_clients(state, installed))
+    if not eligible:
+        return
+    previous_by_name = {
+        server["name"]: server
+        for server in previous_servers
+        if isinstance(server, dict) and isinstance(server.get("name"), str)
+    }
+    for server in servers:
+        if not isinstance(server, dict):
+            continue
+        name = server.get("name")
+        url = server.get("url")
+        if not isinstance(name, str) or not name or not isinstance(url, str) or not url:
+            continue
+        # Skip servers that are byte-for-byte what we already registered last
+        # pull — only newly-added or changed entries need the CLI round-trip.
+        if previous_by_name.get(name) == server:
+            continue
+        clients = [client for client in (server.get("clients") or []) if client in eligible]
+        if not clients:
+            continue
+        # Re-register from scratch so a re-published URL/auth change is picked
+        # up; apply_mcp_server_changes diffs against an empty "original".
+        apply_mcp_server_changes([], [server], clients)
+
+
 def configure_shared_state(
     workspace: str,
     profile: str | None = None,
@@ -322,7 +373,13 @@ def configure_shared_state(
     don't error out. If ``None``, we resolve it from the host after login.
     """
     workspace = normalize_workspace_url(workspace)
-    previous_workspace = load_state().get("workspace")
+    _prior_state = load_state()
+    previous_workspace = _prior_state.get("workspace")
+    # MCP servers ucode already registered for this workspace; used to skip the
+    # (slow) re-registration when a pull brings back the same set (the norm).
+    previous_mcp_servers = (
+        list(_prior_state.get("mcp_servers") or []) if previous_workspace == workspace else []
+    )
     fetch_all = tools is None
     if force_login:
         run_databricks_login(workspace, profile)
@@ -447,6 +504,12 @@ def configure_shared_state(
     # workspace's agent configs aren't stale.
     if previous_workspace and previous_workspace != workspace:
         purge_cross_workspace_mcp_residue(state, workspace)
+    if remote is not None:
+        # The managed pull only drops `mcp_servers` into state as data — register
+        # them with the agent CLIs now (after the purge above so it can't strip
+        # what we just wrote) so a launch picks up the published servers without
+        # the interactive `ucode configure mcp` picker.
+        _register_managed_mcp_servers(state, previous_mcp_servers)
     # Diagnostic reasons are transient — attach after save_state so they don't
     # land on disk but are available to the caller for this run.
     state["_discovery_reasons"] = {
