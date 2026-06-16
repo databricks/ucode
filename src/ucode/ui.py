@@ -241,13 +241,13 @@ def prompt_for_tools(available: list[tuple[str, str]]) -> list[str]:
     """
     style = questionary.Style(
         [
-            # questionary applies `selected` to *checked* rows and
-            # `highlighted` to the cursor row — overriding both to plain
-            # white means only the indicator and the `›` pointer carry
-            # signal, instead of the entire row inverting.
+            # Theme-agnostic picker: every row renders in the terminal's
+            # default foreground colour (`noinherit` strips the
+            # prompt_toolkit defaults that would otherwise re-colour the
+            # cursor row or every checked row).
             ("pointer", "fg:cyan bold"),
-            ("highlighted", "fg:white noinherit"),
-            ("selected", "fg:white noinherit"),
+            ("highlighted", "noinherit"),
+            ("selected", "noinherit"),
             ("answer", "fg:cyan"),
         ]
     )

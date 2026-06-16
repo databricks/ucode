@@ -464,8 +464,8 @@ def _picker_style() -> questionary.Style:
     return questionary.Style(
         [
             ("pointer", "fg:cyan bold"),
-            ("highlighted", "fg:white noinherit"),
-            ("selected", "fg:white noinherit"),
+            ("highlighted", "noinherit"),
+            ("selected", "noinherit"),
             ("answer", "fg:cyan"),
         ]
     )
