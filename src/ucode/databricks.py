@@ -48,29 +48,59 @@ TOKEN_REFRESH_INTERVAL_SECONDS = 1800
 # how we route it to the OpenCode open-responses provider instead of Codex.
 KIMI_ENDPOINT_SUBSTRING = "kimi"
 
-# UC volume that stores the shared ucode `state.json`. Lives in dedicated
-# top-level `ai_gateway` catalog.
+# UC volume that stores the shared ucode `state.json`. By default it lives in a
+# dedicated top-level `ai_gateway` catalog, but `UCODE_CONFIG_LOCATION=catalog.schema`
+# (e.g. `main.default`) overrides where we upload to and pull from.
 #
 # `ucode export` creates the catalog → schema → volume on first run (each step
 # idempotent) and grants `account users` READ_VOLUME so every developer in the
 # workspace can pull the published config.
-MANAGED_CONFIG_CATALOG = "ai_gateway"
-MANAGED_CONFIG_SCHEMA = "default"
+DEFAULT_CONFIG_CATALOG = "ai_gateway"
+DEFAULT_CONFIG_SCHEMA = "default"
 MANAGED_CONFIG_VOLUME = "ucode_config"
 MANAGED_CONFIG_FILENAME = "state.json"
 MANAGED_POLICIES_FILENAME = "policies.yaml"
-MANAGED_CONFIG_VOLUME_FULL_NAME = (
-    f"{MANAGED_CONFIG_CATALOG}.{MANAGED_CONFIG_SCHEMA}.{MANAGED_CONFIG_VOLUME}"
-)
-MANAGED_CONFIG_VOLUME_PATH = (
-    f"dbfs:/Volumes/{MANAGED_CONFIG_CATALOG}/{MANAGED_CONFIG_SCHEMA}"
-    f"/{MANAGED_CONFIG_VOLUME}/{MANAGED_CONFIG_FILENAME}"
-)
-MANAGED_POLICIES_VOLUME_PATH = (
-    f"dbfs:/Volumes/{MANAGED_CONFIG_CATALOG}/{MANAGED_CONFIG_SCHEMA}"
-    f"/{MANAGED_CONFIG_VOLUME}/{MANAGED_POLICIES_FILENAME}"
-)
 MANAGED_CONFIG_READ_PRINCIPAL = "account users"
+
+# Env var that overrides the managed-config catalog/schema. Value is
+# `catalog.schema` (e.g. `main.default`); the volume name stays `ucode_config`.
+CONFIG_LOCATION_ENV = "UCODE_CONFIG_LOCATION"
+
+
+def managed_config_location() -> tuple[str, str]:
+    """Resolve the (catalog, schema) holding the managed-config volume.
+
+    Honors ``UCODE_CONFIG_LOCATION=catalog.schema`` (e.g. ``main.default``);
+    falls back to ``ai_gateway.default`` when unset."""
+    raw = os.environ.get(CONFIG_LOCATION_ENV, "").strip()
+    if not raw:
+        return DEFAULT_CONFIG_CATALOG, DEFAULT_CONFIG_SCHEMA
+
+    parts = raw.split(".")
+    if len(parts) != 2 or not all(p.strip() for p in parts):
+        raise RuntimeError(
+            f"Invalid {CONFIG_LOCATION_ENV}={raw!r}. Expected `catalog.schema` "
+            "(e.g. `main.default`)."
+        )
+    return parts[0].strip(), parts[1].strip()
+
+
+def managed_config_volume_full_name() -> str:
+    """Fully qualified `catalog.schema.volume` name of the managed-config volume."""
+    catalog, schema = managed_config_location()
+    return f"{catalog}.{schema}.{MANAGED_CONFIG_VOLUME}"
+
+
+def managed_config_volume_path() -> str:
+    """`dbfs:` path of the published `state.json` in the managed-config volume."""
+    catalog, schema = managed_config_location()
+    return f"dbfs:/Volumes/{catalog}/{schema}/{MANAGED_CONFIG_VOLUME}/{MANAGED_CONFIG_FILENAME}"
+
+
+def managed_policies_volume_path() -> str:
+    """`dbfs:` path of the published `policies.yaml` in the managed-config volume."""
+    catalog, schema = managed_config_location()
+    return f"dbfs:/Volumes/{catalog}/{schema}/{MANAGED_CONFIG_VOLUME}/{MANAGED_POLICIES_FILENAME}"
 
 
 def _debug_enabled() -> bool:
@@ -1059,13 +1089,14 @@ def _grant_managed_config_read_access(workspace: str, profile: str | None) -> No
             ]
         }
     )
+    volume_full_name = managed_config_volume_full_name()
     grant_result = run(
         [
             "databricks",
             "grants",
             "update",
             "volume",
-            MANAGED_CONFIG_VOLUME_FULL_NAME,
+            volume_full_name,
             "--json",
             grant_payload,
             *_profile_args(profile),
@@ -1080,34 +1111,37 @@ def _grant_managed_config_read_access(workspace: str, profile: str | None) -> No
         stderr = (grant_result.stderr or "").strip()
         detail = f": {stderr}" if stderr else ""
         raise RuntimeError(
-            f"Failed to grant READ_VOLUME on {MANAGED_CONFIG_VOLUME_FULL_NAME} "
+            f"Failed to grant READ_VOLUME on {volume_full_name} "
             f"to `{MANAGED_CONFIG_READ_PRINCIPAL}`{detail}. The admin running "
             "`ucode export` needs MANAGE on the volume (or to be its owner)."
         )
 
 
 def _ensure_managed_config_volume(workspace: str, profile: str | None) -> None:
-    """Make sure ``ai_gateway.default.ucode_config`` exists and is readable
+    """Make sure the managed-config volume (``ai_gateway.default.ucode_config``
+    by default, or the ``UCODE_CONFIG_LOCATION`` override) exists and is readable
     by every workspace developer."""
     env = build_databricks_cli_env(workspace, profile)
     profile_args = _profile_args(profile)
+    catalog, schema = managed_config_location()
+    volume_full_name = managed_config_volume_full_name()
 
     _run_idempotent_create(
         [
             "databricks",
             "catalogs",
             "create",
-            MANAGED_CONFIG_CATALOG,
+            catalog,
             *profile_args,
         ],
         env,
-        label=f"UC catalog `{MANAGED_CONFIG_CATALOG}`",
+        label=f"UC catalog `{catalog}`",
         required_permission="CREATE CATALOG on the metastore (typically the metastore admin role)",
         exists_probe=[
             "databricks",
             "catalogs",
             "get",
-            MANAGED_CONFIG_CATALOG,
+            catalog,
             *profile_args,
         ],
     )
@@ -1116,18 +1150,18 @@ def _ensure_managed_config_volume(workspace: str, profile: str | None) -> None:
             "databricks",
             "schemas",
             "create",
-            MANAGED_CONFIG_SCHEMA,
-            MANAGED_CONFIG_CATALOG,
+            schema,
+            catalog,
             *profile_args,
         ],
         env,
-        label=f"UC schema `{MANAGED_CONFIG_CATALOG}.{MANAGED_CONFIG_SCHEMA}`",
-        required_permission=f"CREATE SCHEMA on catalog `{MANAGED_CONFIG_CATALOG}`",
+        label=f"UC schema `{catalog}.{schema}`",
+        required_permission=f"CREATE SCHEMA on catalog `{catalog}`",
         exists_probe=[
             "databricks",
             "schemas",
             "get",
-            f"{MANAGED_CONFIG_CATALOG}.{MANAGED_CONFIG_SCHEMA}",
+            f"{catalog}.{schema}",
             *profile_args,
         ],
     )
@@ -1136,22 +1170,20 @@ def _ensure_managed_config_volume(workspace: str, profile: str | None) -> None:
             "databricks",
             "volumes",
             "create",
-            MANAGED_CONFIG_CATALOG,
-            MANAGED_CONFIG_SCHEMA,
+            catalog,
+            schema,
             MANAGED_CONFIG_VOLUME,
             "MANAGED",
             *profile_args,
         ],
         env,
-        label=f"UC volume `{MANAGED_CONFIG_VOLUME_FULL_NAME}`",
-        required_permission=(
-            f"CREATE VOLUME on schema `{MANAGED_CONFIG_CATALOG}.{MANAGED_CONFIG_SCHEMA}`"
-        ),
+        label=f"UC volume `{volume_full_name}`",
+        required_permission=(f"CREATE VOLUME on schema `{catalog}.{schema}`"),
         exists_probe=[
             "databricks",
             "volumes",
             "read",
-            MANAGED_CONFIG_VOLUME_FULL_NAME,
+            volume_full_name,
             *profile_args,
         ],
     )
@@ -1210,7 +1242,7 @@ def upload_managed_config(workspace: str, profile: str | None, state_file: Path)
             f"No local state file to upload at {state_file}. "
             "Run `ucode configure` first to create one."
         )
-    upload_managed_file(workspace, profile, state_file, MANAGED_CONFIG_VOLUME_PATH)
+    upload_managed_file(workspace, profile, state_file, managed_config_volume_path())
 
 
 def upload_managed_policies(workspace: str, profile: str | None, policy_file: Path) -> None:
@@ -1220,7 +1252,7 @@ def upload_managed_policies(workspace: str, profile: str | None, policy_file: Pa
             f"No local policies.yaml to upload at {policy_file}. "
             "Run `ucode setup budget` first to create one."
         )
-    upload_managed_file(workspace, profile, policy_file, MANAGED_POLICIES_VOLUME_PATH)
+    upload_managed_file(workspace, profile, policy_file, managed_policies_volume_path())
 
 
 def download_managed_text(
@@ -1262,7 +1294,7 @@ def download_managed_config(workspace: str, profile: str | None) -> dict | None:
     text = download_managed_text(
         workspace,
         profile,
-        MANAGED_CONFIG_VOLUME_PATH,
+        managed_config_volume_path(),
         debug_label="download_managed_config",
     )
     if text is None:
@@ -1285,7 +1317,7 @@ def download_managed_policies(workspace: str, profile: str | None) -> str | None
     return download_managed_text(
         workspace,
         profile,
-        MANAGED_POLICIES_VOLUME_PATH,
+        managed_policies_volume_path(),
         debug_label="download_managed_policies",
     )
 
@@ -1338,7 +1370,7 @@ def delete_managed_policies(workspace: str, profile: str | None) -> bool:
     return _delete_managed_file(
         workspace,
         profile,
-        MANAGED_POLICIES_VOLUME_PATH,
+        managed_policies_volume_path(),
         debug_label="delete_managed_policies",
     )
 
@@ -1348,7 +1380,7 @@ def delete_managed_config(workspace: str, profile: str | None) -> bool:
     return _delete_managed_file(
         workspace,
         profile,
-        MANAGED_CONFIG_VOLUME_PATH,
+        managed_config_volume_path(),
         debug_label="delete_managed_config",
     )
 

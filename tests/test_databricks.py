@@ -11,7 +11,6 @@ import pytest
 import ucode.databricks as db_mod
 from ucode.databricks import (
     AI_GATEWAY_V2_DOCS_URL,
-    MANAGED_CONFIG_VOLUME_PATH,
     _format_subprocess_result,
     _parse_databricks_cli_version,
     _scrub_databrickscfg,
@@ -28,6 +27,7 @@ from ucode.databricks import (
     list_databricks_apps,
     list_databricks_connections,
     list_genie_spaces,
+    managed_config_volume_path,
     upload_managed_config,
     workspace_hostname,
 )
@@ -626,6 +626,60 @@ class TestListDatabricksApps:
             list_databricks_apps(WS)
 
 
+class TestManagedConfigLocation:
+    def test_defaults_to_ai_gateway_default(self, monkeypatch):
+        monkeypatch.delenv("UCODE_CONFIG_LOCATION", raising=False)
+        assert db_mod.managed_config_location() == ("ai_gateway", "default")
+        assert db_mod.managed_config_volume_full_name() == "ai_gateway.default.ucode_config"
+        assert db_mod.managed_config_volume_path() == (
+            "dbfs:/Volumes/ai_gateway/default/ucode_config/state.json"
+        )
+        assert db_mod.managed_policies_volume_path() == (
+            "dbfs:/Volumes/ai_gateway/default/ucode_config/policies.yaml"
+        )
+
+    def test_env_override_changes_catalog_and_schema(self, monkeypatch):
+        monkeypatch.setenv("UCODE_CONFIG_LOCATION", "main.default")
+        assert db_mod.managed_config_location() == ("main", "default")
+        assert db_mod.managed_config_volume_full_name() == "main.default.ucode_config"
+        assert db_mod.managed_config_volume_path() == (
+            "dbfs:/Volumes/main/default/ucode_config/state.json"
+        )
+        assert db_mod.managed_policies_volume_path() == (
+            "dbfs:/Volumes/main/default/ucode_config/policies.yaml"
+        )
+
+    def test_blank_env_falls_back_to_default(self, monkeypatch):
+        monkeypatch.setenv("UCODE_CONFIG_LOCATION", "   ")
+        assert db_mod.managed_config_location() == ("ai_gateway", "default")
+
+    @pytest.mark.parametrize("bad", ["main", "main.default.extra", "main.", ".default", "."])
+    def test_invalid_format_raises(self, monkeypatch, bad):
+        monkeypatch.setenv("UCODE_CONFIG_LOCATION", bad)
+        with pytest.raises(RuntimeError, match="UCODE_CONFIG_LOCATION"):
+            db_mod.managed_config_location()
+
+    def test_upload_uses_env_override_location(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("UCODE_CONFIG_LOCATION", "main.team")
+        state_file = tmp_path / "state.json"
+        state_file.write_text("{}\n")
+        calls = TestUploadManagedConfig._record_calls(monkeypatch)
+
+        upload_managed_config(WS, None, state_file)
+
+        assert calls[0][:4] == ["databricks", "catalogs", "get", "main"]
+        assert calls[1][:4] == ["databricks", "schemas", "get", "main.team"]
+        assert calls[2][:4] == ["databricks", "volumes", "read", "main.team.ucode_config"]
+        assert calls[3] == [
+            "databricks",
+            "fs",
+            "cp",
+            str(state_file),
+            "dbfs:/Volumes/main/team/ucode_config/state.json",
+            "--overwrite",
+        ]
+
+
 class TestUploadManagedConfig:
     @staticmethod
     def _record_calls(monkeypatch, side_effects=None):
@@ -706,7 +760,7 @@ class TestUploadManagedConfig:
             "fs",
             "cp",
             str(state_file),
-            MANAGED_CONFIG_VOLUME_PATH,
+            managed_config_volume_path(),
             "--overwrite",
         ]
 
@@ -888,7 +942,7 @@ class TestDownloadManagedConfig:
 
         assert len(calls) == 1
         assert calls[0][:3] == ["databricks", "fs", "cat"]
-        assert MANAGED_CONFIG_VOLUME_PATH in calls[0]
+        assert managed_config_volume_path() in calls[0]
 
     def test_returns_none_when_file_missing(self, monkeypatch):
         # `databricks fs cat` exits non-zero with a NOT_FOUND-style message.

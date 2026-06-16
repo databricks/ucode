@@ -38,8 +38,6 @@ from ucode.agents import (
 from ucode.agents.pi import PI_SETTINGS_BACKUP_PATH, PI_SETTINGS_PATH
 from ucode.config_io import restore_file, set_dry_run
 from ucode.databricks import (
-    MANAGED_CONFIG_VOLUME_PATH,
-    MANAGED_POLICIES_VOLUME_PATH,
     build_shared_base_urls,
     delete_managed_config,
     delete_managed_policies,
@@ -56,6 +54,8 @@ from ucode.databricks import (
     get_databricks_token,
     install_databricks_cli,
     is_workspace_admin,
+    managed_config_volume_path,
+    managed_policies_volume_path,
     normalize_workspace_url,
     run_databricks_login,
     upload_managed_config,
@@ -712,7 +712,9 @@ def _clear_managed_policy(workspace: str, profile: str | None) -> tuple[bool, bo
         with spinner("Removing published policies.yaml from Unity Catalog..."):
             uc_removed = delete_managed_policies(workspace, profile)
     except RuntimeError as exc:
-        print_warning(f"Could not remove {MANAGED_POLICIES_VOLUME_PATH} from Unity Catalog: {exc}")
+        print_warning(
+            f"Could not remove {managed_policies_volume_path()} from Unity Catalog: {exc}"
+        )
     return local_existed, uc_removed
 
 
@@ -1546,6 +1548,13 @@ def configure(
             help="Also enable Tracing for the configured workspace(s).",
         ),
     ] = False,
+    skip_validate: Annotated[
+        bool,
+        typer.Option(
+            "--skip-validate",
+            help="Don't validate configured agents after writing their config.",
+        ),
+    ] = False,
 ) -> None:
     """Configure workspace URL and AI Gateway.
 
@@ -1570,31 +1579,39 @@ def configure(
                 prompt_optional_updates=prompt_optional_updates,
             )
             if workspace_entries is None:
-                configure_workspace_command(tool)
+                configure_workspace_command(tool, validate=not skip_validate)
             else:
-                configure_workspace_command(tool, workspaces=workspace_entries)
+                configure_workspace_command(
+                    tool, workspaces=workspace_entries, validate=not skip_validate
+                )
         elif agents is not None:
             selected_tools = _parse_agents_option(agents)
             if workspace_entries is None:
                 configure_workspace_command(
                     selected_tools=selected_tools,
                     prompt_optional_updates=prompt_optional_updates,
+                    validate=not skip_validate,
                 )
             else:
                 configure_workspace_command(
                     selected_tools=selected_tools,
                     workspaces=workspace_entries,
                     prompt_optional_updates=prompt_optional_updates,
+                    validate=not skip_validate,
                 )
         else:
             # Tool binaries are installed after the user picks which agents
             # they want, in configure_workspace_command.
             if workspace_entries is None:
-                configure_workspace_command(prompt_optional_updates=prompt_optional_updates)
+                configure_workspace_command(
+                    prompt_optional_updates=prompt_optional_updates,
+                    validate=not skip_validate,
+                )
             else:
                 configure_workspace_command(
                     workspaces=workspace_entries,
                     prompt_optional_updates=prompt_optional_updates,
+                    validate=not skip_validate,
                 )
         if tracing:
             # The workspaces were just configured, so enable tracing for them
@@ -2213,7 +2230,7 @@ def setup_cmd(
                 if local_removed:
                     print_success("Local policies.yaml cleared")
                 if uc_removed:
-                    print_success(f"Removed {MANAGED_POLICIES_VOLUME_PATH}")
+                    print_success(f"Removed {managed_policies_volume_path()}")
             else:
                 print_note("Skipping budget setup — run `ucode setup budget` anytime to set one.")
 
@@ -2286,7 +2303,7 @@ def export_cmd() -> None:
         # Preview what's about to be published before touching UC.
         print_section("Export")
         print_kv("Workspace", workspace)
-        print_kv("Destination", MANAGED_CONFIG_VOLUME_PATH)
+        print_kv("Destination", managed_config_volume_path())
         _render_configuration_panel(state)
 
         if not prompt_yes_no("Proceed with upload to Unity Catalog?"):
@@ -2308,13 +2325,13 @@ def export_cmd() -> None:
 
             with spinner("Uploading state.json to Unity Catalog..."):
                 upload_managed_config(workspace, profile, tmp_path)
-            print_success(f"state.json uploaded to {MANAGED_CONFIG_VOLUME_PATH}")
+            print_success(f"state.json uploaded to {managed_config_volume_path()}")
             policy_path = policy_cache_path(workspace)
             if policy_path.is_file():
-                print_kv("Policy destination", MANAGED_POLICIES_VOLUME_PATH)
+                print_kv("Policy destination", managed_policies_volume_path())
                 with spinner("Uploading policies.yaml to Unity Catalog..."):
                     upload_managed_policies(workspace, profile, policy_path)
-                print_success(f"policies.yaml uploaded to {MANAGED_POLICIES_VOLUME_PATH}")
+                print_success(f"policies.yaml uploaded to {managed_policies_volume_path()}")
             else:
                 print_note("No local policies.yaml found — run `ucode setup budget` to create one.")
         finally:
@@ -2377,8 +2394,8 @@ def delete_configuration_cmd() -> None:
 
         print_section("Delete configuration")
         print_kv("Workspace", workspace)
-        print_kv("Config file", MANAGED_CONFIG_VOLUME_PATH)
-        print_kv("Policy file", MANAGED_POLICIES_VOLUME_PATH)
+        print_kv("Config file", managed_config_volume_path())
+        print_kv("Policy file", managed_policies_volume_path())
         print_warning(
             "This removes the published config from Unity Catalog. Developers in "
             "this workspace will no longer pull it on `ucode configure`."
@@ -2400,13 +2417,13 @@ def delete_configuration_cmd() -> None:
             policy_removed = delete_managed_policies(workspace, profile)
 
         if config_removed:
-            print_success(f"Removed {MANAGED_CONFIG_VOLUME_PATH}")
+            print_success(f"Removed {managed_config_volume_path()}")
         else:
-            print_note(f"No published config found at {MANAGED_CONFIG_VOLUME_PATH}")
+            print_note(f"No published config found at {managed_config_volume_path()}")
         if policy_removed:
-            print_success(f"Removed {MANAGED_POLICIES_VOLUME_PATH}")
+            print_success(f"Removed {managed_policies_volume_path()}")
         else:
-            print_note(f"No published policy found at {MANAGED_POLICIES_VOLUME_PATH}")
+            print_note(f"No published policy found at {managed_policies_volume_path()}")
 
         if not config_removed and not policy_removed:
             print_note(

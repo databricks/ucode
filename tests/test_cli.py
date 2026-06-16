@@ -13,7 +13,7 @@ from typer.testing import CliRunner
 
 from ucode import cli
 from ucode.cli import app
-from ucode.databricks import MANAGED_CONFIG_VOLUME_PATH, MANAGED_POLICIES_VOLUME_PATH
+from ucode.databricks import managed_config_volume_path, managed_policies_volume_path
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
@@ -1176,7 +1176,7 @@ class TestExport:
         assert upload_args[0] == "https://example.databricks.com"
         assert upload_args[1] == "my-profile"
         assert "state.json uploaded" in result.output
-        assert MANAGED_CONFIG_VOLUME_PATH in result.output
+        assert managed_config_volume_path() in result.output
         assert "No local policies.yaml found" in result.output
 
     def test_uploads_flat_single_workspace_blob(self):
@@ -1236,8 +1236,8 @@ class TestExport:
         assert mock_policy_upload.call_args[0][0] == "https://example.databricks.com"
         assert mock_policy_upload.call_args[0][1] == "my-profile"
         assert mock_policy_upload.call_args[0][2] == mock_policy_path.return_value
-        assert MANAGED_CONFIG_VOLUME_PATH in result.output
-        assert MANAGED_POLICIES_VOLUME_PATH in result.output
+        assert managed_config_volume_path() in result.output
+        assert managed_policies_volume_path() in result.output
         assert "state.json uploaded" in result.output
         assert "policies.yaml uploaded" in result.output
 
@@ -1381,8 +1381,8 @@ class TestDeleteConfiguration:
         assert result.exit_code == 0, result.output
         mock_config.assert_called_once_with(self._WORKSPACE, "my-profile")
         mock_policy.assert_called_once_with(self._WORKSPACE, "my-profile")
-        assert MANAGED_CONFIG_VOLUME_PATH in result.output
-        assert MANAGED_POLICIES_VOLUME_PATH in result.output
+        assert managed_config_volume_path() in result.output
+        assert managed_policies_volume_path() in result.output
         assert "Managed configuration deleted" in result.output
 
     def test_prompts_for_workspace_before_deleting(self):
@@ -1861,7 +1861,7 @@ class TestConfigureAgentFlag:
         ):
             result = runner.invoke(app, ["configure"])
         assert result.exit_code == 0, result.output
-        mock_cfg.assert_called_once_with(prompt_optional_updates=True)
+        mock_cfg.assert_called_once_with(prompt_optional_updates=True, validate=True)
 
     def test_agents_flag_calls_configure_with_tools(self):
         with (
@@ -1873,7 +1873,7 @@ class TestConfigureAgentFlag:
         assert result.exit_code == 0, result.output
         mock_install.assert_not_called()
         mock_cfg.assert_called_once_with(
-            selected_tools=["claude", "codex"], prompt_optional_updates=True
+            selected_tools=["claude", "codex"], prompt_optional_updates=True, validate=True
         )
 
     def test_agents_flag_normalizes_aliases_and_dedupes(self):
@@ -1885,7 +1885,7 @@ class TestConfigureAgentFlag:
             result = runner.invoke(app, ["configure", "--agents", " claude-code, codex,claude "])
         assert result.exit_code == 0, result.output
         mock_cfg.assert_called_once_with(
-            selected_tools=["claude", "codex"], prompt_optional_updates=True
+            selected_tools=["claude", "codex"], prompt_optional_updates=True, validate=True
         )
 
     def test_workspaces_flag_calls_configure_with_workspaces(self):
@@ -1909,6 +1909,7 @@ class TestConfigureAgentFlag:
                 ("https://second.databricks.com", None),
             ],
             prompt_optional_updates=True,
+            validate=True,
         )
 
     def test_agents_and_workspaces_flags_call_configure_with_both(self):
@@ -1926,6 +1927,7 @@ class TestConfigureAgentFlag:
             selected_tools=["claude", "codex"],
             workspaces=[("https://first.com", None)],
             prompt_optional_updates=True,
+            validate=True,
         )
 
     def test_agent_and_workspaces_flags_call_configure_with_both(self):
@@ -1942,7 +1944,9 @@ class TestConfigureAgentFlag:
         mock_install.assert_called_once_with(
             "claude", strict=True, update_existing=True, prompt_optional_updates=True
         )
-        mock_cfg.assert_called_once_with("claude", workspaces=[("https://first.com", None)])
+        mock_cfg.assert_called_once_with(
+            "claude", workspaces=[("https://first.com", None)], validate=True
+        )
 
     def test_agent_flag_calls_configure_with_tool(self):
         with (
@@ -1955,7 +1959,7 @@ class TestConfigureAgentFlag:
         mock_install.assert_called_once_with(
             "claude", strict=True, update_existing=True, prompt_optional_updates=True
         )
-        mock_cfg.assert_called_once_with("claude")
+        mock_cfg.assert_called_once_with("claude", validate=True)
 
     def test_skip_update_flag_disables_optional_update_prompt(self):
         with (
@@ -1965,7 +1969,7 @@ class TestConfigureAgentFlag:
         ):
             result = runner.invoke(app, ["--skip-update", "configure"])
         assert result.exit_code == 0, result.output
-        mock_cfg.assert_called_once_with(prompt_optional_updates=False)
+        mock_cfg.assert_called_once_with(prompt_optional_updates=False, validate=True)
 
     def test_skip_update_flag_with_agent_skips_optional_update(self):
         with (
@@ -1988,7 +1992,7 @@ class TestConfigureAgentFlag:
             result = runner.invoke(app, ["--skip-update", "configure", "--agents", "claude,codex"])
         assert result.exit_code == 0, result.output
         mock_cfg.assert_called_once_with(
-            selected_tools=["claude", "codex"], prompt_optional_updates=False
+            selected_tools=["claude", "codex"], prompt_optional_updates=False, validate=True
         )
 
     def test_agent_flag_normalizes_alias(self):
@@ -1999,7 +2003,27 @@ class TestConfigureAgentFlag:
         ):
             result = runner.invoke(app, ["configure", "--agent", "claude-code"])
         assert result.exit_code == 0, result.output
-        mock_cfg.assert_called_once_with("claude")
+        mock_cfg.assert_called_once_with("claude", validate=True)
+
+    def test_skip_validate_flag_disables_validation(self):
+        with (
+            patch("ucode.cli.install_databricks_cli"),
+            patch("ucode.cli.install_tool_binary"),
+            patch("ucode.cli.configure_workspace_command") as mock_cfg,
+        ):
+            result = runner.invoke(app, ["configure", "--skip-validate"])
+        assert result.exit_code == 0, result.output
+        mock_cfg.assert_called_once_with(prompt_optional_updates=True, validate=False)
+
+    def test_skip_validate_flag_with_agent_disables_validation(self):
+        with (
+            patch("ucode.cli.install_databricks_cli"),
+            patch("ucode.cli.install_tool_binary"),
+            patch("ucode.cli.configure_workspace_command") as mock_cfg,
+        ):
+            result = runner.invoke(app, ["configure", "--agent", "claude", "--skip-validate"])
+        assert result.exit_code == 0, result.output
+        mock_cfg.assert_called_once_with("claude", validate=False)
 
     def test_upgrade_runs_uv_tool_install(self):
         with patch("subprocess.run") as mock_run:
