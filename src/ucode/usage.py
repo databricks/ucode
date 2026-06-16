@@ -330,6 +330,32 @@ def ensure_local_usage_sync_started_at(
     return parsed_now
 
 
+def set_usage_metadata_if_changed(
+    key: str, value: str, db_path: Path = LOCAL_USAGE_DB_PATH
+) -> bool:
+    """Atomically set ``key`` to ``value`` if it changed.
+
+    Returns True for a fresh insert or update to a new value, and False when
+    the row already held ``value``. The conditional UPSERT keeps the check and
+    write in one SQLite statement, so concurrent hook invocations serialize on
+    the write and only one caller observes a change for a given new value.
+    """
+    ensure_local_usage_schema(db_path)
+    with _connect_local_usage_db(db_path) as conn:
+        with conn:
+            before = conn.total_changes
+            conn.execute(
+                """
+                INSERT INTO usage_metadata (key, value)
+                VALUES (?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                WHERE usage_metadata.value <> excluded.value
+                """,
+                (key, value),
+            )
+            return conn.total_changes != before
+
+
 def _env_float(name: str, default: float, *, minimum: float | None = None) -> float:
     raw = os.environ.get(name)
     if raw is None or not raw.strip():

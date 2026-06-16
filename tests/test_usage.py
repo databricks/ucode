@@ -406,6 +406,15 @@ class TestRenderUsageSummary:
 
 
 class TestLocalUsageLedger:
+    def test_set_usage_metadata_if_changed_atomic_compare_and_set(self, tmp_path):
+        db_path = tmp_path / "usage.sqlite"
+
+        assert usage_mod.set_usage_metadata_if_changed("k", "warn:1.00", db_path=db_path)
+        assert not usage_mod.set_usage_metadata_if_changed("k", "warn:1.00", db_path=db_path)
+        assert not usage_mod.set_usage_metadata_if_changed("k", "warn:1.00", db_path=db_path)
+        assert usage_mod.set_usage_metadata_if_changed("k", "warn:1.50", db_path=db_path)
+        assert not usage_mod.set_usage_metadata_if_changed("k", "warn:1.50", db_path=db_path)
+
     def test_records_delta_events_and_aggregates_across_sessions(self, tmp_path):
         db_path = tmp_path / "usage.sqlite"
 

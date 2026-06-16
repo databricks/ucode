@@ -166,6 +166,7 @@ class TestSubcommandRouting:
             patches[5],
             patches[6],
             patch("ucode.cli.local_budget_status", return_value=budget_status),
+            patch("ucode.cli._in_watch_pane", return_value=False),
         ):
             result = runner.invoke(app, ["codex"])
 
@@ -202,6 +203,7 @@ class TestSubcommandRouting:
             patches[5],
             patches[6],
             patch("ucode.cli.local_budget_status", return_value=budget_status),
+            patch("ucode.cli._in_watch_pane", return_value=False),
         ):
             result = runner.invoke(app, ["opencode"])
 
@@ -1481,7 +1483,7 @@ class TestAutoConfigureOnFirstRun:
             patch("ucode.cli.ensure_bootstrap_dependencies") as mock_bootstrap,
             patch("ucode.cli.load_state", return_value=empty_state),
             patch("ucode.cli._auto_configure_tool") as mock_auto,
-            patch("ucode.cli.configure_shared_state", return_value=MINIMAL_STATE),
+            patch("ucode.cli.configure_shared_state", return_value=MINIMAL_STATE) as mock_cfg,
             patch(
                 "ucode.cli.ensure_provider_state",
                 return_value=configured_state,
@@ -1499,6 +1501,7 @@ class TestAutoConfigureOnFirstRun:
             "claude", update_existing=True, prompt_optional_updates=True
         )
         mock_auto.assert_called_once_with("claude")
+        mock_cfg.assert_not_called()
 
     def test_triggers_when_tool_not_in_available_tools(self):
         """Auto-configure runs when workspace exists but the tool wasn't configured."""
@@ -1507,7 +1510,7 @@ class TestAutoConfigureOnFirstRun:
             patch("ucode.cli.ensure_bootstrap_dependencies") as mock_bootstrap,
             patch("ucode.cli.load_state", return_value=state_without_tool),
             patch("ucode.cli._auto_configure_tool") as mock_auto,
-            patch("ucode.cli.configure_shared_state", return_value=MINIMAL_STATE),
+            patch("ucode.cli.configure_shared_state", return_value=MINIMAL_STATE) as mock_cfg,
             patch(
                 "ucode.cli.ensure_provider_state",
                 return_value=MINIMAL_STATE,
@@ -1525,6 +1528,7 @@ class TestAutoConfigureOnFirstRun:
             "claude", update_existing=True, prompt_optional_updates=True
         )
         mock_auto.assert_called_once_with("claude")
+        mock_cfg.assert_not_called()
 
     def test_skipped_when_already_configured(self):
         """Auto-configure is skipped when workspace and tool are already set up."""
@@ -1532,7 +1536,7 @@ class TestAutoConfigureOnFirstRun:
             patch("ucode.cli.ensure_bootstrap_dependencies") as mock_bootstrap,
             patch("ucode.cli.load_state", return_value=MINIMAL_STATE),
             patch("ucode.cli._auto_configure_tool") as mock_auto,
-            patch("ucode.cli.configure_shared_state", return_value=MINIMAL_STATE),
+            patch("ucode.cli.configure_shared_state", return_value=MINIMAL_STATE) as mock_cfg,
             patch(
                 "ucode.cli.ensure_provider_state",
                 return_value=MINIMAL_STATE,
@@ -1549,6 +1553,7 @@ class TestAutoConfigureOnFirstRun:
             "claude", update_existing=False, prompt_optional_updates=True
         )
         mock_auto.assert_not_called()
+        mock_cfg.assert_called_once()
 
 
 class TestPassthroughArgs:
@@ -1649,7 +1654,7 @@ class TestWatchFlag:
             ["select-pane", "-L"],
         )
 
-    def test_watch_default_interval_is_5(self):
+    def test_watch_default_interval_is_2(self):
         with (
             patch("ucode.cli._tmux_available", return_value=True),
             patch("ucode.cli._in_tmux", return_value=False),
@@ -1658,7 +1663,7 @@ class TestWatchFlag:
             mock_run.return_value.returncode = 0
             runner.invoke(app, ["claude", "--watch"])
         argv = self._tmux_argv(mock_run)
-        assert any("budget-watch --interval 5" in part for part in argv)
+        assert any("budget-watch --interval 2" in part for part in argv)
 
     def test_watch_interval_custom(self):
         with (

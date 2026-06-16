@@ -12,10 +12,12 @@ from typing import cast
 
 from ucode.usage import (
     LOCAL_USAGE_DB_PATH,
+    _coerce_cost,
     ensure_local_usage_sync_started_at,
     format_local_budget_hook_status,
     local_budget_status,
     record_local_usage_snapshot,
+    set_usage_metadata_if_changed,
 )
 
 CODEX_STATE_DB_PATH = Path.home() / ".codex" / "state_5.sqlite"
@@ -557,12 +559,20 @@ def _hook_response_for_budget(
     can_block: bool = False,
     quiet_warn: bool = False,
     message: str | None = None,
+    warn_dedup_key: str | None = None,
 ) -> dict[str, object]:
     state = str(status.get("state") or "ok")
     behavior = status.get("on_budget_exhausted") or "block"
     if message is None:
         message = format_local_budget_hook_status(status)
     if state in {"warn", "exceeded"} and (state == "warn" or behavior == "warn"):
+        if warn_dedup_key is not None:
+            # Codex fires its hooks several times per event, each with a
+            # different session id. Dedup only the warning surface; enforcement
+            # below must continue to run on every prompt-submit invocation.
+            spend_marker = f"{state}:{_coerce_cost(status.get('spend_usd')):.2f}"
+            if not set_usage_metadata_if_changed(warn_dedup_key, spend_marker):
+                return {}
         if quiet_warn:
             return {
                 "hookSpecificOutput": {
@@ -653,6 +663,7 @@ def codex_usage_hook(
             can_block=True,
             quiet_warn=True,
             message=_codex_budget_message(status),
+            warn_dedup_key="codex_prompt_submit_last_warn",
         )
     if event == "stop":
         # Fires at turn end so spend from the turn that just finished surfaces
@@ -660,8 +671,15 @@ def codex_usage_hook(
         # and the turn is already over, so never return continue:False here.
         sync_codex_usage_from_state(workspace=workspace, session_id=session_id)
         status = local_budget_status("codex")
-        if str(status.get("state") or "ok") in {"warn", "exceeded"}:
-            return {"systemMessage": _codex_budget_message(status)}
+        state = str(status.get("state") or "ok")
+        if state in {"warn", "exceeded"}:
+            # Codex fires the Stop hook several times per turn, each invocation
+            # carrying a different session id, so dedup on the global spend
+            # snapshot instead of the hook payload.
+            spend_marker = f"{state}:{_coerce_cost(status.get('spend_usd')):.2f}"
+            if set_usage_metadata_if_changed("codex_stop_last_warn", spend_marker):
+                return {"systemMessage": _codex_budget_message(status)}
+            return {}
         return {}
     # The notify callback only records spend — it must not surface the budget
     # warning, or the message would appear twice (once here, once from the

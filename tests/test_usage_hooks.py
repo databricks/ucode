@@ -6,7 +6,24 @@ import json
 import sqlite3
 from datetime import UTC, datetime
 
+import pytest
+
 from ucode import usage_hooks
+
+
+@pytest.fixture
+def codex_budget_marker_store(monkeypatch):
+    """In-memory CAS replacement for Codex warning dedup tests."""
+    store: dict[str, str] = {}
+
+    def _cas(key, value):
+        if store.get(key) == value:
+            return False
+        store[key] = value
+        return True
+
+    monkeypatch.setattr(usage_hooks, "set_usage_metadata_if_changed", _cas)
+    return store
 
 
 def test_claude_transcript_usage_sums_assistant_usage(tmp_path):
@@ -299,7 +316,9 @@ def test_codex_prompt_submit_blocks_with_valid_prompt_json(monkeypatch):
     assert "Window:" not in response["reason"]
 
 
-def test_codex_prompt_submit_warns_when_budget_exceeded_policy_warn(monkeypatch):
+def test_codex_prompt_submit_warns_when_budget_exceeded_policy_warn(
+    monkeypatch, codex_budget_marker_store
+):
     monkeypatch.setattr(usage_hooks, "sync_codex_usage_from_state", lambda **kwargs: 0)
     monkeypatch.setattr(
         usage_hooks,
@@ -362,7 +381,9 @@ def test_codex_prompt_submit_allows_when_budget_exceeded_policy_allow(monkeypatc
     assert response == {}
 
 
-def test_codex_prompt_submit_returns_warning_additional_context(monkeypatch):
+def test_codex_prompt_submit_returns_warning_additional_context(
+    monkeypatch, codex_budget_marker_store
+):
     monkeypatch.setattr(usage_hooks, "sync_codex_usage_from_state", lambda **kwargs: 0)
     monkeypatch.setattr(
         usage_hooks,
@@ -396,7 +417,69 @@ def test_codex_prompt_submit_returns_warning_additional_context(monkeypatch):
     }
 
 
-def test_codex_stop_warns_visibly_at_turn_end(monkeypatch):
+def test_codex_prompt_submit_dedupes_repeat_warning_across_sessions(
+    monkeypatch, codex_budget_marker_store
+):
+    monkeypatch.setattr(usage_hooks, "sync_codex_usage_from_state", lambda **kwargs: 0)
+    spend = {"value": 0.90}
+    monkeypatch.setattr(
+        usage_hooks,
+        "local_budget_status",
+        lambda tool: {
+            "configured": True,
+            "state": "warn",
+            "tool": tool,
+            "spend_usd": spend["value"],
+            "limit_usd": 1.0,
+            "days": 1,
+            "remaining_usd": round(1.0 - spend["value"], 2),
+            "total_tokens": 120,
+        },
+    )
+
+    def submit(session):
+        return usage_hooks.codex_usage_hook(
+            model="gpt-5.5", event="prompt-submit", payload={"session_id": session}
+        )
+
+    first = submit("fire-1")
+    second = submit("fire-2")
+    spend["value"] = 0.95
+    third = submit("fire-3")
+
+    assert "hookSpecificOutput" in first
+    assert second == {}
+    assert "hookSpecificOutput" in third
+
+
+def test_codex_prompt_submit_block_is_never_deduped(monkeypatch, codex_budget_marker_store):
+    monkeypatch.setattr(usage_hooks, "sync_codex_usage_from_state", lambda **kwargs: 0)
+    monkeypatch.setattr(
+        usage_hooks,
+        "local_budget_status",
+        lambda tool: {
+            "configured": True,
+            "state": "exceeded",
+            "tool": tool,
+            "spend_usd": 2.0,
+            "limit_usd": 1.0,
+            "days": 1,
+            "remaining_usd": 0.0,
+            "total_tokens": 120,
+            "on_budget_exhausted": "block",
+        },
+    )
+
+    def submit(session):
+        return usage_hooks.codex_usage_hook(
+            model="gpt-5.5", event="prompt-submit", payload={"session_id": session}
+        )
+
+    assert submit("fire-1")["decision"] == "block"
+    assert submit("fire-2")["decision"] == "block"
+
+
+def test_codex_stop_warns_visibly_at_turn_end(monkeypatch, codex_budget_marker_store):
     # The Stop hook fires at turn end and must surface the warning visibly
     # (systemMessage), not silently inject it like the prompt-submit hook does.
     synced = []
@@ -430,7 +513,7 @@ def test_codex_stop_warns_visibly_at_turn_end(monkeypatch):
     assert response["systemMessage"].startswith("⚠️  Daily budget — nearing limit")
 
 
-def test_codex_stop_does_not_block_when_budget_exceeded(monkeypatch):
+def test_codex_stop_does_not_block_when_budget_exceeded(monkeypatch, codex_budget_marker_store):
     # Blocking belongs to prompt-submit; the turn is already over, so Stop only
     # warns even when the budget is exceeded under a block policy.
     monkeypatch.setattr(usage_hooks, "sync_codex_usage_from_state", lambda **kwargs: 0)
@@ -459,6 +542,39 @@ def test_codex_stop_does_not_block_when_budget_exceeded(monkeypatch):
     assert "decision" not in response
     assert response.get("continue") is not False
     assert "Daily budget — limit exceeded" in response["systemMessage"]
+
+
+def test_codex_stop_dedupes_repeat_warning_across_sessions(monkeypatch, codex_budget_marker_store):
+    monkeypatch.setattr(usage_hooks, "sync_codex_usage_from_state", lambda **kwargs: 0)
+    spend = {"value": 0.90}
+    monkeypatch.setattr(
+        usage_hooks,
+        "local_budget_status",
+        lambda tool: {
+            "configured": True,
+            "state": "warn",
+            "tool": tool,
+            "spend_usd": spend["value"],
+            "limit_usd": 1.0,
+            "days": 1,
+            "remaining_usd": round(1.0 - spend["value"], 2),
+            "total_tokens": 120,
+        },
+    )
+
+    def stop(session):
+        return usage_hooks.codex_usage_hook(
+            model="gpt-5.5", event="stop", payload={"session_id": session}
+        )
+
+    first = stop("fire-1")
+    second = stop("fire-2")
+    spend["value"] = 0.95
+    third = stop("fire-3")
+
+    assert "systemMessage" in first
+    assert second == {}
+    assert "systemMessage" in third
 
 
 def test_codex_hook_records_session_snapshot(tmp_path, monkeypatch):

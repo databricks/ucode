@@ -1205,7 +1205,7 @@ def _apply_budget_gate(
     return "default", None, None
 
 
-DEFAULT_WATCH_INTERVAL = 5
+DEFAULT_WATCH_INTERVAL = 2
 WATCH_AGENT_MIN_WIDTH = 88
 WATCH_PANE_PREFERRED_WIDTH = 56
 # Hard floor for the watch pane: narrow enough to fit a zoomed-in terminal, but
@@ -1367,11 +1367,12 @@ def _launch_tool(
         if needs_auto_configure:
             _auto_configure_tool(tool)
         state = ensure_provider_state(tool)
-        if not _budget_redirected:
+        if not _budget_redirected and not needs_auto_configure:
             # Re-fetch model lists on every launch so newly-added Databricks
-            # endpoints show up without a manual `ucode configure` (and so that
-            # tools like pi which read multiple model bundles never run on
-            # stale state from before a tool added a new bundle).
+            # endpoints show up without a manual `ucode configure`. Skip when
+            # we just auto-configured above: `_auto_configure_tool` already ran
+            # `configure_shared_state` with fresh discovery, so re-running it
+            # only duplicates the managed-config output.
             state = configure_shared_state(
                 state["workspace"], profile=state.get("profile"), tools=[tool]
             )
