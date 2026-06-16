@@ -21,33 +21,53 @@ class TestClaudeSpec:
 
 
 class TestRenderOverlay:
-    def test_sets_anthropic_model(self):
-        overlay, _ = claude.render_overlay(WS, "databricks-claude-sonnet-4")
-        assert overlay["env"]["ANTHROPIC_MODEL"] == "databricks-claude-sonnet-4"
+    def test_does_not_set_anthropic_model_env(self):
+        # We deliberately don't pin ANTHROPIC_MODEL: when set, Claude Code's
+        # /model picker surfaces a duplicate catalog row on top of the family
+        # alias from ANTHROPIC_DEFAULT_OPUS_MODEL. Default falls back to the
+        # active family alias instead.
+        overlay, _ = claude.render_overlay(
+            WS, "databricks-claude-opus-4-7", claude_models={"opus": "databricks-claude-opus-4-7"}
+        )
+        assert "ANTHROPIC_MODEL" not in overlay["env"]
 
     def test_adds_1m_suffix_for_opus_4_6_and_later(self):
-        overlay, _ = claude.render_overlay(WS, "databricks-claude-opus-4-7")
-        assert overlay["env"]["ANTHROPIC_MODEL"] == "databricks-claude-opus-4-7[1m]"
+        overlay, _ = claude.render_overlay(
+            WS, "s4", claude_models={"opus": "databricks-claude-opus-4-7"}
+        )
+        assert overlay["env"]["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "databricks-claude-opus-4-7[1m]"
 
     def test_adds_1m_suffix_for_sonnet_4_6_and_later(self):
-        overlay, _ = claude.render_overlay(WS, "databricks-claude-sonnet-4-7")
-        assert overlay["env"]["ANTHROPIC_MODEL"] == "databricks-claude-sonnet-4-7[1m]"
+        overlay, _ = claude.render_overlay(
+            WS, "s4", claude_models={"sonnet": "databricks-claude-sonnet-4-7"}
+        )
+        assert (
+            overlay["env"]["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "databricks-claude-sonnet-4-7[1m]"
+        )
 
-    def test_does_not_add_1m_suffix_for_other_models(self):
-        overlay, _ = claude.render_overlay(WS, "databricks-claude-haiku-4-6")
-        assert overlay["env"]["ANTHROPIC_MODEL"] == "databricks-claude-haiku-4-6"
+    def test_does_not_add_1m_suffix_for_haiku(self):
+        overlay, _ = claude.render_overlay(
+            WS, "s4", claude_models={"haiku": "databricks-claude-haiku-4-6"}
+        )
+        assert overlay["env"]["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "databricks-claude-haiku-4-6"
 
     def test_does_not_duplicate_1m_suffix(self):
-        overlay, _ = claude.render_overlay(WS, "databricks-claude-opus-4-7[1m]")
-        assert overlay["env"]["ANTHROPIC_MODEL"] == "databricks-claude-opus-4-7[1m]"
+        overlay, _ = claude.render_overlay(
+            WS, "s4", claude_models={"opus": "databricks-claude-opus-4-7[1m]"}
+        )
+        assert overlay["env"]["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "databricks-claude-opus-4-7[1m]"
 
     def test_adds_1m_suffix_for_model_services_name(self):
-        overlay, _ = claude.render_overlay(WS, "system.ai.claude-opus-4-8")
-        assert overlay["env"]["ANTHROPIC_MODEL"] == "system.ai.claude-opus-4-8[1m]"
+        overlay, _ = claude.render_overlay(
+            WS, "s4", claude_models={"opus": "system.ai.claude-opus-4-8"}
+        )
+        assert overlay["env"]["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "system.ai.claude-opus-4-8[1m]"
 
     def test_no_1m_suffix_for_model_services_haiku(self):
-        overlay, _ = claude.render_overlay(WS, "system.ai.claude-haiku-4-6")
-        assert overlay["env"]["ANTHROPIC_MODEL"] == "system.ai.claude-haiku-4-6"
+        overlay, _ = claude.render_overlay(
+            WS, "s4", claude_models={"haiku": "system.ai.claude-haiku-4-6"}
+        )
+        assert overlay["env"]["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "system.ai.claude-haiku-4-6"
 
     def test_sets_anthropic_base_url(self):
         overlay, _ = claude.render_overlay(WS, "s4")
@@ -89,6 +109,25 @@ class TestRenderOverlay:
         overlay, _ = claude.render_overlay(WS, "s4")
         env = overlay["env"]
         assert "ANTHROPIC_DEFAULT_SONNET_MODEL" not in env
+
+    def test_picker_labels_show_raw_routable_id(self):
+        # We deliberately don't set the `_NAME` companion env vars. Showing the
+        # raw `system.ai.…` / `databricks-…` id in the picker label tells users
+        # exactly which gateway-routable model is behind each shortcut, which is
+        # more useful than a friendly catalog label for Databricks routing.
+        models = {
+            "opus": "system.ai.claude-opus-4-8",
+            "sonnet": "databricks-claude-sonnet-4-6",
+            "haiku": "system.ai.claude-haiku-4-5",
+        }
+        overlay, _ = claude.render_overlay(WS, "s4", claude_models=models)
+        env = overlay["env"]
+        assert env["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "system.ai.claude-opus-4-8[1m]"
+        assert "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME" not in env
+        assert env["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "databricks-claude-sonnet-4-6[1m]"
+        assert "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME" not in env
+        assert env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "system.ai.claude-haiku-4-5"
+        assert "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME" not in env
 
     def test_managed_keys_include_api_key_helper(self):
         _, keys = claude.render_overlay(WS, "s4")
@@ -357,3 +396,82 @@ class TestClaudeLaunch:
                 ["claude", "--settings", str(claude.CLAUDE_SETTINGS_PATH), "--debug"],
             )
         ]
+
+
+class TestWriteToolConfigPrunesStaleModelEnv:
+    """Stale ucode-managed model env keys (ANTHROPIC_MODEL, etc.) from earlier
+    ucode versions must be removed on every launch — otherwise they linger in
+    settings.json and re-introduce the duplicate /model picker row that this
+    change is meant to remove.
+    """
+
+    def _patch(self, monkeypatch, existing_settings):
+        monkeypatch.setattr(claude, "backup_existing_file", lambda *a, **kw: True)
+        monkeypatch.setattr(claude, "read_json_safe", lambda path: existing_settings)
+        written: dict = {}
+
+        def fake_write(path, payload):
+            written["payload"] = payload
+
+        monkeypatch.setattr(claude, "write_json_file", fake_write)
+        monkeypatch.setattr(claude, "save_state", lambda state: None)
+        monkeypatch.setattr(claude, "_register_web_search_mcp", lambda *a, **kw: True)
+        return written
+
+    def test_prunes_stale_anthropic_model_from_prior_run(self, monkeypatch):
+        existing = {
+            "env": {
+                "ANTHROPIC_MODEL": "system.ai.claude-opus-4-8[1m]",
+                "ANTHROPIC_DEFAULT_OPUS_MODEL": "system.ai.claude-opus-4-8[1m]",
+                "MY_CUSTOM_VAR": "keep-me",
+            }
+        }
+        written = self._patch(monkeypatch, existing)
+        state = {
+            "workspace": WS,
+            "claude_models": {"opus": "system.ai.claude-opus-4-8"},
+        }
+        claude.write_tool_config(state, "system.ai.claude-opus-4-8")
+        env = written["payload"]["env"]
+        assert "ANTHROPIC_MODEL" not in env
+        # Family default we still write this run is preserved.
+        assert env["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "system.ai.claude-opus-4-8[1m]"
+        # User-owned keys are untouched.
+        assert env["MY_CUSTOM_VAR"] == "keep-me"
+
+    def test_prunes_unused_family_default_when_models_change(self, monkeypatch):
+        # Earlier launch wrote a sonnet default; the new state only has opus.
+        # The stale sonnet keys should be removed.
+        existing = {
+            "env": {
+                "ANTHROPIC_DEFAULT_SONNET_MODEL": "databricks-claude-sonnet-4-6[1m]",
+            }
+        }
+        written = self._patch(monkeypatch, existing)
+        state = {"workspace": WS, "claude_models": {"opus": "system.ai.claude-opus-4-8"}}
+        claude.write_tool_config(state, "system.ai.claude-opus-4-8")
+        env = written["payload"]["env"]
+        assert "ANTHROPIC_DEFAULT_SONNET_MODEL" not in env
+        assert env["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "system.ai.claude-opus-4-8[1m]"
+
+    def test_prunes_stale_name_companion_keys_from_older_ucode(self, monkeypatch):
+        # An older ucode build briefly wrote `_NAME` companion env vars to give
+        # the picker friendly labels. The current build only writes the raw id,
+        # so any leftover `_NAME` keys must be pruned — otherwise users who
+        # tested the in-between version would see stale labels.
+        existing = {
+            "env": {
+                "ANTHROPIC_DEFAULT_OPUS_MODEL": "system.ai.claude-opus-4-8[1m]",
+                "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME": "Opus 4.8 (1M)",
+                "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME": "Sonnet 4.6 (1M)",
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME": "Haiku 4.5",
+            }
+        }
+        written = self._patch(monkeypatch, existing)
+        state = {"workspace": WS, "claude_models": {"opus": "system.ai.claude-opus-4-8"}}
+        claude.write_tool_config(state, "system.ai.claude-opus-4-8")
+        env = written["payload"]["env"]
+        assert env["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "system.ai.claude-opus-4-8[1m]"
+        assert "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME" not in env
+        assert "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME" not in env
+        assert "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME" not in env

@@ -76,6 +76,18 @@ CLAUDE_TRACING_ENV_KEYS = (
     "MLFLOW_EXPERIMENT_ID",
     "MLFLOW_TRACING_SQL_WAREHOUSE_ID",
 )
+# Model-selection env keys ucode owns end-to-end. Anything in this tuple that
+# isn't written by render_overlay gets actively pruned from settings.json on
+# every launch, so stale values from older ucode versions never linger.
+CLAUDE_MANAGED_MODEL_ENV_KEYS = (
+    "ANTHROPIC_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME",
+)
 CLAUDE_TRACING_STOP_HOOK_SUFFIX = " autolog claude stop-hook"
 # Tracing is driven by an `mlflow autolog claude stop-hook` Stop hook, run by
 # the `mlflow` CLI on each session end. Pin to 3.11.x: 3.12 dropped the Unity
@@ -135,13 +147,23 @@ def render_overlay(
         ]
     )
     env: dict[str, str] = {
-        "ANTHROPIC_MODEL": _maybe_add_1m_suffix(model),
         "ANTHROPIC_BASE_URL": base_url,
         "ANTHROPIC_CUSTOM_HEADERS": custom_headers,
         "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1",
         "CLAUDE_CODE_API_KEY_HELPER_TTL_MS": "900000",
     }
+    # Intentionally NOT setting ANTHROPIC_MODEL. Setting it produces a duplicate
+    # catalog row in Claude Code's /model picker (e.g. "Opus 4.8 (1M context) ✓")
+    # on top of the family-alias row from ANTHROPIC_DEFAULT_OPUS_MODEL. Without
+    # it, Default resolves through the pinned family alias and the picker shows
+    # only one row per model. `ucode claude -- --model X` still overrides for a
+    # single session via Claude Code's own --model flag.
+    _ = model  # API stability; no longer pinned via env.
     if claude_models:
+        # Picker rows show the raw routable id (e.g. "system.ai.claude-opus-4-8[1m]")
+        # so users can see which gateway-routable model is behind each shortcut.
+        # We deliberately don't set the `_NAME` companion env vars — the raw id
+        # is more useful than a friendly label for debugging gateway routing.
         if claude_models.get("opus"):
             env["ANTHROPIC_DEFAULT_OPUS_MODEL"] = _maybe_add_1m_suffix(claude_models["opus"])
         if claude_models.get("sonnet"):
@@ -258,6 +280,14 @@ def write_tool_config(state: dict, model: str) -> dict:
                 env_block.pop(key, None)
         # Strip only ucode's tracing Stop hook so user hooks stay intact.
         _remove_tracing_stop_hook(merged)
+    # Prune ucode-managed model env keys we deliberately don't write this run
+    # (e.g. ANTHROPIC_MODEL — see render_overlay).
+    overlay_env = overlay.get("env", {})
+    merged_env = merged.get("env")
+    if isinstance(merged_env, dict):
+        for key in CLAUDE_MANAGED_MODEL_ENV_KEYS:
+            if key not in overlay_env:
+                merged_env.pop(key, None)
     write_json_file(CLAUDE_SETTINGS_PATH, merged)
 
     if web_search_model:
