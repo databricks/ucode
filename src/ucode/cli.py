@@ -249,7 +249,9 @@ def configure_shared_state(
         fetch_all or "claude" in tools or "opencode" in tools or "copilot" in tools or "pi" in tools
     )
     want_gemini = fetch_all or "gemini" in tools or "opencode" in tools or "pi" in tools
-    want_codex = fetch_all or "codex" in tools or "copilot" in tools or "pi" in tools
+    want_codex = (
+        fetch_all or "codex" in tools or "opencode" in tools or "copilot" in tools or "pi" in tools
+    )
 
     claude_reason: str | None = None
     gemini_reason: str | None = None
@@ -278,6 +280,8 @@ def configure_shared_state(
     opencode_models: dict[str, list[str]] = {}
     if claude_models:
         opencode_models["anthropic"] = list(claude_models.values())
+    if codex_models:
+        opencode_models["openai"] = codex_models
     if gemini_models:
         opencode_models["gemini"] = gemini_models
 

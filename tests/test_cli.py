@@ -1113,3 +1113,46 @@ class TestConfigureSharedStateMcpCleanup:
         cli_mod.configure_shared_state("https://same.databricks.com")
 
         assert purge_calls == []
+
+
+class TestConfigureSharedStateOpencodeDiscovery:
+    """`ucode configure --tools opencode` must surface GPT models alongside
+    Claude and Gemini. That requires running codex discovery for the opencode
+    tool and bucketing the result under `opencode_models["openai"]` so
+    `agents/opencode.py:render_overlay` can wire the `databricks-openai` provider."""
+
+    WS = "https://workspace.databricks.com"
+
+    @staticmethod
+    def _stub_with_codex_models(monkeypatch, codex_models):
+        import ucode.cli as cli_mod
+
+        monkeypatch.setattr(cli_mod, "load_state", lambda: {})
+        monkeypatch.setattr(cli_mod, "save_state", lambda s: None)
+        monkeypatch.setattr(cli_mod, "normalize_workspace_url", lambda w: w)
+        monkeypatch.setattr(cli_mod, "run_databricks_login", lambda w, p: None)
+        monkeypatch.setattr(cli_mod, "ensure_databricks_auth", lambda w, p=None: None)
+        monkeypatch.setattr(cli_mod, "find_profile_name_for_host", lambda w: None)
+        monkeypatch.setattr(cli_mod, "get_databricks_token", lambda w, p: "token")
+        monkeypatch.setattr(cli_mod, "ensure_ai_gateway_v2", lambda w, t: None)
+        monkeypatch.setattr(cli_mod, "discover_model_services", lambda w, t: ({}, [], [], None))
+        monkeypatch.setattr(cli_mod, "discover_claude_models", lambda w, t: ({}, None))
+        monkeypatch.setattr(cli_mod, "discover_gemini_models", lambda w, t: ([], None))
+        monkeypatch.setattr(cli_mod, "discover_codex_models", lambda w, t: (codex_models, None))
+        monkeypatch.setattr(cli_mod, "build_shared_base_urls", lambda w: {})
+        return cli_mod
+
+    def test_opencode_tools_triggers_codex_discovery(self, monkeypatch):
+        cli_mod = self._stub_with_codex_models(monkeypatch, ["databricks-gpt-5"])
+
+        state = cli_mod.configure_shared_state(self.WS, tools=["opencode"])
+
+        assert state["codex_models"] == ["databricks-gpt-5"]
+        assert state["opencode_models"]["openai"] == ["databricks-gpt-5"]
+
+    def test_opencode_skips_openai_bucket_when_no_codex_models(self, monkeypatch):
+        cli_mod = self._stub_with_codex_models(monkeypatch, [])
+
+        state = cli_mod.configure_shared_state(self.WS, tools=["opencode"])
+
+        assert "openai" not in state.get("opencode_models", {})

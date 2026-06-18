@@ -13,6 +13,7 @@ WS = "https://example.databricks.com"
 def _base_urls() -> dict[str, str]:
     return {
         "anthropic": f"{WS}/ai-gateway/anthropic/v1",
+        "openai": f"{WS}/ai-gateway/codex/v1",
         "gemini": f"{WS}/ai-gateway/gemini/v1beta",
     }
 
@@ -54,6 +55,22 @@ class TestRenderOverlay:
         assert "databricks-anthropic" in overlay["provider"]
         assert "databricks-google" in overlay["provider"]
 
+    def test_openai_provider_added_when_models_present(self):
+        models = {"openai": ["databricks-gpt-5"]}
+        overlay, _ = opencode.render_overlay("databricks-gpt-5", "tok", _base_urls(), models)
+        assert "databricks-openai" in overlay["provider"]
+
+    def test_all_three_providers_when_all_present(self):
+        models = {
+            "anthropic": ["claude-sonnet"],
+            "openai": ["databricks-gpt-5"],
+            "gemini": ["gemini-2"],
+        }
+        overlay, _ = opencode.render_overlay("claude-sonnet", "tok", _base_urls(), models)
+        assert "databricks-anthropic" in overlay["provider"]
+        assert "databricks-openai" in overlay["provider"]
+        assert "databricks-google" in overlay["provider"]
+
     def test_no_provider_key_when_no_models(self):
         overlay, _ = opencode.render_overlay("model", "tok", _base_urls(), {})
         assert "provider" not in overlay
@@ -69,6 +86,20 @@ class TestRenderOverlay:
         overlay, _ = opencode.render_overlay("gemini-2", "tok", _base_urls(), models)
         options = overlay["provider"]["databricks-google"]["options"]
         assert options["baseURL"] == f"{WS}/ai-gateway/gemini/v1beta"
+
+    def test_openai_base_url_points_at_codex_gateway(self):
+        # Matches Pi's `databricks-openai` provider path so OpenCode's
+        # @ai-sdk/openai negotiates the Responses API against the same
+        # Databricks codex endpoint that already works for Pi.
+        models = {"openai": ["databricks-gpt-5"]}
+        overlay, _ = opencode.render_overlay("databricks-gpt-5", "tok", _base_urls(), models)
+        options = overlay["provider"]["databricks-openai"]["options"]
+        assert options["baseURL"] == f"{WS}/ai-gateway/codex/v1"
+
+    def test_openai_uses_ai_sdk_openai_npm_package(self):
+        models = {"openai": ["databricks-gpt-5"]}
+        overlay, _ = opencode.render_overlay("databricks-gpt-5", "tok", _base_urls(), models)
+        assert overlay["provider"]["databricks-openai"]["npm"] == "@ai-sdk/openai"
 
     def test_token_in_api_key(self):
         models = {"anthropic": ["claude-sonnet"]}
@@ -111,6 +142,16 @@ class TestRenderOverlay:
         model_headers = overlay["provider"]["databricks-google"]["models"]["gemini-2"]["headers"]
         assert model_headers["User-Agent"] == "ucode/0.1.0 opencode/0.74.0"
 
+    def test_user_agent_header_openai(self, monkeypatch):
+        monkeypatch.setattr(opencode, "ucode_version", lambda: "0.1.0")
+        monkeypatch.setattr(opencode, "agent_version", lambda binary: "0.74.0")
+        models = {"openai": ["databricks-gpt-5"]}
+        overlay, _ = opencode.render_overlay("databricks-gpt-5", "tok", _base_urls(), models)
+        model_headers = overlay["provider"]["databricks-openai"]["models"]["databricks-gpt-5"][
+            "headers"
+        ]
+        assert model_headers["User-Agent"] == "ucode/0.1.0 opencode/0.74.0"
+
     def test_provider_level_headers_only_authorization(self, monkeypatch):
         # Sanity: provider-level headers should NOT include User-Agent (since
         # it's clobbered there) — only Authorization.
@@ -134,6 +175,11 @@ class TestRenderOverlay:
         _, keys = opencode.render_overlay("gemini-2", "tok", _base_urls(), models)
         assert ["provider", "databricks-google"] in keys
 
+    def test_managed_keys_include_openai_provider(self):
+        models = {"openai": ["databricks-gpt-5"]}
+        _, keys = opencode.render_overlay("databricks-gpt-5", "tok", _base_urls(), models)
+        assert ["provider", "databricks-openai"] in keys
+
     def test_anthropic_models_listed(self):
         models = {"anthropic": ["claude-sonnet", "claude-haiku"]}
         overlay, _ = opencode.render_overlay("claude-sonnet", "tok", _base_urls(), models)
@@ -150,6 +196,18 @@ class TestRenderOverlay:
         models = {"anthropic": [], "gemini": ["gemini-2"]}
         overlay, _ = opencode.render_overlay("gemini-2", "tok", _base_urls(), models)
         assert overlay["model"] == "databricks-google/gemini-2"
+
+    def test_prefixes_openai_model_with_provider_id(self):
+        models = {"openai": ["databricks-gpt-5"]}
+        overlay, _ = opencode.render_overlay("databricks-gpt-5", "tok", _base_urls(), models)
+        assert overlay["model"] == "databricks-openai/databricks-gpt-5"
+
+    def test_preserves_existing_provider_prefix_openai(self):
+        models = {"openai": ["databricks-gpt-5"]}
+        overlay, _ = opencode.render_overlay(
+            "databricks-openai/databricks-gpt-5", "tok", _base_urls(), models
+        )
+        assert overlay["model"] == "databricks-openai/databricks-gpt-5"
 
 
 class TestMcpServerConfig:
@@ -263,6 +321,17 @@ class TestOpencodeDefaultModel:
     def test_prefers_anthropic(self):
         state = {"opencode_models": {"anthropic": ["claude-sonnet"], "gemini": ["gemini-2"]}}
         assert opencode.default_model(state) == "claude-sonnet"
+
+    def test_falls_back_to_openai_before_gemini(self):
+        # Mirrors Pi's preference: Claude > OpenAI > Gemini.
+        state = {
+            "opencode_models": {
+                "anthropic": [],
+                "openai": ["databricks-gpt-5"],
+                "gemini": ["gemini-2"],
+            }
+        }
+        assert opencode.default_model(state) == "databricks-gpt-5"
 
     def test_falls_back_to_gemini(self):
         state = {"opencode_models": {"anthropic": [], "gemini": ["gemini-2"]}}
