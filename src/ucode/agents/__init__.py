@@ -1,13 +1,7 @@
-"""Per-agent modules + dispatch helpers.
+"""Agent registry — OpenCode only.
 
-Each `agents.<tool>` module owns its own config layout, overlay rendering,
-config-file writer, default-model selection, launch logic, and validation
-command. This `__init__` aggregates the registry and exposes uniform
-dispatchers for the rest of the codebase.
-
-Adding a new agent: create `agents/<name>.py` exposing `SPEC`, `write_tool_config`,
-`default_model`, `launch`, `validate_cmd`. Then add an entry to `_MODULES`
-below and to `TOOL_ALIASES` if needed.
+voxcode is a thin launcher for OpenCode through the Databricks AI Gateway.
+Only models approved by the platform team (see allowed_models.py) are available.
 """
 
 from __future__ import annotations
@@ -16,13 +10,13 @@ import json
 import shutil
 import subprocess
 
-from ucode.config_io import ToolSpec
-from ucode.databricks import (
+from voxcode.config_io import ToolSpec
+from voxcode.databricks import (
     install_databricks_cli,
 )
-from ucode.state import load_state, save_state
-from ucode.telemetry import agent_version
-from ucode.ui import (
+from voxcode.state import load_state, save_state
+from voxcode.telemetry import agent_version
+from voxcode.ui import (
     console,
     is_low_verbosity,
     print_err,
@@ -34,31 +28,19 @@ from ucode.ui import (
     spinner,
 )
 
-from . import claude, codex, copilot, gemini, opencode, pi
+from . import opencode
 
 _MODULES = {
-    "codex": codex,
-    "claude": claude,
-    "gemini": gemini,
     "opencode": opencode,
-    "copilot": copilot,
-    "pi": pi,
 }
 
 TOOL_SPECS: dict[str, ToolSpec] = {name: module.SPEC for name, module in _MODULES.items()}
 
 TOOL_ALIASES = {
-    "codex": "codex",
-    "claude": "claude",
-    "claude-code": "claude",
-    "gemini": "gemini",
-    "gemini-cli": "gemini",
     "opencode": "opencode",
-    "copilot": "copilot",
-    "pi": "pi",
 }
 
-DEFAULT_TOOL = "codex"
+DEFAULT_TOOL = "opencode"
 BUNDLE_VERSION = 1
 
 
@@ -66,7 +48,7 @@ def normalize_tool(tool: str) -> str:
     normalized = TOOL_ALIASES.get(tool.strip().lower())
     if not normalized:
         raise RuntimeError(
-            f"Unsupported tool '{tool}'. Use one of: codex, claude, gemini, opencode, copilot, pi."
+            f"Unsupported tool '{tool}'. voxcode only supports: opencode."
         )
     return normalized
 
@@ -249,7 +231,7 @@ def resolve_launch_model(
     model = explicit_model or default_model_for_tool(tool, state)
     if not model:
         raise RuntimeError(
-            f"No models available for {tool}. Run `ucode configure` to set up your workspace."
+            f"No models available for {tool}. Run `voxcode configure` to set up your workspace."
         )
     return state, model
 
@@ -282,33 +264,14 @@ def launch(tool: str, state: dict, tool_args: list[str]) -> None:
 
 
 def check_gateway_endpoint(state: dict, tool: str) -> bool:
-    """V2-only: a tool is available iff we discovered models for it."""
-    if tool == "claude":
-        return bool(state.get("claude_models"))
+    """A tool is available iff we discovered models for it."""
     if tool == "opencode":
         return bool(state.get("opencode_models"))
-    if tool == "codex":
-        return bool(state.get("codex_models"))
-    if tool == "gemini":
-        return bool(state.get("gemini_models"))
-    if tool == "copilot":
-        return bool(state.get("claude_models")) or bool(state.get("codex_models"))
-    if tool == "pi":
-        return (
-            bool(state.get("claude_models"))
-            or bool(state.get("codex_models"))
-            or bool(state.get("gemini_models"))
-        )
     return False
 
 
 _TOOL_DISCOVERY_SOURCES: dict[str, tuple[str, ...]] = {
-    "claude": ("claude",),
     "opencode": ("claude", "gemini"),
-    "codex": ("codex",),
-    "gemini": ("gemini",),
-    "copilot": ("claude", "codex"),
-    "pi": ("claude", "codex", "gemini"),
 }
 
 
@@ -332,11 +295,8 @@ def configure_single_tool(tool: str, state: dict) -> dict:
         raise RuntimeError(
             f"{TOOL_SPECS[tool]['display']} is not available on this workspace.{detail}"
         )
-    if tool == "codex":
-        state = configure_tool("codex", state)
-    else:
-        state, model = resolve_launch_model(tool, state, None)
-        state = configure_tool(tool, state, model)
+    state, model = resolve_launch_model(tool, state, None)
+    state = configure_tool(tool, state, model)
     available_tools = list(set((state.get("available_tools") or []) + [tool]))
     state["available_tools"] = available_tools
     save_state(state)
@@ -344,19 +304,10 @@ def configure_single_tool(tool: str, state: dict) -> dict:
 
 
 def configure_selected_tools(state: dict, tools: list[str]) -> dict:
-    """Configure the given tools. Caller is responsible for ensuring each tool
-    is available on the workspace.
-
-    Merges newly-configured tools into state['available_tools'] rather than
-    replacing it, so a previously-configured tool the user didn't pick this
-    run is preserved.
-    """
+    """Configure the given tools."""
     for tool in tools:
-        if tool == "codex":
-            state = configure_tool("codex", state)
-        else:
-            state, model = resolve_launch_model(tool, state, None)
-            state = configure_tool(tool, state, model)
+        state, model = resolve_launch_model(tool, state, None)
+        state = configure_tool(tool, state, model)
 
     existing = state.get("available_tools") or []
     state["available_tools"] = sorted(set(existing) | set(tools))
@@ -388,17 +339,16 @@ def configure_all_tools(state: dict) -> dict:
 
 
 def ensure_provider_state(tool: str) -> dict:
-    """Validate that workspace + tool are configured. Caller is expected to
-    handle auth (typically via `configure_shared_state` immediately after)."""
+    """Validate that workspace + tool are configured."""
     state = load_state()
     workspace = state.get("workspace")
     if not workspace:
-        raise RuntimeError("No workspace configured. Run `ucode configure` first.")
+        raise RuntimeError("No workspace configured. Run `voxcode configure` first.")
     available_tools = state.get("available_tools") or []
     if tool not in available_tools:
         raise RuntimeError(
             f"{TOOL_SPECS[tool]['display']} is not available on this workspace. "
-            f"Run `ucode configure` to set up your agents."
+            f"Run `voxcode configure` to set up your workspace."
         )
     return state
 
@@ -443,8 +393,7 @@ def validate_tool(tool: str) -> tuple[bool, str]:
 def validate_all_tools(state: dict) -> None:
     from rich.panel import Panel  # local to avoid bumping module-level deps
 
-    from ucode.agents.pi import PI_SETTINGS_BACKUP_PATH, PI_SETTINGS_PATH
-    from ucode.config_io import restore_file
+    from voxcode.config_io import restore_file
 
     low_verbosity = is_low_verbosity()
     console.print()
@@ -453,7 +402,7 @@ def validate_all_tools(state: dict) -> None:
     else:
         console.print(
             Panel(
-                "Testing each tool with a quick message...",
+                "Testing OpenCode with a quick message...",
                 title="Validating",
                 style="bold blue",
                 expand=False,
@@ -473,9 +422,6 @@ def validate_all_tools(state: dict) -> None:
             print_err(f"{spec['display']}: {err}")
             managed = bool(state.get("managed_configs", {}).get(tool))
             restore_file(spec["config_path"], spec["backup_path"], managed)
-            # Rollback settings.json for Pi
-            if tool == "pi":
-                restore_file(PI_SETTINGS_PATH, PI_SETTINGS_BACKUP_PATH, managed)
             available_tools.remove(tool)
     state["available_tools"] = available_tools
     save_state(state)
@@ -488,6 +434,6 @@ def validate_all_tools(state: dict) -> None:
             spec = TOOL_SPECS[tool]
             lines.append(
                 f"[green]✓[/green] [bold]{spec['display']}[/bold] — "
-                f"run with [cyan]ucode {tool}[/cyan]"
+                f"run with [cyan]voxcode opencode[/cyan]"
             )
         console.print(Panel("\n".join(lines), title="Ready", style="green", expand=False))

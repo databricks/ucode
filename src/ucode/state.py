@@ -110,12 +110,8 @@ def build_agent_state(state: dict) -> dict[str, dict]:
     """Build per-agent harness configuration for a workspace.
 
     The returned shape is intended for downstream tools that want to reuse
-    ucode's configured gateway URLs and auth command without duplicating
+    voxcode's configured gateway URLs and auth command without duplicating
     endpoint construction logic.
-
-    :param state: Hydrated workspace state containing ``workspace``,
-        ``base_urls``, and discovered model lists.
-    :returns: Mapping from agent name to its reusable configuration.
     """
     workspace = state.get("workspace")
     if not isinstance(workspace, str) or not workspace:
@@ -125,45 +121,10 @@ def build_agent_state(state: dict) -> dict[str, dict]:
     base_urls_value = state.get("base_urls")
     base_urls = base_urls_value if isinstance(base_urls_value, dict) else {}
     auth_command = build_auth_shell_command(workspace, profile, use_pat=bool(state.get("use_pat")))
-    claude_models_value = state.get("claude_models")
-    claude_models: dict = claude_models_value if isinstance(claude_models_value, dict) else {}
-    codex_models_value = state.get("codex_models")
-    codex_models = codex_models_value if isinstance(codex_models_value, list) else []
-    gemini_models_value = state.get("gemini_models")
-    gemini_models = gemini_models_value if isinstance(gemini_models_value, list) else []
-
-    claude_model = (
-        claude_models.get("opus") or claude_models.get("sonnet") or claude_models.get("haiku")
-    )
-    codex_model = codex_models[0] if codex_models else None
-    pi_model = claude_model or codex_model or (gemini_models[0] if gemini_models else None)
 
     agents: dict[str, dict] = {
-        "claude": {
-            "model": claude_model,
-            "base_url": base_urls.get("claude"),
-            "auth_command": auth_command,
-            "auth_refresh_interval_ms": AUTH_REFRESH_INTERVAL_MS,
-            "env": {
-                "ANTHROPIC_BASE_URL": base_urls.get("claude"),
-                "CLAUDE_CODE_API_KEY_HELPER_TTL_MS": str(AUTH_REFRESH_INTERVAL_MS),
-                "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1",
-            },
-        },
-        "codex": {
-            "model": codex_model,
-            "base_url": base_urls.get("codex"),
-            "auth_command": auth_command,
-            "auth": {
-                "command": "sh",
-                "args": ["-c", auth_command],
-                "timeout_ms": AUTH_COMMAND_TIMEOUT_MS,
-                "refresh_interval_ms": AUTH_REFRESH_INTERVAL_MS,
-            },
-        },
-        "pi": {
-            "model": pi_model,
-            "base_urls": base_urls.get("pi") if isinstance(base_urls.get("pi"), dict) else {},
+        "opencode": {
+            "base_urls": base_urls.get("opencode") if isinstance(base_urls.get("opencode"), dict) else {},
             "auth_command": auth_command,
             "auth_refresh_interval_ms": AUTH_REFRESH_INTERVAL_MS,
         },

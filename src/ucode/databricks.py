@@ -77,12 +77,12 @@ def _get_debug_logger() -> logging.Logger | None:
     except OSError:
         return None
 
-    logger = logging.getLogger("ucode.debug")
+    logger = logging.getLogger("voxcode.debug")
     logger.setLevel(logging.DEBUG)
     logger.addHandler(handler)
     logger.propagate = False
     _DEBUG_LOGGER = logger
-    err_console.print(f"[dim]\\[ucode debug] logging to {log_path}[/dim]")
+    err_console.print(f"[dim]\\[voxcode debug] logging to {log_path}[/dim]")
     return _DEBUG_LOGGER
 
 

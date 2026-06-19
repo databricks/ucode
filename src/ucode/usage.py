@@ -439,7 +439,7 @@ def render_usage_summary(
 
 def usage() -> int:
     # Late import to avoid circular import (agents → state, but usage uses TOOL_SPECS for displays).
-    from ucode.agents import TOOL_SPECS
+    from voxcode.agents import TOOL_SPECS
 
     state = load_state()
     workspace = state.get("workspace")

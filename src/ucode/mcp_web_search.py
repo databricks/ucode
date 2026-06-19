@@ -20,7 +20,7 @@ from typing import Any
 from urllib import error as urllib_error
 from urllib import request as urllib_request
 
-from ucode.databricks import get_databricks_token
+from voxcode.databricks import get_databricks_token
 
 PROTOCOL_VERSION = "2024-11-05"
 SERVER_NAME = "ucode-web-search"

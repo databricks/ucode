@@ -1,96 +1,70 @@
-# Unity AI Gateway Coding CLI (ucode)
+# voxcode — Van Oord OpenCode Launcher
 
-`ucode` is a lightweight launcher for running Codex, Claude Code, Gemini CLI, OpenCode, GitHub Copilot CLI, and Pi through Databricks.
+`voxcode` is a thin launcher for running [OpenCode](https://opencode.ai) through the Databricks AI Gateway. It routes all LLM traffic through your Databricks workspace — no API keys required.
+
+**Only models approved by the platform team are available.** The allowlist is maintained in `src/voxcode/allowed_models.py`.
 
 ## Requirements
 
 - Python 3.12+ — install with `uv` ([uv.astral.sh](https://docs.astral.sh/uv/getting-started/installation/))
-- `npm` if tool CLIs need to be installed automatically
+- `npm` (for OpenCode CLI auto-install)
 
 ## Installation
 
 ```bash
-uv tool install git+https://github.com/databricks/ucode
+uv tool install git+https://github.com/vanoord/voxcode
 ```
 
 ---
 
 ## Usage
 
-Just run the tool you want:
-
 ```bash
-ucode codex      # OpenAI Codex
-ucode claude     # Claude Code
-ucode gemini     # Gemini CLI
-ucode opencode   # OpenCode
-ucode copilot    # GitHub Copilot CLI
-ucode pi         # Pi
+voxcode opencode     # Launch OpenCode
+voxcode launch       # Same as above (alias)
 ```
 
-On first launch, `ucode` will prompt for your Databricks workspace URL, authenticate, and configure that tool automatically. Subsequent launches go straight to the agent.
+On first launch, `voxcode` will prompt for your Databricks workspace URL, authenticate, and configure OpenCode automatically. Subsequent launches go straight to the agent.
 
-Pass flags directly to the underlying tool:
+Pass flags directly to OpenCode:
 
 ```bash
-ucode claude -r          # resume last session
-ucode codex --full-auto
+voxcode opencode --model databricks-anthropic/claude-sonnet-4-20250514
 ```
 
-All agents route through Databricks AI Gateway using your workspace credentials — no API keys required.
+All traffic routes through Databricks AI Gateway using your workspace credentials.
 
-To configure all tools at once:
+To configure:
 
 ```bash
-ucode configure
+voxcode configure
 ```
 
-To configure specific tools without the picker, pass a comma-separated list:
+To configure without the workspace picker:
 
 ```bash
-ucode configure --agents claude,codex
+voxcode configure --workspaces https://your-workspace.azuredatabricks.net
 ```
 
-Available agent names are `codex`, `claude`, `gemini`, `opencode`, `copilot`, and `pi`.
-
-To configure without the workspace picker, pass a comma-separated list of workspaces:
+Alternatively, use existing Databricks CLI profiles:
 
 ```bash
-ucode configure --workspaces https://first.databricks.com,https://second.databricks.com
+voxcode configure --profiles DEFAULT
 ```
 
-When multiple workspaces are provided, `ucode` logs into and saves state for each workspace. Launch commands such as `ucode codex` use the first workspace in the list.
-
-Alternatively, pass existing Databricks CLI profiles (from `~/.databrickscfg`) instead of workspace URLs — each profile's host supplies the workspace URL:
+For CI or headless environments (PAT-based auth):
 
 ```bash
-ucode configure --profiles DEFAULT --agents claude,codex
-```
-
-Auth behaves the same as `--workspaces`: an OAuth `databricks auth login` is forced by default.
-
-For CI or headless environments where the profile holds a personal access token (`auth_type = pat` in `~/.databrickscfg`), add `--use-pat`. It must be combined with `--profiles` — ucode never picks up a PAT implicitly — and runs no interactive login: the profile's token is used for the whole setup (and by launched agents afterwards), with workspace access verified against the AI Gateway. `--skip-validate` additionally skips the post-configure test message sent through each agent, so configure only writes config files with the freshly discovered models. Together these make setup fully non-interactive:
-
-```bash
-ucode configure --profiles DEFAULT --agents claude,codex --use-pat --skip-validate --skip-upgrade
+voxcode configure --profiles DEFAULT --use-pat --skip-validate --skip-upgrade
 ```
 
 ### MCP servers (optional)
 
 ```bash
-ucode configure mcp
+voxcode configure mcp
 ```
 
-Add Databricks MCP servers to installed MCP-capable tools: Codex, Claude Code, Gemini CLI, OpenCode, and GitHub Copilot CLI.
-Options are shown in this order:
-
-- Discovered external MCP connections
-- Databricks SQL
-- Managed Databricks MCPs (Vector Search, UC Functions, etc.)
-- Custom MCP server URL
-
-Discovered external MCP connections are listed directly. MCP auth uses a Databricks token that
-`ucode` sets when launching each tool.
+Add Databricks MCP servers to OpenCode (SQL, Vector Search, UC Functions, Genie spaces, etc.).
 
 ---
 
@@ -98,79 +72,57 @@ Discovered external MCP connections are listed directly. MCP auth uses a Databri
 
 | Command | Description |
 |---------|-------------|
-| `ucode status` | Show current workspace, base URLs, managed config files, and selected models |
-| `ucode usage` | Show AI Gateway usage summary |
-| `ucode revert` | Clear saved state and restore backed-up config files |
-| `ucode configure --dry-run` | Preview config files without writing them |
-| `ucode configure --agents claude,codex` | Configure specific agents without the interactive picker |
-| `ucode configure --workspaces https://first.databricks.com,https://second.databricks.com` | Configure workspaces without the interactive picker |
-| `ucode configure --profiles DEFAULT` | Configure using existing Databricks CLI profiles (hosts come from `~/.databrickscfg`) |
-| `ucode configure --profiles DEFAULT --use-pat` | Authenticate with the profile's personal access token — no browser login |
-| `ucode configure --skip-validate` | Write configs without sending a test message through each agent |
+| `voxcode status` | Show current workspace, config, and selected models |
+| `voxcode usage` | Show AI Gateway usage summary |
+| `voxcode revert` | Clear saved state and restore backed-up config files |
+| `voxcode configure --dry-run` | Preview config files without writing them |
+| `voxcode configure mcp` | Add Databricks MCP servers |
+| `voxcode configure tracing` | Enable MLflow tracing |
+| `voxcode upgrade` | Upgrade voxcode to latest version |
 
 ## Managed Local Files
 
-`ucode` manages these files:
-
-| File | Tool |
+| File | Purpose |
 |------|------|
-| `~/.codex/config.toml` | Codex |
-| `~/.claude/settings.json` | Claude Code |
-| `~/.gemini/.env` | Gemini CLI |
-| `~/.config/opencode/opencode.json` | OpenCode |
-| `~/.copilot/.env` | GitHub Copilot CLI |
-| `~/.pi/agent/models.json` | Pi |
+| `~/.voxcode/state.json` | Workspace state |
+| `~/.voxcode/opencode-xdg/opencode/opencode.json` | OpenCode config |
 
-Existing files are backed up before being overwritten. `ucode revert` restores backups.
+Existing files are backed up before being overwritten. `voxcode revert` restores backups.
 
+## Approved Models
+
+The platform team maintains the model allowlist in `src/voxcode/allowed_models.py`. Only models in this list are discoverable and launchable. Currently approved:
+
+**Anthropic (via `databricks-anthropic` provider):**
+- `claude-sonnet-4-20250514`
+- `claude-haiku-4-20250514`
+
+**Google (via `databricks-google` provider):**
+- `gemini-2.5-pro`
+- `gemini-2.5-flash`
+
+To request a model addition, contact the platform team.
 
 ## Documentation
 
 - [Databricks AI Gateway overview](https://docs.databricks.com/aws/en/ai-gateway/overview-beta)
 - [Databricks AI Gateway coding agent integration](https://docs.databricks.com/aws/en/ai-gateway/coding-agent-integration-beta)
 - [Databricks CLI authentication](https://docs.databricks.com/aws/en/dev-tools/cli/authentication)
-- [Monitor AI Gateway usage](https://docs.databricks.com/aws/en/ai-gateway/configure-ai-gateway-endpoints#track-usage-of-an-endpoint)
 
-## Contributing
-
-Contributions are welcome.
-
-### Getting started
+## Development
 
 ```bash
-git clone https://github.com/databricks/ucode
-cd ucode
+git clone https://github.com/vanoord/voxcode
+cd voxcode
 uv sync
 ```
 
-### Development workflow
+Run tests:
 
-1. Create a feature branch off `main`.
-2. Make your changes — keep them scoped to the requested behavior.
-3. Run the test suite before pushing:
-
-   ```bash
-   uv run pytest          # unit tests
-   uv run ruff check .    # lint
-   ```
-
-4. For end-to-end testing against a real workspace:
-
-   ```bash
-   UCODE_TEST_WORKSPACE=<db_workspace_url> uv run pytest tests/test_e2e.py -v
-   ```
-
-5. Open a pull request against `main`.
-
-### Adding a new agent
-
-- Add `src/ucode/agents/<name>.py` with at least `write_tool_config`, `launch`, `default_model`, and `validate_cmd`.
-- Register it in `src/ucode/agents/__init__.py`.
-- Add focused tests under `tests/`.
-
-## Security
-
-Please report security vulnerabilities to security@databricks.com rather than opening a public issue.
+```bash
+uv run pytest
+uv run ruff check .
+```
 
 ## License
 

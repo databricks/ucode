@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from ucode.agents import TOOL_SPECS, ensure_bootstrap_dependencies
-from ucode.ui import print_err
+from voxcode.agents import TOOL_SPECS, ensure_bootstrap_dependencies
+from voxcode.ui import print_err
 
 
 def main() -> int:

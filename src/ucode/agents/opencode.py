@@ -7,8 +7,8 @@ import signal
 import subprocess
 import threading
 
-from ucode.agent_updates import available_npm_package_update
-from ucode.config_io import (
+from voxcode.agent_updates import available_npm_package_update
+from voxcode.config_io import (
     APP_DIR,
     ToolSpec,
     backup_existing_file,
@@ -16,13 +16,13 @@ from ucode.config_io import (
     read_json_safe,
     write_json_file,
 )
-from ucode.databricks import (
+from voxcode.databricks import (
     TOKEN_REFRESH_INTERVAL_SECONDS,
     build_opencode_base_urls,
     get_databricks_token,
 )
-from ucode.state import mark_tool_managed, save_state
-from ucode.telemetry import agent_version, ucode_version
+from voxcode.state import mark_tool_managed, save_state
+from voxcode.telemetry import agent_version, voxcode_version
 
 OPENCODE_XDG_CONFIG_HOME = APP_DIR / "opencode-xdg"
 OPENCODE_CONFIG_DIR = OPENCODE_XDG_CONFIG_HOME / "opencode"
@@ -77,7 +77,7 @@ def render_overlay(
     # `headers` are clobbered by that injection, but per-model `headers` are
     # merged AFTER and win — so the UA must live on each model entry.
     ua_header = {
-        "User-Agent": f"ucode/{ucode_version()} opencode/{agent_version('opencode')}",
+        "User-Agent": f"ucode/{voxcode_version()} opencode/{agent_version('opencode')}",
     }
 
     anthropic_models = opencode_models.get("anthropic") or []

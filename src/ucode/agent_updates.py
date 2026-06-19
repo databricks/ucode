@@ -1,4 +1,4 @@
-"""Update checks for npm-installed coding agent CLIs."""
+"""Update checks for npm-installed coding agent CLIs (OpenCode)."""
 
 from __future__ import annotations
 

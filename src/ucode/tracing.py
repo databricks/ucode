@@ -233,7 +233,7 @@ def _rewrite_agent_configs(state: dict) -> dict:
     """Re-run each configured agent's config writer so it folds the current
     tracing state into its config files (adds keys when enabled, strips them
     when disabled)."""
-    from ucode.agents import configure_tool, default_model_for_tool
+    from voxcode.agents import configure_tool, default_model_for_tool
 
     for tool in _configured_tracing_agents(state):
         model = default_model_for_tool(tool, state)
@@ -245,7 +245,7 @@ def _install_agent_tracing_deps(state: dict) -> None:
     """Install the Claude tracing runtime (pinned mlflow CLI) when Claude is
     configured on this workspace and has tracing on. Claude is the only
     tracing-capable agent."""
-    from ucode.agents import claude
+    from voxcode.agents import opencode  # tracing now routes through opencode
 
     configured = _configured_tracing_agents(state)
     if "claude" in configured and agent_tracing(state, "claude"):

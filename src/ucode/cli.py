@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CLI entry point for ucode."""
+"""CLI entry point for voxcode — Van Oord's thin OpenCode launcher."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from typing import Annotated
 import typer
 from rich.panel import Panel
 
-from ucode.agents import (
+from voxcode.agents import (
     TOOL_SPECS,
     check_gateway_endpoint,
     configure_selected_tools,
@@ -23,17 +23,14 @@ from ucode.agents import (
     validate_all_tools,
     validate_tool,
 )
-from ucode.agents import (
+from voxcode.agents import (
     launch as launch_agent,
 )
-from ucode.agents.codex import revert_legacy_shared_config
-from ucode.agents.pi import PI_SETTINGS_BACKUP_PATH, PI_SETTINGS_PATH
-from ucode.config_io import restore_file, set_dry_run
-from ucode.databricks import (
+from voxcode.config_io import restore_file, set_dry_run
+from voxcode.databricks import (
     apply_pat_environment,
     build_shared_base_urls,
     discover_claude_models,
-    discover_codex_models,
     discover_gemini_models,
     discover_model_services,
     ensure_ai_gateway_v2,
@@ -47,15 +44,15 @@ from ucode.databricks import (
     resolve_pat_token,
     run_databricks_login,
 )
-from ucode.mcp import (
+from voxcode.mcp import (
     MCP_CLIENTS,
     configure_mcp_command,
     purge_cross_workspace_mcp_residue,
     revert_mcp_configs,
 )
-from ucode.state import STATE_PATH, clear_state, load_full_state, load_state, save_state
-from ucode.tracing import configure_tracing_command
-from ucode.ui import (
+from voxcode.state import STATE_PATH, clear_state, load_full_state, load_state, save_state
+from voxcode.tracing import configure_tracing_command
+from voxcode.ui import (
     console,
     heading,
     print_err,
@@ -64,18 +61,17 @@ from ucode.ui import (
     print_note,
     print_section,
     print_success,
-    prompt_for_tools,
     prompt_for_workspace,
     set_verbosity,
     spinner,
     status_badge,
 )
-from ucode.usage import usage as usage_report
+from voxcode.usage import usage as usage_report
+from voxcode.allowed_models import get_all_allowed_models, filter_anthropic_models, filter_gemini_models
 
 _DISCOVERY_CONSUMERS: dict[str, tuple[str, ...]] = {
-    "claude": ("claude", "opencode", "copilot", "pi"),
-    "codex": ("codex", "copilot", "pi"),
-    "gemini": ("gemini", "opencode", "pi"),
+    "claude": ("opencode",),
+    "gemini": ("opencode",),
 }
 
 
@@ -97,29 +93,10 @@ def _print_discovery_diagnostics(state: dict) -> None:
 
 
 def _prompt_for_configuration(tool: str | None = None) -> tuple[str, str | None]:
-    if tool is None:
-        desc = "Configure your Databricks workspace"
-    else:
-        desc = f"Configure {TOOL_SPECS[tool]['display']} to use your Databricks endpoint."
+    desc = "Configure your Databricks workspace for OpenCode"
     with spinner("Loading Databricks workspaces and profiles..."):
         profiles = get_databricks_profiles()
     return prompt_for_workspace(desc, profiles)
-
-
-def _parse_agents_option(agents: str) -> list[str]:
-    tools: list[str] = []
-    for raw_tool in agents.split(","):
-        raw_tool = raw_tool.strip()
-        if not raw_tool:
-            continue
-        tool = normalize_tool(raw_tool)
-        if tool not in tools:
-            tools.append(tool)
-    if not tools:
-        raise RuntimeError(
-            "No agents provided for --agents. Use a comma-separated list like `--agents claude,codex`."
-        )
-    return tools
 
 
 def _parse_workspaces_option(workspaces: str) -> list[tuple[str, str | None]]:
@@ -245,36 +222,24 @@ def configure_shared_state(
         ensure_ai_gateway_v2(workspace, token)
     print_success("Unity AI Gateway detected")
 
-    want_claude = (
-        fetch_all or "claude" in tools or "opencode" in tools or "copilot" in tools or "pi" in tools
-    )
-    want_gemini = fetch_all or "gemini" in tools or "opencode" in tools or "pi" in tools
-    want_codex = fetch_all or "codex" in tools or "copilot" in tools or "pi" in tools
-
+    # voxcode only needs claude (anthropic) and gemini models for OpenCode.
     claude_reason: str | None = None
     gemini_reason: str | None = None
-    codex_reason: str | None = None
     claude_models = {}
     gemini_models = []
-    codex_models = []
-    # UC-first, best-effort: one UC model-services call yields all families as
-    # `system.ai.<model-name>` ids, bucketed by name. If a family comes back
-    # empty (workspace without UC model-services, or the listing failed), fall
-    # back to the per-family AI Gateway listing for that family only.
     with spinner("Fetching available models..."):
-        ms_claude, ms_codex, ms_gemini, ms_reason = discover_model_services(workspace, token)
-        if want_claude:
-            claude_models, claude_reason = ms_claude, ms_reason
-            if not claude_models:
-                claude_models, claude_reason = discover_claude_models(workspace, token)
-        if want_gemini:
-            gemini_models, gemini_reason = ms_gemini, ms_reason
-            if not gemini_models:
-                gemini_models, gemini_reason = discover_gemini_models(workspace, token)
-        if want_codex:
-            codex_models, codex_reason = ms_codex, ms_reason
-            if not codex_models:
-                codex_models, codex_reason = discover_codex_models(workspace, token)
+        ms_claude, _ms_codex, ms_gemini, ms_reason = discover_model_services(workspace, token)
+        claude_models, claude_reason = ms_claude, ms_reason
+        if not claude_models:
+            claude_models, claude_reason = discover_claude_models(workspace, token)
+        gemini_models, gemini_reason = ms_gemini, ms_reason
+        if not gemini_models:
+            gemini_models, gemini_reason = discover_gemini_models(workspace, token)
+
+    # Apply the platform-team allowlist filter
+    claude_models = filter_anthropic_models(claude_models)
+    gemini_models = filter_gemini_models(gemini_models)
+
     opencode_models: dict[str, list[str]] = {}
     if claude_models:
         opencode_models["anthropic"] = list(claude_models.values())
@@ -315,7 +280,6 @@ def configure_shared_state(
     state["_discovery_reasons"] = {
         "claude": claude_reason,
         "gemini": gemini_reason,
-        "codex": codex_reason,
     }
     return state
 
@@ -549,27 +513,18 @@ def revert() -> int:
         )
         for tool, spec in TOOL_SPECS.items()
     }
-    pi_settings_restored = restore_file(
-        PI_SETTINGS_PATH, PI_SETTINGS_BACKUP_PATH, bool(managed_configs.get("pi"))
-    )
-    # Older Codex (< 0.134.0) had ucode edit the shared ~/.codex/config.toml in
-    # place; restoring the per-profile file above does not undo that.
-    legacy_codex_stripped = revert_legacy_shared_config()
     clear_state()
 
     print_heading("Revert")
     print_kv("Workspace", state.get("workspace") or "none")
     for tool, spec in TOOL_SPECS.items():
         print_kv(f"{spec['display']} config", "restored" if results[tool] else "unchanged")
-    if legacy_codex_stripped:
-        print_kv("Codex shared config", "ucode entries removed")
-    print_kv("Pi settings", "restored" if pi_settings_restored else "unchanged")
     for client, spec in MCP_CLIENTS.items():
         print_kv(
             f"{spec['display']} MCP config",
             "restored" if mcp_results.get(client) else "unchanged",
         )
-    print_success("ucode state cleared")
+    print_success("voxcode state cleared")
     return 0
 
 
@@ -592,7 +547,7 @@ app.add_typer(mcp_app, name="mcp", help="MCP servers exposed by ucode.")
 @mcp_app.command("web-search")
 def mcp_web_search_cmd() -> None:
     """Run the web_search MCP server over stdio. Invoked as a subprocess by Claude Code."""
-    from ucode.mcp_web_search import serve
+    from voxcode.mcp_web_search import serve
 
     serve()
 
@@ -675,42 +630,20 @@ def _launch_tool(tool_name: str, ctx: typer.Context) -> None:
         raise typer.Exit(130) from None
 
 
-@app.command("codex", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
-def codex_cmd(ctx: typer.Context) -> None:
-    """Launch Codex via Databricks."""
-    _launch_tool("codex", ctx)
-
-
-@app.command("claude", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
-def claude_cmd(ctx: typer.Context) -> None:
-    """Launch Claude Code via Databricks."""
-    _launch_tool("claude", ctx)
-
-
-@app.command("gemini", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
-def gemini_cmd(ctx: typer.Context) -> None:
-    """Launch Gemini CLI via Databricks."""
-    _launch_tool("gemini", ctx)
-
-
 @app.command(
     "opencode", context_settings={"allow_extra_args": True, "ignore_unknown_options": True}
 )
 def opencode_cmd(ctx: typer.Context) -> None:
-    """Launch OpenCode via Databricks."""
+    """Launch OpenCode via Databricks AI Gateway."""
     _launch_tool("opencode", ctx)
 
 
-@app.command("copilot", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
-def copilot_cmd(ctx: typer.Context) -> None:
-    """Launch GitHub Copilot CLI via Databricks."""
-    _launch_tool("copilot", ctx)
-
-
-@app.command("pi", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
-def pi_cmd(ctx: typer.Context) -> None:
-    """Launch Pi coding agent via Databricks."""
-    _launch_tool("pi", ctx)
+@app.command(
+    "launch", context_settings={"allow_extra_args": True, "ignore_unknown_options": True}
+)
+def launch_cmd(ctx: typer.Context) -> None:
+    """Alias for 'opencode' — launch OpenCode via Databricks AI Gateway."""
+    _launch_tool("opencode", ctx)
 
 
 @configure_app.callback(invoke_without_command=True)
@@ -719,20 +652,6 @@ def configure(
     dry_run: Annotated[
         bool, typer.Option("--dry-run", help="Print config files without writing them.")
     ] = False,
-    agent: Annotated[
-        str | None,
-        typer.Option(
-            "--agent",
-            help="Configure only the named agent (e.g. claude, codex, gemini, opencode, copilot, pi).",
-        ),
-    ] = None,
-    agents: Annotated[
-        str | None,
-        typer.Option(
-            "--agents",
-            help="Configure a comma-separated list of agents without prompting (e.g. claude,codex).",
-        ),
-    ] = None,
     workspaces: Annotated[
         str | None,
         typer.Option(
@@ -746,8 +665,7 @@ def configure(
             "--profiles",
             help="Configure a comma-separated list of existing Databricks CLI profiles "
             "without the workspace prompt. Each profile's host from ~/.databrickscfg "
-            "supplies the workspace URL. Auth behaves like --workspaces: OAuth login "
-            "is forced unless --use-pat is also passed.",
+            "supplies the workspace URL.",
         ),
     ] = None,
     use_pat: Annotated[
@@ -756,17 +674,14 @@ def configure(
             "--use-pat",
             help="Authenticate with the personal access token stored in "
             "~/.databrickscfg for the selected profile(s) instead of OAuth. "
-            "Requires --profiles; no interactive login is run. Intended for "
-            "CI / headless environments.",
+            "Requires --profiles; no interactive login is run.",
         ),
     ] = False,
     skip_validate: Annotated[
         bool,
         typer.Option(
             "--skip-validate",
-            help="Skip the post-configure validation step that sends a quick test "
-            "message through each agent. Config files are still written with the "
-            "freshly discovered models.",
+            help="Skip the post-configure validation step.",
         ),
     ] = False,
     tracing: Annotated[
@@ -780,21 +695,18 @@ def configure(
         bool,
         typer.Option(
             "--skip-upgrade",
-            help="Don't prompt to upgrade already-installed agent CLIs to a newer version. "
-            "Required updates (when an agent is below its minimum supported version) are "
-            "still applied.",
+            help="Don't prompt to upgrade OpenCode CLI.",
         ),
     ] = False,
     verbose: Annotated[
         str,
         typer.Option(
             "--verbose",
-            help="Output verbosity: 'normal' (default) renders decorative panels; "
-            "'low' prints terse single-line status instead.",
+            help="Output verbosity: 'normal' or 'low'.",
         ),
     ] = "normal",
 ) -> None:
-    """Configure workspace URL and AI Gateway."""
+    """Configure workspace URL and AI Gateway for OpenCode."""
     if ctx.invoked_subcommand is not None:
         return
     if verbose not in ("normal", "low"):
@@ -805,74 +717,38 @@ def configure(
     prompt_optional_updates = not skip_upgrade
     try:
         install_databricks_cli()
-        if agent is not None and agents is not None:
-            raise RuntimeError("Use either --agent or --agents, not both.")
         if workspaces is not None and profiles is not None:
             raise RuntimeError("Use either --workspaces or --profiles, not both.")
         if use_pat and profiles is None:
             raise RuntimeError(
                 "--use-pat requires --profiles. Pass the PAT-backed Databricks CLI "
-                "profile(s) explicitly, e.g. `ucode configure --profiles DEFAULT --use-pat`."
+                "profile(s) explicitly, e.g. `voxcode configure --profiles DEFAULT --use-pat`."
             )
         workspace_entries = _parse_workspaces_option(workspaces) if workspaces is not None else None
         if profiles is not None:
             workspace_entries = _parse_profiles_option(profiles)
-        # Only forward the opt-in flags when set so existing call expectations
-        # (and defaults) stay unchanged for the common interactive path.
         skip_kwargs: dict = {}
         if use_pat:
             skip_kwargs["use_pat"] = True
         if skip_validate:
             skip_kwargs["skip_validate"] = True
-        if agent is not None:
-            tool = normalize_tool(agent)
-            install_tool_binary(
-                tool,
-                strict=True,
-                update_existing=True,
-                prompt_optional_updates=prompt_optional_updates,
-            )
-            if workspace_entries is None:
-                configure_workspace_command(tool, **skip_kwargs)
-            else:
-                configure_workspace_command(
-                    tool,
-                    workspaces=workspace_entries,
-                    **skip_kwargs,
-                )
-        elif agents is not None:
-            selected_tools = _parse_agents_option(agents)
-            if workspace_entries is None:
-                configure_workspace_command(
-                    selected_tools=selected_tools,
-                    prompt_optional_updates=prompt_optional_updates,
-                    **skip_kwargs,
-                )
-            else:
-                configure_workspace_command(
-                    selected_tools=selected_tools,
-                    workspaces=workspace_entries,
-                    prompt_optional_updates=prompt_optional_updates,
-                    **skip_kwargs,
-                )
+        # Always configure opencode (the only supported tool)
+        tool = "opencode"
+        install_tool_binary(
+            tool,
+            strict=True,
+            update_existing=True,
+            prompt_optional_updates=prompt_optional_updates,
+        )
+        if workspace_entries is None:
+            configure_workspace_command(tool, **skip_kwargs)
         else:
-            # Tool binaries are installed after the user picks which agents
-            # they want, in configure_workspace_command.
-            if workspace_entries is None:
-                configure_workspace_command(
-                    prompt_optional_updates=prompt_optional_updates,
-                    **skip_kwargs,
-                )
-            else:
-                configure_workspace_command(
-                    workspaces=workspace_entries,
-                    prompt_optional_updates=prompt_optional_updates,
-                    **skip_kwargs,
-                )
+            configure_workspace_command(
+                tool,
+                workspaces=workspace_entries,
+                **skip_kwargs,
+            )
         if tracing:
-            # The workspaces were just configured, so enable tracing for them
-            # directly instead of re-prompting. Fall back to the workspace that
-            # `configure_workspace_command` made current (the interactive pick).
             tracing_workspaces = workspace_entries
             if tracing_workspaces is None:
                 current = load_full_state().get("current_workspace")

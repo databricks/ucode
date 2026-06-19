@@ -3,9 +3,9 @@ requires = ["uv_build>=0.11.0"]
 build-backend = "uv_build"
 
 [project]
-name = "ucode"
+name = "voxcode"
 version = "0.1.0"
-description = "Bootstrap Codex against a Databricks workspace with minimal setup."
+description = "Van Oord thin launcher for OpenCode via Databricks AI Gateway."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -16,16 +16,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Only the Claude Code tracing path needs the Python MLflow runtime; OpenCode
-# and Codex trace via JS plugins. Kept out of the core deps so a plain `ucode`
-# install stays lean. Enable with `uv tool install "ucode[tracing]"`.
 tracing = ["mlflow[databricks]>=3.4"]
 
 [project.scripts]
-ucode = "ucode.cli:main"
+voxcode = "voxcode.cli:main"
 
 [tool.uv.build-backend]
-module-name = "ucode"
+module-name = "voxcode"
 
 [dependency-groups]
 dev = [

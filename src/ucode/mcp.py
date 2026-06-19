@@ -37,8 +37,8 @@ from ucode.databricks import (
     list_mcp_services,
     workspace_hostname,
 )
-from ucode.state import load_full_state, load_state, save_state
-from ucode.ui import (
+from voxcode.state import load_full_state, load_state, save_state
+from voxcode.ui import (
     print_note,
     print_section,
     print_success,
@@ -252,40 +252,15 @@ def configured_mcp_clients(state: dict, installed_clients: list[str]) -> list[st
 
 
 def configure_client_mcp_server(client: str, name: str, url: str, entry: dict) -> list[str]:
-    if client == "claude":
-        removed_scopes = [
-            scope for scope in MCP_CLEANUP_SCOPES if remove_claude_mcp_server(name, scope)
-        ]
-        add_claude_mcp_server(name, entry, MCP_USER_SCOPE)
-        return removed_scopes
-    if client == "codex":
-        removed = remove_codex_mcp_server(name)
-        add_codex_mcp_server(name, url)
-        return [MCP_USER_SCOPE] if removed else []
-    if client == "gemini":
-        removed = remove_gemini_mcp_server(name)
-        add_gemini_mcp_server(name, url)
-        return [MCP_USER_SCOPE] if removed else []
     if client == "opencode":
         removed = opencode.write_mcp_server_config(name, url)
-        return [MCP_USER_SCOPE] if removed else []
-    if client == "copilot":
-        removed = copilot.write_mcp_server_config(name, url)
         return [MCP_USER_SCOPE] if removed else []
     raise RuntimeError(f"Unsupported MCP client '{client}'.")
 
 
 def remove_client_mcp_server(client: str, name: str) -> list[str]:
-    if client == "claude":
-        return [scope for scope in MCP_CLEANUP_SCOPES if remove_claude_mcp_server(name, scope)]
-    if client == "codex":
-        return [MCP_USER_SCOPE] if remove_codex_mcp_server(name) else []
-    if client == "gemini":
-        return [MCP_USER_SCOPE] if remove_gemini_mcp_server(name) else []
     if client == "opencode":
         return [MCP_USER_SCOPE] if opencode.remove_mcp_server_config(name) else []
-    if client == "copilot":
-        return [MCP_USER_SCOPE] if copilot.remove_mcp_server_config(name) else []
     raise RuntimeError(f"Unsupported MCP client '{client}'.")
 
 
@@ -300,17 +275,8 @@ def revert_mcp_configs(state: dict) -> dict[str, bool]:
                 continue
             removed_scopes = remove_client_mcp_server(client, name)
             results[client] = bool(removed_scopes) or results.get(client, False)
-
     # OpenCode MCP entries live in the normal OpenCode config and are restored
-    # by the main agent config revert. Copilot stores MCP servers separately,
-    # so restore its original MCP file after removing per-server entries above.
-    results["copilot"] = restore_file(
-        copilot.COPILOT_MCP_CONFIG_PATH,
-        copilot.COPILOT_MCP_BACKUP_PATH,
-        any(
-            "copilot" in (server.get("clients") or []) for server in state.get("mcp_servers") or []
-        ),
-    ) or results.get("copilot", False)
+    # by the main agent config revert.
     return results
 
 
@@ -943,7 +909,7 @@ def configure_mcp_command() -> int:
     state = load_state()
     workspace = state.get("workspace")
     if not workspace:
-        raise RuntimeError("Workspace is not configured. Run `ucode configure` first.")
+        raise RuntimeError("Workspace is not configured. Run `voxcode configure` first.")
 
     purge_cross_workspace_mcp_residue(state, workspace)
 
@@ -956,7 +922,7 @@ def configure_mcp_command() -> int:
     clients = configured_mcp_clients(state, installed_clients)
     if not clients:
         raise RuntimeError(
-            "No configured MCP-capable coding agents are installed. Run `ucode configure` "
+            "No configured MCP-capable coding agents are installed. Run `voxcode configure` "
             "for Codex, Claude, Gemini, OpenCode, or GitHub Copilot CLI first."
         )
     configured_tools = set(state.get("available_tools") or [])
@@ -973,7 +939,7 @@ def configure_mcp_command() -> int:
     print_note(f"Configuring for: {client_names}")
     for client in missing_clients:
         print_warning(
-            f"{MCP_CLIENTS[client]['display']} is configured in ucode but not installed; "
+            f"{MCP_CLIENTS[client]['display']} is configured in voxcode but not installed; "
             "skipping MCP config."
         )
 
