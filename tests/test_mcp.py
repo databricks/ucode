@@ -385,6 +385,71 @@ class TestMcpPicker:
         choices_by_title = {choice.title: choice for choice in choices}
         assert choices_by_title["App: mcp-my-app"].value == f"{mcp.MCP_ADD_PREFIX}app:mcp-my-app"
 
+    def test_vector_search_mcp_servers_emit_managed_url_per_pair(self):
+        servers = mcp.vector_search_mcp_servers(
+            [("main", "search"), ("Marketing", "Docs")],
+            WS,
+        )
+        assert servers == [
+            {
+                "name": "databricks-vector-search-main-search",
+                "title": "main.search",
+                "catalog": "main",
+                "schema": "search",
+                "url": f"{WS}/api/2.0/mcp/vector-search/main/search",
+            },
+            {
+                "name": "databricks-vector-search-marketing-docs",
+                "title": "Marketing.Docs",
+                "catalog": "Marketing",
+                "schema": "Docs",
+                "url": f"{WS}/api/2.0/mcp/vector-search/Marketing/Docs",
+            },
+        ]
+
+    def test_uc_functions_mcp_servers_emit_managed_url_per_pair(self):
+        servers = mcp.uc_functions_mcp_servers(
+            [("analytics", "tools"), ("ml", "udfs")],
+            WS,
+        )
+        assert servers == [
+            {
+                "name": "databricks-functions-analytics-tools",
+                "title": "analytics.tools",
+                "catalog": "analytics",
+                "schema": "tools",
+                "url": f"{WS}/api/2.0/mcp/functions/analytics/tools",
+            },
+            {
+                "name": "databricks-functions-ml-udfs",
+                "title": "ml.udfs",
+                "catalog": "ml",
+                "schema": "udfs",
+                "url": f"{WS}/api/2.0/mcp/functions/ml/udfs",
+            },
+        ]
+
+    def test_picker_lists_discovered_vector_search_and_uc_functions(self):
+        choices = mcp.build_mcp_picker_choices(
+            [],
+            [],
+            [],
+            [],
+            available_vector_search_servers=mcp.vector_search_mcp_servers([("main", "search")], WS),
+            available_uc_functions_servers=mcp.uc_functions_mcp_servers(
+                [("analytics", "tools")], WS
+            ),
+        )
+        choices_by_title = {choice.title: choice for choice in choices}
+        assert (
+            choices_by_title["Vector Search: main.search"].value
+            == f"{mcp.MCP_ADD_PREFIX}vector-search:main.search"
+        )
+        assert (
+            choices_by_title["UC Functions: analytics.tools"].value
+            == f"{mcp.MCP_ADD_PREFIX}uc-functions:analytics.tools"
+        )
+
     def test_picker_keeps_saved_legacy_servers_for_removal(self):
         choices = mcp.build_mcp_picker_choices(
             [],
@@ -408,10 +473,15 @@ def _patch_mcp_choices(monkeypatch, *values: str) -> None:
         "prompt_for_mcp_server_choices",
         lambda *args, **kwargs: list(values),
     )
-    # Curated system.ai.* MCP-services discovery now always runs; stub it so
-    # configure_mcp_command tests don't shell out to the `databricks` CLI.
-    # Tests that exercise it override this after calling the helper.
+    # Stub the always-on discoveries so configure_mcp_command tests don't hit
+    # real APIs. Individual tests override these after calling the helper.
     monkeypatch.setattr(mcp, "discover_mcp_service_names", lambda workspace, profile=None: [])
+    monkeypatch.setattr(
+        mcp, "discover_vector_search_mcp_servers", lambda workspace, profile=None: []
+    )
+    monkeypatch.setattr(
+        mcp, "discover_uc_functions_mcp_servers", lambda workspace, profile=None: []
+    )
 
 
 class TestConfigureMcpCommand:
@@ -559,6 +629,113 @@ class TestConfigureMcpCommand:
             {
                 "name": "databricks-genie-space-123",
                 "url": f"{WS}/api/2.0/mcp/genie/space-123",
+                "auth": "env:OAUTH_TOKEN",
+                "clients": ["claude"],
+            }
+        ]
+
+    def test_registers_discovered_vector_search_server(self, monkeypatch):
+        saved_states: list[dict] = []
+        configured: list[tuple[str, str, str, dict]] = []
+
+        monkeypatch.setattr(mcp, "load_state", lambda: {**CLAUDE_STATE})
+        monkeypatch.setattr(mcp.shutil, "which", lambda binary: f"/usr/bin/{binary}")
+        monkeypatch.setattr(mcp, "ensure_databricks_auth", lambda workspace, profile=None: None)
+        monkeypatch.setattr(mcp, "available_mcp_clients", lambda: ["claude"])
+        monkeypatch.setattr(
+            mcp, "discover_external_mcp_connection_names", lambda workspace, profile=None: []
+        )
+        monkeypatch.setattr(mcp, "discover_genie_mcp_servers", lambda workspace, profile=None: [])
+        monkeypatch.setattr(mcp, "discover_app_mcp_servers", lambda workspace, profile=None: [])
+        _patch_mcp_choices(
+            monkeypatch, f"{mcp.MCP_ADD_PREFIX}{mcp.VECTOR_SEARCH_SELECTION_PREFIX}main.search"
+        )
+        monkeypatch.setattr(
+            mcp,
+            "discover_vector_search_mcp_servers",
+            lambda workspace, profile=None: mcp.vector_search_mcp_servers(
+                [("main", "search")], workspace
+            ),
+        )
+        monkeypatch.setattr(
+            mcp,
+            "configure_client_mcp_server",
+            lambda client, name, url, entry: configured.append((client, name, url, entry)) or [],
+        )
+        monkeypatch.setattr(mcp, "save_state", lambda state: saved_states.append(state.copy()))
+
+        assert mcp.configure_mcp_command() == 0
+
+        assert configured == [
+            (
+                "claude",
+                "databricks-vector-search-main-search",
+                f"{WS}/api/2.0/mcp/vector-search/main/search",
+                {
+                    "type": "http",
+                    "url": f"{WS}/api/2.0/mcp/vector-search/main/search",
+                    "headers": {"Authorization": "Bearer ${OAUTH_TOKEN}"},
+                },
+            )
+        ]
+        assert saved_states[-1]["mcp_servers"] == [
+            {
+                "name": "databricks-vector-search-main-search",
+                "url": f"{WS}/api/2.0/mcp/vector-search/main/search",
+                "auth": "env:OAUTH_TOKEN",
+                "clients": ["claude"],
+            }
+        ]
+
+    def test_registers_discovered_uc_functions_server(self, monkeypatch):
+        saved_states: list[dict] = []
+        configured: list[tuple[str, str, str, dict]] = []
+
+        monkeypatch.setattr(mcp, "load_state", lambda: {**CLAUDE_STATE})
+        monkeypatch.setattr(mcp.shutil, "which", lambda binary: f"/usr/bin/{binary}")
+        monkeypatch.setattr(mcp, "ensure_databricks_auth", lambda workspace, profile=None: None)
+        monkeypatch.setattr(mcp, "available_mcp_clients", lambda: ["claude"])
+        monkeypatch.setattr(
+            mcp, "discover_external_mcp_connection_names", lambda workspace, profile=None: []
+        )
+        monkeypatch.setattr(mcp, "discover_genie_mcp_servers", lambda workspace, profile=None: [])
+        monkeypatch.setattr(mcp, "discover_app_mcp_servers", lambda workspace, profile=None: [])
+        _patch_mcp_choices(
+            monkeypatch,
+            f"{mcp.MCP_ADD_PREFIX}{mcp.UC_FUNCTIONS_SELECTION_PREFIX}analytics.tools",
+        )
+        monkeypatch.setattr(
+            mcp,
+            "discover_uc_functions_mcp_servers",
+            lambda workspace, profile=None: mcp.uc_functions_mcp_servers(
+                [("analytics", "tools")], workspace
+            ),
+        )
+        monkeypatch.setattr(
+            mcp,
+            "configure_client_mcp_server",
+            lambda client, name, url, entry: configured.append((client, name, url, entry)) or [],
+        )
+        monkeypatch.setattr(mcp, "save_state", lambda state: saved_states.append(state.copy()))
+
+        assert mcp.configure_mcp_command() == 0
+
+        assert configured == [
+            (
+                "claude",
+                "databricks-functions-analytics-tools",
+                f"{WS}/api/2.0/mcp/functions/analytics/tools",
+                {
+                    "type": "http",
+                    "url": f"{WS}/api/2.0/mcp/functions/analytics/tools",
+                    "headers": {"Authorization": "Bearer ${OAUTH_TOKEN}"},
+                },
+            )
+        ]
+        assert saved_states[-1]["mcp_servers"] == [
+            {
+                "name": "databricks-functions-analytics-tools",
+                "url": f"{WS}/api/2.0/mcp/functions/analytics/tools",
                 "auth": "env:OAUTH_TOKEN",
                 "clients": ["claude"],
             }
