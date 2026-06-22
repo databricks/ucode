@@ -3,16 +3,18 @@
 from __future__ import annotations
 
 import json
-import shutil
 import subprocess
+
+from ucode.proc import npm_command
 
 
 def available_npm_package_update(package: str) -> tuple[str, str] | None:
-    if not shutil.which("npm"):
+    npm = npm_command("outdated", "-g", "--json", package)
+    if npm is None:
         return None
     try:
         result = subprocess.run(
-            ["npm", "outdated", "-g", "--json", package],
+            npm,
             capture_output=True,
             text=True,
             timeout=10,

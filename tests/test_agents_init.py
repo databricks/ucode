@@ -180,21 +180,24 @@ class TestResolveLaunchModel:
 
 
 class TestInstallToolBinary:
+    @pytest.fixture(autouse=True)
+    def _stub_npm_command(self, monkeypatch):
+        """Resolve npm to the bare ``["npm", *args]`` form so install argv
+        assertions don't depend on the test host's PATH. The npm-missing test
+        overrides this with None."""
+        monkeypatch.setattr("ucode.agents.npm_command", lambda *args: ["npm", *args])
+
     def test_non_strict_returns_false_when_npm_missing(self, monkeypatch):
         monkeypatch.setattr("ucode.agents.shutil.which", lambda _: None)
+        monkeypatch.setattr("ucode.agents.npm_command", lambda *args: None)
 
         assert install_tool_binary("opencode", strict=False) is False
 
     def test_non_strict_returns_false_when_install_fails(self, monkeypatch):
-        def fake_which(binary: str) -> str | None:
-            if binary == "npm":
-                return "/usr/bin/npm"
-            return None
-
         def fake_run(*args, **kwargs):
             raise subprocess.CalledProcessError(1, args[0])
 
-        monkeypatch.setattr("ucode.agents.shutil.which", fake_which)
+        monkeypatch.setattr("ucode.agents.shutil.which", lambda binary: None)
         monkeypatch.setattr("ucode.agents.subprocess.run", fake_run)
 
         assert install_tool_binary("opencode", strict=False) is False

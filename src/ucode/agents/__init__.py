@@ -20,6 +20,7 @@ from ucode.config_io import ToolSpec
 from ucode.databricks import (
     install_databricks_cli,
 )
+from ucode.proc import npm_command
 from ucode.state import load_state, save_state
 from ucode.telemetry import agent_version
 from ucode.ui import (
@@ -75,13 +76,14 @@ def _update_installed_tool_binary(tool: str) -> bool:
     binary = spec["binary"]
     package = spec["package"]
 
-    if not shutil.which("npm"):
+    npm = npm_command("install", "-g", package)
+    if npm is None:
         print_warning(f"`npm` is not available to update {spec['display']}; continuing.")
         return False
 
     print_note(f"Updating {spec['display']}...")
     try:
-        subprocess.run(["npm", "install", "-g", package], check=True, timeout=300)
+        subprocess.run(npm, check=True, timeout=300)
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
         print_warning(f"Could not update {spec['display']}; continuing.")
         return False
@@ -135,7 +137,8 @@ def install_tool_binary(tool: str, *, strict: bool = True, update_existing: bool
             raise RuntimeError(version_error)
         return True
 
-    if not shutil.which("npm"):
+    npm = npm_command("install", "-g", package)
+    if npm is None:
         message = f"`{binary}` is not installed and npm is not available to install it."
         if strict:
             raise RuntimeError(message)
@@ -145,7 +148,7 @@ def install_tool_binary(tool: str, *, strict: bool = True, update_existing: bool
     print_section("Bootstrap")
     print_warning(f"`{binary}` was not found. Installing {spec['display']}...")
     try:
-        subprocess.run(["npm", "install", "-g", package], check=True, timeout=300)
+        subprocess.run(npm, check=True, timeout=300)
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
         message = f"Failed to install {spec['display']} automatically."
         if strict:
@@ -415,6 +418,9 @@ def validate_all_tools(state: dict) -> None:
             # Rollback settings.json for Pi
             if tool == "pi":
                 restore_file(PI_SETTINGS_PATH, PI_SETTINGS_BACKUP_PATH, managed)
+            # Rollback the opt-in default ~/.claude/settings.json for Claude.
+            if tool == "claude":
+                claude.revert_default_settings(state)
             available_tools.remove(tool)
     state["available_tools"] = available_tools
     save_state(state)

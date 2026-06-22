@@ -6,11 +6,21 @@ import json
 import subprocess
 from unittest.mock import MagicMock
 
+import pytest
+
 from ucode import mcp
 
 WS = "https://example.databricks.com"
 CLAUDE_STATE = {"workspace": WS, "available_tools": ["claude"]}
 ALL_MCP_CLIENTS = ["claude", "codex", "gemini", "opencode", "copilot"]
+
+
+@pytest.fixture(autouse=True)
+def _stub_cli_command(monkeypatch):
+    """Resolve CLI argv to the bare ``[name, *args]`` form so argv assertions
+    don't depend on the test host's PATH (real `cmd /c` wrapping is covered in
+    test_proc.py). Tests that need the not-installed branch override this."""
+    monkeypatch.setattr(mcp, "cli_command", lambda name, *args: [name, *args])
 
 
 class TestBuildMcpHttpEntry:
@@ -46,6 +56,30 @@ class TestAddClaudeMcpServer:
         assert args[5:] == ["-s", "user"]
         assert "--client-secret" not in args
         assert "env" not in calls[0]["kwargs"]
+
+
+class TestMcpCliMissing:
+    """When the target CLI isn't on PATH, cli_command returns None: add raises,
+    remove is a no-op returning False."""
+
+    def test_add_claude_raises_when_cli_missing(self, monkeypatch):
+        monkeypatch.setattr(mcp, "cli_command", lambda name, *args: None)
+        entry = mcp.build_mcp_http_entry(f"{WS}/api/2.0/mcp/external/github")
+        with pytest.raises(RuntimeError, match="claude"):
+            mcp.add_claude_mcp_server("github", entry)
+
+    def test_remove_claude_false_when_cli_missing(self, monkeypatch):
+        monkeypatch.setattr(mcp, "cli_command", lambda name, *args: None)
+        assert mcp.remove_claude_mcp_server("github", "user") is False
+
+    def test_add_codex_raises_when_cli_missing(self, monkeypatch):
+        monkeypatch.setattr(mcp, "cli_command", lambda name, *args: None)
+        with pytest.raises(RuntimeError, match="codex"):
+            mcp.add_codex_mcp_server("github", f"{WS}/api/2.0/mcp/external/github")
+
+    def test_remove_gemini_false_when_cli_missing(self, monkeypatch):
+        monkeypatch.setattr(mcp, "cli_command", lambda name, *args: None)
+        assert mcp.remove_gemini_mcp_server("github") is False
 
 
 class TestAddCodexMcpServer:
