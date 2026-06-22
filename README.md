@@ -90,6 +90,32 @@ Discovered external MCP connections are listed directly. MCP auth uses a Databri
 | `ucode configure --dry-run` | Preview config files without writing them |
 | `ucode configure --agents claude,codex` | Configure specific agents without the interactive picker |
 | `ucode configure --workspaces https://first.databricks.com,https://second.databricks.com` | Configure workspaces without the interactive picker |
+| `ucode configure claude --write-default-settings` | Also write `~/.claude/settings.json` so the Claude desktop app and IDE/VS Code extension use the Databricks gateway (see below) |
+
+### Using Claude outside `ucode claude` (desktop app / IDE extension)
+
+By default `ucode` keeps its Claude configuration self-contained in
+`~/.claude/ucode-settings.json` and injects it via `--settings` when you run
+`ucode claude`. The Claude desktop app and the IDE / VS Code extension ignore
+that flag — they read `~/.claude/settings.json` — so they do **not** pick up the
+Databricks gateway auth on their own.
+
+If you want those launch paths to use the gateway too, opt in:
+
+```bash
+ucode configure claude --write-default-settings
+```
+
+This merges ucode's `apiKeyHelper` and `ANTHROPIC_*` overlay into
+`~/.claude/settings.json` (backing up any existing file first). It is off by
+default because it affects **all** Claude usage on your machine, including plain
+`claude`. To turn it back off and restore the original file:
+
+```bash
+ucode configure claude --no-write-default-settings
+```
+
+`ucode revert` also restores it.
 
 ## Managed Local Files
 
@@ -98,7 +124,8 @@ Discovered external MCP connections are listed directly. MCP auth uses a Databri
 | File | Tool |
 |------|------|
 | `~/.codex/config.toml` | Codex |
-| `~/.claude/settings.json` | Claude Code |
+| `~/.claude/ucode-settings.json` | Claude Code (always) |
+| `~/.claude/settings.json` | Claude Code (only with `configure claude --write-default-settings`) |
 | `~/.gemini/.env` | Gemini CLI |
 | `~/.config/opencode/opencode.json` | OpenCode |
 | `~/.copilot/.env` | GitHub Copilot CLI |
