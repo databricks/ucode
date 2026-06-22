@@ -16,6 +16,7 @@ from ucode.config_io import (
     backup_existing_file,
     deep_merge_dict,
     read_json_safe,
+    restore_file,
     write_json_file,
 )
 from ucode.databricks import (
@@ -30,36 +31,44 @@ from ucode.ui import print_note, print_success, print_warning
 
 CLAUDE_CONFIG_DIR = Path.home() / ".claude"
 CLAUDE_SETTINGS_PATH = CLAUDE_CONFIG_DIR / "ucode-settings.json"
-CLAUDE_DEFAULT_SETTINGS_PATH = CLAUDE_CONFIG_DIR / "settings.json"
 CLAUDE_BACKUP_PATH = APP_DIR / "claude-ucode-settings.backup.json"
+# Claude Code's *default* settings file. ucode never touches this unless the user
+# opts in (see `state["claude_write_default_settings"]`): the `ucode claude`
+# launcher passes `--settings ucode-settings.json`, but the Claude desktop app and
+# the IDE / VS Code extension read settings.json directly and would otherwise not
+# see the Databricks gateway auth.
+CLAUDE_DEFAULT_SETTINGS_PATH = CLAUDE_CONFIG_DIR / "settings.json"
 CLAUDE_DEFAULT_BACKUP_PATH = APP_DIR / "claude-settings.backup.json"
-
-# On Windows, subprocess can fail to locate 'claude' via PATH because npm
-# wrappers are .cmd files that Python's subprocess doesn't resolve the same
-# way as cmd.exe. Resolve the actual .exe inside the npm package tree so
-# the subprocess call is unambiguous on all platforms.
-_claude_wrapper = shutil.which("claude.cmd") or shutil.which("claude") or shutil.which("claude.bat")
-if _claude_wrapper:
-    _claude_root = Path(_claude_wrapper).parent
-    _claude_exe = (
-        _claude_root
-        / "node_modules"
-        / "@anthropic-ai"
-        / "claude-code"
-        / "bin"
-        / "claude.exe"
-    )
-    CLAUDE_BINARY = str(_claude_exe) if _claude_exe.exists() else _claude_wrapper
-else:
-    CLAUDE_BINARY = "claude"
+# State key: when truthy, write_tool_config also mirrors the overlay into the
+# default settings.json. Set by `ucode configure claude --write-default-settings`.
+WRITE_DEFAULT_SETTINGS_KEY = "claude_write_default_settings"
+# State key recording that ucode created settings.json itself (no pre-existing
+# file to back up), so revert deletes rather than leaves it behind.
+DEFAULT_SETTINGS_MANAGED_KEY = "claude_default_settings_managed"
 
 SPEC: ToolSpec = {
-    "binary": CLAUDE_BINARY,
+    "binary": "claude",
     "package": "@anthropic-ai/claude-code",
     "display": "Claude Code",
     "config_path": CLAUDE_SETTINGS_PATH,
     "backup_path": CLAUDE_BACKUP_PATH,
 }
+
+
+def claude_command(binary: str = "claude") -> list[str]:
+    """Return the argv prefix used to invoke the Claude CLI.
+
+    On Windows, npm installs `claude` as a `.cmd`/`.bat` wrapper. Python's
+    subprocess/execvp resolves these differently from cmd.exe and `CreateProcess`
+    cannot execute a batch file directly, so a bare wrapper path fails. When the
+    resolved executable is such a wrapper, run it through `cmd /c`. On POSIX (and
+    when a real executable is found) the binary is returned unchanged, so the
+    default spec and macOS/Linux behaviour stay identical."""
+    if os.name == "nt":
+        wrapper = shutil.which("claude.cmd") or shutil.which("claude.bat") or shutil.which(binary)
+        if wrapper and wrapper.lower().endswith((".cmd", ".bat")):
+            return ["cmd", "/c", wrapper]
+    return [binary]
 
 
 def is_update_available() -> tuple[str, str] | None:
@@ -236,7 +245,6 @@ def _unregister_web_search_mcp() -> None:
 
 def write_tool_config(state: dict, model: str) -> dict:
     backup_existing_file(CLAUDE_SETTINGS_PATH, CLAUDE_BACKUP_PATH)
-    backup_existing_file(CLAUDE_DEFAULT_SETTINGS_PATH, CLAUDE_DEFAULT_BACKUP_PATH)
     web_search_model = _resolve_web_search_model(state)
     overlay, managed_keys = render_overlay(
         state["workspace"],
@@ -273,13 +281,12 @@ def write_tool_config(state: dict, model: str) -> dict:
         _remove_tracing_stop_hook(merged)
     write_json_file(CLAUDE_SETTINGS_PATH, merged)
 
-    # Mirror the auth/env overlay into ~/.claude/settings.json so Claude Code
-    # finds the apiKeyHelper and ANTHROPIC_* env vars regardless of whether it
-    # is launched via `ucode claude` (which passes --settings) or directly from
-    # the Claude desktop app / IDE extension (which reads settings.json by default).
-    existing_default = read_json_safe(CLAUDE_DEFAULT_SETTINGS_PATH)
-    merged_default = deep_merge_dict(existing_default, overlay)
-    write_json_file(CLAUDE_DEFAULT_SETTINGS_PATH, merged_default)
+    # Opt-in only: mirror the same overlay into the default ~/.claude/settings.json
+    # so the Claude desktop app / IDE extension (which ignore --settings) also pick
+    # up the Databricks gateway auth. Disabled by default to keep ucode's footprint
+    # limited to its own ucode-settings.json.
+    if state.get(WRITE_DEFAULT_SETTINGS_KEY):
+        state = _write_default_settings(state, overlay)
 
     if web_search_model:
         _register_web_search_mcp(state["workspace"], web_search_model, state.get("profile"))
@@ -287,6 +294,33 @@ def write_tool_config(state: dict, model: str) -> dict:
     state = mark_tool_managed(state, "claude", managed_keys)
     save_state(state)
     return state
+
+
+def _write_default_settings(state: dict, overlay: dict) -> dict:
+    """Merge the ucode overlay into ~/.claude/settings.json, backing up any
+    pre-existing file first. Records whether ucode created the file (no prior
+    backup) so revert can delete rather than orphan it."""
+    had_existing = CLAUDE_DEFAULT_SETTINGS_PATH.exists()
+    backup_existing_file(CLAUDE_DEFAULT_SETTINGS_PATH, CLAUDE_DEFAULT_BACKUP_PATH)
+    existing_default = read_json_safe(CLAUDE_DEFAULT_SETTINGS_PATH)
+    merged_default = deep_merge_dict(existing_default, overlay)
+    write_json_file(CLAUDE_DEFAULT_SETTINGS_PATH, merged_default)
+    # "Managed" (delete on revert) only when ucode created the file itself; if a
+    # file existed, the backup is what revert restores.
+    state[DEFAULT_SETTINGS_MANAGED_KEY] = not had_existing
+    return state
+
+
+def revert_default_settings(state: dict) -> bool:
+    """Restore (or delete) ~/.claude/settings.json that the opt-in wrote.
+
+    Returns True if anything was changed. No-op when ucode never wrote the
+    default settings (no backup and not ucode-managed)."""
+    managed = bool(state.get(DEFAULT_SETTINGS_MANAGED_KEY))
+    restored = restore_file(CLAUDE_DEFAULT_SETTINGS_PATH, CLAUDE_DEFAULT_BACKUP_PATH, managed)
+    if restored:
+        state[DEFAULT_SETTINGS_MANAGED_KEY] = False
+    return restored
 
 
 def _is_tracing_stop_hook(hook: object) -> bool:
@@ -454,16 +488,16 @@ def default_model(state: dict) -> str | None:
 
 
 def launch(state: dict, tool_args: list[str]) -> None:
-    binary = SPEC["binary"]
     workspace = state.get("workspace")
     if workspace:
         os.environ["OAUTH_TOKEN"] = get_databricks_token(workspace, state.get("profile"))
-    os.execvp(binary, [binary, "--settings", str(CLAUDE_SETTINGS_PATH), *tool_args])
+    cmd = claude_command(SPEC["binary"])
+    os.execvp(cmd[0], [*cmd, "--settings", str(CLAUDE_SETTINGS_PATH), *tool_args])
 
 
 def validate_cmd(binary: str) -> list[str]:
     return [
-        binary,
+        *claude_command(binary),
         "--settings",
         str(CLAUDE_SETTINGS_PATH),
         "-p",

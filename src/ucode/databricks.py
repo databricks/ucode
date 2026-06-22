@@ -13,7 +13,6 @@ import re
 import shlex
 import shutil
 import subprocess
-import sys
 from pathlib import Path
 from typing import Literal, cast, overload
 from urllib import error as urllib_error
@@ -957,28 +956,20 @@ def list_databricks_apps(workspace: str, profile: str | None = None) -> list[dic
 
 
 def build_auth_shell_command(workspace: str, profile: str | None = None) -> str:
+    """Build the apiKeyHelper command an agent runs to print a fresh token.
+
+    The two platforms need different syntax: POSIX agents run the helper through
+    `sh`, while Claude Code on Windows runs it through cmd.exe, which can't parse
+    the POSIX `[ -n "$VAR" ]` / `env -u` / `jq` constructs. Each dialect lives in
+    its own builder so the quoting for each stays auditable; POSIX behaviour is
+    unchanged."""
     workspace_clean = workspace.rstrip("/")
-
     if os.name == "nt":
-        # On Windows, Claude Code runs apiKeyHelper via cmd.exe, which does not
-        # understand POSIX syntax ([ -n "$VAR" ], env -u, jq pipes). Instead we
-        # delegate to the Python interpreter that is running ucode — it is always
-        # available, handles DATABRICKS_BEARER short-circuit, and parses the JSON
-        # token response without requiring jq on PATH.
-        python_exe = sys.executable
-        databricks_exe = shutil.which("databricks") or "databricks"
-        profile_part = f", '--profile', {profile!r}" if profile else ""
-        helper_code = (
-            "import json, os, subprocess, sys; "
-            "bearer=os.environ.get('DATABRICKS_BEARER'); "
-            "sys.exit(print(bearer) or 0) if bearer else None; "
-            f"cmd=[{databricks_exe!r},'auth','token','--host',{workspace_clean!r}"
-            f"{profile_part},'--force-refresh','--output','json']; "
-            "p=subprocess.run(cmd,capture_output=True,text=True,check=True,timeout=30); "
-            "print(json.loads(p.stdout)['access_token'])"
-        )
-        return f'"{python_exe}" -c {helper_code!r}'
+        return _build_windows_auth_command(workspace_clean, profile)
+    return _build_posix_auth_command(workspace_clean, profile)
 
+
+def _build_posix_auth_command(workspace_clean: str, profile: str | None) -> str:
     workspace_arg = shlex.quote(workspace_clean)
     if profile:
         profile_arg = shlex.quote(profile)
@@ -998,6 +989,38 @@ def build_auth_shell_command(workspace: str, profile: str | None = None) -> str:
         'printf "%s\\n" "$DATABRICKS_BEARER"; '
         f"else {cli_command}; fi"
     )
+
+
+def _build_windows_auth_command(workspace_clean: str, profile: str | None) -> str:
+    """Windows apiKeyHelper: delegate to a stable `ucode` subcommand.
+
+    cmd.exe can't run the POSIX/jq pipeline emitted for sh, and hand-rolling an
+    inline cmd.exe or `python -c` script that short-circuits DATABRICKS_BEARER
+    and parses JSON is fragile to quote. Instead we invoke
+    `ucode internal print-databricks-token`, which reuses the same token path
+    (DATABRICKS_BEARER short-circuit, profile resolution, JSON parsing) and
+    prints only the token. Values are double-quoted for cmd.exe."""
+    ucode_exe = shutil.which("ucode") or "ucode"
+    parts = [
+        f'"{ucode_exe}"',
+        "internal",
+        "print-databricks-token",
+        "--host",
+        f'"{workspace_clean}"',
+    ]
+    if profile:
+        parts += ["--profile", f'"{profile}"']
+    return " ".join(parts)
+
+
+def print_databricks_token(workspace: str, profile: str | None = None) -> None:
+    """Print a fresh Databricks access token to stdout — the Windows apiKeyHelper.
+
+    Delegates to ``get_databricks_token`` so the DATABRICKS_BEARER short-circuit,
+    profile resolution, and non-interactive re-auth retry all apply identically
+    to the POSIX helper. Only the bare token is written to stdout (diagnostics go
+    to the debug log / stderr) so the agent reads a clean key."""
+    print(get_databricks_token(workspace, profile, force_refresh=True))
 
 
 def discover_claude_models(workspace: str, token: str) -> tuple[dict[str, str], str | None]:

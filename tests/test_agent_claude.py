@@ -177,8 +177,48 @@ class TestClaudeDefaultModel:
         assert claude.default_model({"claude_models": {}}) is None
 
 
+class TestClaudeCommand:
+    """`claude_command` resolves how the CLI is invoked per platform."""
+
+    def test_posix_returns_bare_binary(self, monkeypatch):
+        monkeypatch.setattr(os, "name", "posix")
+        assert claude.claude_command("claude") == ["claude"]
+
+    def test_windows_wraps_cmd_wrapper_with_cmd_c(self, monkeypatch):
+        monkeypatch.setattr(os, "name", "nt")
+        monkeypatch.setattr(
+            claude.shutil, "which", lambda name: r"C:\npm\claude.cmd" if "claude" in name else None
+        )
+        assert claude.claude_command("claude") == ["cmd", "/c", r"C:\npm\claude.cmd"]
+
+    def test_windows_wraps_bat_wrapper(self, monkeypatch):
+        monkeypatch.setattr(os, "name", "nt")
+        monkeypatch.setattr(
+            claude.shutil,
+            "which",
+            lambda name: r"C:\npm\claude.bat" if name == "claude.bat" else None,
+        )
+        assert claude.claude_command("claude") == ["cmd", "/c", r"C:\npm\claude.bat"]
+
+    def test_windows_real_exe_left_unwrapped(self, monkeypatch):
+        # A resolved .exe (not a batch wrapper) is run directly.
+        monkeypatch.setattr(os, "name", "nt")
+        monkeypatch.setattr(
+            claude.shutil,
+            "which",
+            lambda name: r"C:\npm\claude.exe" if name == "claude" else None,
+        )
+        assert claude.claude_command("claude") == ["claude"]
+
+    def test_windows_no_wrapper_falls_back_to_binary(self, monkeypatch):
+        monkeypatch.setattr(os, "name", "nt")
+        monkeypatch.setattr(claude.shutil, "which", lambda name: None)
+        assert claude.claude_command("claude") == ["claude"]
+
+
 class TestClaudeValidateCmd:
-    def test_starts_with_binary(self):
+    def test_starts_with_binary(self, monkeypatch):
+        monkeypatch.setattr(os, "name", "posix")
         cmd = claude.validate_cmd("claude")
         assert cmd[0] == "claude"
 
@@ -186,9 +226,19 @@ class TestClaudeValidateCmd:
         cmd = claude.validate_cmd("claude")
         assert "-p" in cmd
 
-    def test_uses_ucode_settings_file(self):
+    def test_uses_ucode_settings_file(self, monkeypatch):
+        monkeypatch.setattr(os, "name", "posix")
         cmd = claude.validate_cmd("claude")
         assert cmd[:3] == ["claude", "--settings", str(claude.CLAUDE_SETTINGS_PATH)]
+
+    def test_windows_validate_cmd_uses_cmd_wrapper(self, monkeypatch):
+        monkeypatch.setattr(os, "name", "nt")
+        monkeypatch.setattr(
+            claude.shutil, "which", lambda name: r"C:\npm\claude.cmd" if "claude" in name else None
+        )
+        cmd = claude.validate_cmd("claude")
+        assert cmd[:3] == ["cmd", "/c", r"C:\npm\claude.cmd"]
+        assert "--settings" in cmd
 
     def test_has_max_turns(self):
         cmd = claude.validate_cmd("claude")
@@ -233,6 +283,79 @@ class TestWriteToolConfigMcpRegistration:
         }
         claude.write_tool_config(state, "databricks-claude-sonnet-4")
         assert calls == [("register", WS, "explicit-model")]
+
+
+class TestWriteDefaultSettingsOptIn:
+    """The opt-in mirror of the overlay into ~/.claude/settings.json."""
+
+    def _patches(self, monkeypatch, written):
+        monkeypatch.setattr(claude, "backup_existing_file", lambda *a, **kw: True)
+        monkeypatch.setattr(claude, "read_json_safe", lambda path: {})
+        monkeypatch.setattr(claude, "write_json_file", lambda path, payload: written.append(path))
+        monkeypatch.setattr(claude, "save_state", lambda state: None)
+        monkeypatch.setattr(claude, "_register_web_search_mcp", lambda *a, **kw: True)
+
+    def test_default_settings_not_written_when_flag_off(self, monkeypatch):
+        written: list = []
+        self._patches(monkeypatch, written)
+        claude.write_tool_config({"workspace": WS}, "databricks-claude-sonnet-4")
+        assert claude.CLAUDE_DEFAULT_SETTINGS_PATH not in written
+        assert claude.CLAUDE_SETTINGS_PATH in written
+
+    def test_default_settings_written_when_flag_on(self, monkeypatch):
+        written: list = []
+        self._patches(monkeypatch, written)
+        state = {"workspace": WS, claude.WRITE_DEFAULT_SETTINGS_KEY: True}
+        claude.write_tool_config(state, "databricks-claude-sonnet-4")
+        assert claude.CLAUDE_DEFAULT_SETTINGS_PATH in written
+
+    def test_marks_managed_when_file_did_not_exist(self, monkeypatch, tmp_path):
+        written: list = []
+        self._patches(monkeypatch, written)
+        monkeypatch.setattr(claude, "CLAUDE_DEFAULT_SETTINGS_PATH", tmp_path / "settings.json")
+        state = {"workspace": WS, claude.WRITE_DEFAULT_SETTINGS_KEY: True}
+        state = claude.write_tool_config(state, "databricks-claude-sonnet-4")
+        # No pre-existing file → ucode owns it → delete on revert.
+        assert state[claude.DEFAULT_SETTINGS_MANAGED_KEY] is True
+
+    def test_not_managed_when_file_existed(self, monkeypatch, tmp_path):
+        written: list = []
+        self._patches(monkeypatch, written)
+        settings = tmp_path / "settings.json"
+        settings.write_text("{}", encoding="utf-8")
+        monkeypatch.setattr(claude, "CLAUDE_DEFAULT_SETTINGS_PATH", settings)
+        state = {"workspace": WS, claude.WRITE_DEFAULT_SETTINGS_KEY: True}
+        state = claude.write_tool_config(state, "databricks-claude-sonnet-4")
+        # A pre-existing file → restore from backup on revert, don't delete.
+        assert state[claude.DEFAULT_SETTINGS_MANAGED_KEY] is False
+
+
+class TestRevertDefaultSettings:
+    def test_deletes_when_managed_and_no_backup(self, monkeypatch, tmp_path):
+        settings = tmp_path / "settings.json"
+        settings.write_text("{}", encoding="utf-8")
+        monkeypatch.setattr(claude, "CLAUDE_DEFAULT_SETTINGS_PATH", settings)
+        monkeypatch.setattr(claude, "CLAUDE_DEFAULT_BACKUP_PATH", tmp_path / "backup.json")
+        state = {claude.DEFAULT_SETTINGS_MANAGED_KEY: True}
+        assert claude.revert_default_settings(state) is True
+        assert not settings.exists()
+        assert state[claude.DEFAULT_SETTINGS_MANAGED_KEY] is False
+
+    def test_restores_from_backup(self, monkeypatch, tmp_path):
+        settings = tmp_path / "settings.json"
+        settings.write_text('{"changed": true}', encoding="utf-8")
+        backup = tmp_path / "backup.json"
+        backup.write_text('{"original": true}', encoding="utf-8")
+        monkeypatch.setattr(claude, "CLAUDE_DEFAULT_SETTINGS_PATH", settings)
+        monkeypatch.setattr(claude, "CLAUDE_DEFAULT_BACKUP_PATH", backup)
+        state = {claude.DEFAULT_SETTINGS_MANAGED_KEY: False}
+        assert claude.revert_default_settings(state) is True
+        assert settings.read_text(encoding="utf-8") == '{"original": true}'
+
+    def test_noop_when_nothing_written(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(claude, "CLAUDE_DEFAULT_SETTINGS_PATH", tmp_path / "settings.json")
+        monkeypatch.setattr(claude, "CLAUDE_DEFAULT_BACKUP_PATH", tmp_path / "backup.json")
+        assert claude.revert_default_settings({}) is False
 
 
 class TestRegisterWebSearchMcp:
@@ -331,6 +454,9 @@ class TestClaudeLaunch:
             exec_calls.append((binary, args))
             raise RuntimeError("stop")
 
+        # Pin POSIX so the exec path is deterministic regardless of the host OS
+        # (on Windows claude_command would otherwise wrap the .cmd in `cmd /c`).
+        monkeypatch.setattr(os, "name", "posix")
         monkeypatch.delenv("OAUTH_TOKEN", raising=False)
         monkeypatch.setattr(
             claude, "get_databricks_token", lambda workspace, profile=None: "fresh-token"
@@ -349,3 +475,30 @@ class TestClaudeLaunch:
                 ["claude", "--settings", str(claude.CLAUDE_SETTINGS_PATH), "--debug"],
             )
         ]
+
+    def test_launch_wraps_cmd_wrapper_on_windows(self, monkeypatch):
+        exec_calls: list[tuple[str, list[str]]] = []
+
+        def fake_execvp(binary: str, args: list[str]) -> None:
+            exec_calls.append((binary, args))
+            raise RuntimeError("stop")
+
+        monkeypatch.setattr(os, "name", "nt")
+        monkeypatch.setattr(
+            claude.shutil, "which", lambda name: r"C:\npm\claude.cmd" if "claude" in name else None
+        )
+        monkeypatch.delenv("OAUTH_TOKEN", raising=False)
+        monkeypatch.setattr(
+            claude, "get_databricks_token", lambda workspace, profile=None: "fresh-token"
+        )
+        monkeypatch.setattr(os, "execvp", fake_execvp)
+
+        try:
+            claude.launch({"workspace": WS}, ["--debug"])
+        except RuntimeError as exc:
+            assert str(exc) == "stop"
+
+        binary, args = exec_calls[0]
+        assert binary == "cmd"
+        assert args[:3] == ["cmd", "/c", r"C:\npm\claude.cmd"]
+        assert args[-1] == "--debug"

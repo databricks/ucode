@@ -22,6 +22,7 @@ from ucode.agents import (
     validate_all_tools,
     validate_tool,
 )
+from ucode.agents import claude as claude_agent
 from ucode.agents import (
     launch as launch_agent,
 )
@@ -280,6 +281,8 @@ def configure_workspace_command(
             print_err(f"{spec['display']}: {err}")
             managed = bool(state.get("managed_configs", {}).get(tool))
             restore_file(spec["config_path"], spec["backup_path"], managed)
+            if tool == "claude":
+                claude_agent.revert_default_settings(state)
             available_tools = [t for t in (state.get("available_tools") or []) if t != tool]
             state["available_tools"] = available_tools
             save_state(state)
@@ -432,6 +435,8 @@ def revert() -> int:
     pi_settings_restored = restore_file(
         PI_SETTINGS_PATH, PI_SETTINGS_BACKUP_PATH, bool(managed_configs.get("pi"))
     )
+    # Undo the opt-in default ~/.claude/settings.json, if it was ever written.
+    claude_default_restored = claude_agent.revert_default_settings(state)
     clear_state()
 
     print_heading("Revert")
@@ -439,6 +444,10 @@ def revert() -> int:
     for tool, spec in TOOL_SPECS.items():
         print_kv(f"{spec['display']} config", "restored" if results[tool] else "unchanged")
     print_kv("Pi settings", "restored" if pi_settings_restored else "unchanged")
+    print_kv(
+        "Claude default settings",
+        "restored" if claude_default_restored else "unchanged",
+    )
     for client, spec in MCP_CLIENTS.items():
         print_kv(
             f"{spec['display']} MCP config",
@@ -462,6 +471,8 @@ configure_app = typer.Typer(add_completion=False, no_args_is_help=False)
 app.add_typer(configure_app, name="configure", help="Configure workspace and tool settings.")
 mcp_app = typer.Typer(add_completion=False, no_args_is_help=True)
 app.add_typer(mcp_app, name="mcp", help="MCP servers exposed by ucode.")
+internal_app = typer.Typer(add_completion=False, no_args_is_help=True, hidden=True)
+app.add_typer(internal_app, name="internal", help="Internal helpers invoked by ucode itself.")
 
 
 @mcp_app.command("web-search")
@@ -470,6 +481,20 @@ def mcp_web_search_cmd() -> None:
     from ucode.mcp_web_search import serve
 
     serve()
+
+
+@internal_app.command("print-databricks-token")
+def print_databricks_token_cmd(
+    host: Annotated[str, typer.Option("--host", help="Databricks workspace URL.")],
+    profile: Annotated[str | None, typer.Option("--profile")] = None,
+) -> None:
+    """Print a fresh Databricks access token to stdout.
+
+    Used as the apiKeyHelper on Windows, where cmd.exe can't run the POSIX/jq
+    pipeline. Not intended for direct use."""
+    from ucode.databricks import print_databricks_token
+
+    print_databricks_token(host, profile)
 
 
 def _auto_configure_tool(tool: str) -> None:
@@ -502,6 +527,8 @@ def _auto_configure_tool(tool: str) -> None:
         print_err(f"{spec['display']}: {err}")
         managed = bool(state.get("managed_configs", {}).get(tool))
         restore_file(spec["config_path"], spec["backup_path"], managed)
+        if tool == "claude":
+            claude_agent.revert_default_settings(state)
         available_tools = [t for t in (state.get("available_tools") or []) if t != tool]
         state["available_tools"] = available_tools
         save_state(state)
@@ -691,6 +718,62 @@ def configure_tracing(
     try:
         install_databricks_cli()
         configure_tracing_command(disable=disable)
+    except RuntimeError as exc:
+        print_err(str(exc))
+        raise typer.Exit(1) from None
+    except KeyboardInterrupt:
+        print_err("Interrupted.")
+        raise typer.Exit(130) from None
+
+
+@configure_app.command("claude")
+def configure_claude(
+    write_default_settings: Annotated[
+        bool,
+        typer.Option(
+            "--write-default-settings/--no-write-default-settings",
+            help=(
+                "Also merge ucode's Claude config into ~/.claude/settings.json so the "
+                "Claude desktop app and the IDE / VS Code extension use the Databricks "
+                "gateway too — not just `ucode claude`. Off by default; ucode normally "
+                "manages only ~/.claude/ucode-settings.json. Use --no-write-default-settings "
+                "to turn it back off and restore the original file."
+            ),
+        ),
+    ] = False,
+) -> None:
+    """Configure Claude Code, optionally writing the global ~/.claude/settings.json.
+
+    By default ucode keeps its Claude config self-contained in ucode-settings.json
+    and injects it via `--settings` at launch. The desktop app and IDE extension
+    ignore that flag, so pass --write-default-settings to make them pick up the
+    Databricks gateway auth as well."""
+    try:
+        state = ensure_provider_state("claude")
+        state = configure_shared_state(
+            state["workspace"], profile=state.get("profile"), tools=["claude"]
+        )
+        # When turning the opt-in off, undo any previously-written global file
+        # *before* clearing the flag so revert_default_settings sees the managed
+        # marker, then rewrite the ucode-managed config without it.
+        if not write_default_settings:
+            claude_agent.revert_default_settings(state)
+        state[claude_agent.WRITE_DEFAULT_SETTINGS_KEY] = write_default_settings
+        save_state(state)
+
+        state, model = resolve_launch_model("claude", state, None)
+        state = configure_tool("claude", state, model)
+
+        if write_default_settings:
+            print_success(
+                "Claude configured. ~/.claude/settings.json now includes the Databricks "
+                "gateway auth, so the desktop app and IDE extension use it too."
+            )
+            print_note(
+                "Undo with `ucode configure claude --no-write-default-settings` or `ucode revert`."
+            )
+        else:
+            print_success("Claude configured (ucode-managed settings only).")
     except RuntimeError as exc:
         print_err(str(exc))
         raise typer.Exit(1) from None

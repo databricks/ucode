@@ -132,18 +132,52 @@ class TestDiscoverClaudeModels:
 
 
 class TestBuildAuthShellCommand:
-    def test_contains_workspace(self):
+    def test_dispatches_to_posix_off_windows(self, monkeypatch):
+        # On a POSIX host the public builder emits the sh/jq pipeline.
+        monkeypatch.setattr(os, "name", "posix")
         cmd = build_auth_shell_command(WS)
+        assert "jq" in cmd
+        assert "DATABRICKS_BEARER" in cmd
+
+    def test_dispatches_to_windows_on_nt(self, monkeypatch):
+        # On Windows the public builder delegates to the ucode subcommand.
+        monkeypatch.setattr(os, "name", "nt")
+        cmd = build_auth_shell_command(WS)
+        assert "internal print-databricks-token" in cmd
+        assert "jq" not in cmd
+
+
+class TestPosixAuthCommand:
+    """The POSIX apiKeyHelper — sh/jq pipeline. Tested directly so it runs on
+    any host regardless of os.name."""
+
+    def test_contains_workspace(self):
+        cmd = db_mod._build_posix_auth_command(WS, None)
         assert WS in cmd
 
     def test_parses_access_token(self):
-        cmd = build_auth_shell_command(WS)
+        cmd = db_mod._build_posix_auth_command(WS, None)
         assert "jq" in cmd
         assert ".access_token" in cmd
         assert "--force-refresh" in cmd
         assert "DATABRICKS_BEARER" in cmd
         assert "DATABRICKS_CONFIG_PROFILE" in cmd
 
+    def test_embeds_profile_when_provided(self):
+        cmd = db_mod._build_posix_auth_command(WS, "stablebox")
+        assert "--profile stablebox" in cmd
+        # We do not strip DATABRICKS_CONFIG_PROFILE when we are explicit about
+        # which profile to use — the --profile flag wins.
+        assert "env -u DATABRICKS_CONFIG_PROFILE" not in cmd
+
+    def test_quotes_profile_shell_metacharacters(self):
+        cmd = db_mod._build_posix_auth_command(WS, "weird name; rm -rf /")
+        # shlex.quote should wrap the value so the rest of the command cannot
+        # be interpreted as a shell injection.
+        assert "rm -rf /" in cmd
+        assert "'weird name; rm -rf /'" in cmd
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX sh helper not runnable on Windows")
     def test_returns_token_when_auth_succeeds(self, tmp_path):
         # Fake databricks binary that always returns a valid token JSON.
         fake = tmp_path / "databricks"
@@ -151,7 +185,7 @@ class TestBuildAuthShellCommand:
             '#!/bin/sh\necho \'{"access_token": "good-token", "token_type": "Bearer"}\'\n'
         )
         fake.chmod(0o755)
-        cmd = build_auth_shell_command(WS)
+        cmd = db_mod._build_posix_auth_command(WS, None)
         result = subprocess.run(
             ["sh", "-c", cmd],
             capture_output=True,
@@ -164,11 +198,12 @@ class TestBuildAuthShellCommand:
         )
         assert result.stdout.strip() == "good-token"
 
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX sh helper not runnable on Windows")
     def test_prefers_databricks_bearer(self, tmp_path):
         fake = tmp_path / "databricks"
         fake.write_text("#!/bin/sh\nexit 1\n")
         fake.chmod(0o755)
-        cmd = build_auth_shell_command(WS)
+        cmd = db_mod._build_posix_auth_command(WS, None)
         result = subprocess.run(
             ["sh", "-c", cmd],
             capture_output=True,
@@ -181,19 +216,38 @@ class TestBuildAuthShellCommand:
         )
         assert result.stdout.strip() == "bearer-token"
 
-    def test_embeds_profile_when_provided(self):
-        cmd = build_auth_shell_command(WS, profile="stablebox")
-        assert "--profile stablebox" in cmd
-        # We do not strip DATABRICKS_CONFIG_PROFILE when we are explicit about
-        # which profile to use — the --profile flag wins.
-        assert "env -u DATABRICKS_CONFIG_PROFILE" not in cmd
 
-    def test_quotes_profile_shell_metacharacters(self):
-        cmd = build_auth_shell_command(WS, profile="weird name; rm -rf /")
-        # shlex.quote should wrap the value so the rest of the command cannot
-        # be interpreted as a shell injection.
-        assert "rm -rf /" in cmd
-        assert "'weird name; rm -rf /'" in cmd
+class TestWindowsAuthCommand:
+    """The Windows apiKeyHelper — delegates to `ucode internal
+    print-databricks-token` (cmd.exe can't run the POSIX/jq pipeline)."""
+
+    def test_invokes_ucode_subcommand(self):
+        cmd = db_mod._build_windows_auth_command(WS, None)
+        assert "internal print-databricks-token" in cmd
+        assert f'--host "{WS}"' in cmd
+
+    def test_no_posix_or_jq_constructs(self):
+        cmd = db_mod._build_windows_auth_command(WS, None)
+        # None of the POSIX-only constructs that cmd.exe chokes on.
+        assert "jq" not in cmd
+        assert "env -u" not in cmd
+        assert "[ -n" not in cmd
+
+    def test_embeds_profile_when_provided(self):
+        cmd = db_mod._build_windows_auth_command(WS, "stablebox")
+        assert '--profile "stablebox"' in cmd
+
+    def test_quotes_values_for_cmd_exe(self):
+        # Values are double-quoted so cmd.exe treats spaces as part of the arg.
+        cmd = db_mod._build_windows_auth_command(WS, "my profile")
+        assert '--profile "my profile"' in cmd
+
+    def test_prints_token_via_get_databricks_token(self, monkeypatch, capsys):
+        monkeypatch.setattr(
+            db_mod, "get_databricks_token", lambda ws, profile, force_refresh: "tok-123"
+        )
+        db_mod.print_databricks_token(WS, "stablebox")
+        assert capsys.readouterr().out.strip() == "tok-123"
 
 
 class TestFormatSubprocessResult:

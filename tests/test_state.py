@@ -173,7 +173,12 @@ class TestHydrateState:
 
         assert result["agents"]["claude"]["model"] == "claude-opus"
         assert result["agents"]["claude"]["base_url"] == FAKE_URLS["claude"]
-        assert result["agents"]["claude"]["auth_command"].startswith("if [ -n")
+        # auth_command is platform-specific (POSIX sh vs the Windows ucode helper);
+        # assert it matches the builder's output for the current OS rather than a
+        # POSIX-only prefix.
+        from ucode.databricks import build_auth_shell_command
+
+        assert result["agents"]["claude"]["auth_command"] == build_auth_shell_command(FAKE_WS)
         assert result["agents"]["codex"]["model"] == "gpt-5"
         assert result["agents"]["codex"]["base_url"] == FAKE_URLS["codex"]
         assert (
