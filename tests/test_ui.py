@@ -6,7 +6,9 @@ from datetime import timedelta
 from unittest.mock import patch
 
 import pytest
+import questionary
 
+from ucode import ui as ui_mod
 from ucode.ui import (
     format_duration,
     format_token_count,
@@ -148,12 +150,98 @@ class TestRenderBoxTable:
         assert "-" in result
 
 
+class _StubQuestion:
+    def __init__(self, answer):
+        self._answer = answer
+
+    def ask(self):
+        return self._answer
+
+
 class TestPromptForWorkspace:
-    """Cover the three things `questionary.select(...).ask()` can return:
-    a (host, profile) tuple, None (cancel or "Enter a different URL"),
-    or — in some questionary versions — the choice's title string."""
+    """Two concerns combined here:
+
+    1. Layout — that the picker renders a header separator + one row per
+       profile (including duplicates of the same host) with ljust-padded
+       profile names. Driven by capturing the choices list passed to
+       ``questionary.select``.
+    2. Return-type defensiveness — `questionary.select(...).ask()` can hand
+       back a tuple, None, or (in some versions) the choice title string;
+       only a tuple should be treated as a selection.
+    """
 
     PROFILES = [("https://a.databricks.com", "prof-a"), ("https://b.databricks.com", "prof-b")]
+
+    # ------------------------------------------------------------------
+    # Layout assertions
+    # ------------------------------------------------------------------
+
+    def _capture_select(self, monkeypatch, answer):
+        captured: dict = {}
+
+        def fake_select(message, choices, **kwargs):
+            captured["message"] = message
+            captured["choices"] = choices
+            captured["kwargs"] = kwargs
+            return _StubQuestion(answer)
+
+        monkeypatch.setattr(questionary, "select", fake_select)
+        monkeypatch.setattr(ui_mod.questionary, "select", fake_select)
+        return captured
+
+    def test_shows_header_and_each_profile_row(self, monkeypatch):
+        profiles = [
+            ("https://a.cloud.databricks.com", "alpha"),
+            ("https://b.cloud.databricks.com", "beta-profile-name"),
+        ]
+        captured = self._capture_select(monkeypatch, answer=profiles[0])
+        url, profile = prompt_for_workspace("setup", profiles)
+
+        assert (url, profile) == profiles[0]
+        choices = captured["choices"]
+        # Header (separator), 2 rows, "Enter a different URL" entry.
+        assert len(choices) == 4
+        assert isinstance(choices[0], questionary.Separator)
+        header = choices[0].title
+        assert "Profile Name" in header
+        assert "Workspace URL" in header
+        # Profile names ljust-padded to the longest name (17 chars).
+        name_width = max(len(name) for _, name in profiles)
+        assert "alpha".ljust(name_width) in choices[1].title
+        assert profiles[0][0] in choices[1].title
+        assert "beta-profile-name".ljust(name_width) in choices[2].title
+        assert profiles[1][0] in choices[2].title
+        # Final fallback entry still present.
+        assert choices[3].title == "Enter a different URL"
+
+    def test_keeps_duplicate_hosts_as_separate_rows(self, monkeypatch):
+        profiles = [
+            ("https://shared.cloud.databricks.com", "first"),
+            ("https://shared.cloud.databricks.com", "second"),
+        ]
+        captured = self._capture_select(monkeypatch, answer=profiles[1])
+        url, profile = prompt_for_workspace("setup", profiles)
+
+        assert (url, profile) == profiles[1]
+        # Both rows present — duplicates not collapsed.
+        choices = captured["choices"]
+        # Filter to choices whose value is a (host, profile) tuple — drops the
+        # header separator and the trailing "Enter a different URL" entry.
+        host_choices = [c for c in choices if isinstance(getattr(c, "value", None), tuple)]
+        assert [c.value for c in host_choices] == profiles
+
+    def test_returns_normalized_url_with_profile(self, monkeypatch):
+        # Picker handed back a URL with a trailing slash — normalize_workspace_url
+        # should strip it before returning.
+        profiles = [("https://example.cloud.databricks.com/", "p")]
+        self._capture_select(monkeypatch, answer=profiles[0])
+        url, profile = prompt_for_workspace("setup", profiles)
+        assert url == "https://example.cloud.databricks.com"
+        assert profile == "p"
+
+    # ------------------------------------------------------------------
+    # Return-type defensiveness (regression coverage from PR #104)
+    # ------------------------------------------------------------------
 
     def test_returns_selected_profile_tuple(self):
         with patch("ucode.ui.questionary.select") as mock_select:
@@ -192,3 +280,27 @@ class TestPromptForWorkspace:
             url, profile = prompt_for_workspace("desc", profiles=None)
         assert url == "https://example.databricks.com"
         assert profile is None
+
+    # ------------------------------------------------------------------
+    # Long-name display clamping (PR #114 review feedback)
+    # ------------------------------------------------------------------
+
+    def test_long_profile_name_is_truncated_in_display_only(self, monkeypatch):
+        # 60-char name — exceeds the 40-char clamp. The displayed row title
+        # must be truncated with an ellipsis but the value tuple must carry
+        # the full untruncated name through to configure_shared_state.
+        long_name = "x" * 60
+        profiles = [("https://a.cloud.databricks.com", long_name)]
+        captured = self._capture_select(monkeypatch, answer=profiles[0])
+        url, profile = prompt_for_workspace("setup", profiles)
+
+        assert (url, profile) == profiles[0]
+        choices = captured["choices"]
+        # Header + 1 row + "Enter a different URL".
+        assert len(choices) == 3
+        # Display title is truncated to 40 chars (39 of name + "…").
+        row_title = choices[1].title
+        assert long_name not in row_title
+        assert "…" in row_title
+        # Value tuple still carries the full name.
+        assert choices[1].value == profiles[0]
