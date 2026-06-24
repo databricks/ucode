@@ -367,7 +367,7 @@ class TestListMcpServices:
         assert names == []
         assert reason == "HTTP 500 Server Error"
 
-    def test_empty_payload_reports_no_results(self, monkeypatch):
+    def test_empty_payload_is_successful_with_no_reason(self, monkeypatch):
         monkeypatch.setattr(
             db_mod, "_http_get_json", lambda url, token, timeout=30: ({"mcp_services": []}, None)
         )
@@ -375,7 +375,49 @@ class TestListMcpServices:
         names, reason = db_mod.list_mcp_services(WS, "token")
 
         assert names == []
-        assert reason and "no `system.ai.*`" in reason
+        assert reason is None
+
+    def test_custom_parent_passes_through_to_url(self, monkeypatch):
+        captured: dict[str, str] = {}
+
+        def fake_get(url, token, timeout=30):
+            captured["url"] = url
+            return {"mcp_services": []}, None
+
+        monkeypatch.setattr(db_mod, "_http_get_json", fake_get)
+
+        db_mod.list_mcp_services(WS, "token", parent="main.svenwb")
+
+        assert "parent=schemas%2Fmain.svenwb" in captured["url"]
+
+    def test_custom_parent_filters_to_namespace(self, monkeypatch):
+        payload = {
+            "mcp_services": [
+                {"name": "mcp-services/main.svenwb.github"},
+                {"name": "mcp-services/main.svenwb.slack"},
+                {"name": "mcp-services/system.ai.github"},
+            ]
+        }
+        monkeypatch.setattr(
+            db_mod, "_http_get_json", lambda url, token, timeout=30: (payload, None)
+        )
+
+        names, reason = db_mod.list_mcp_services(WS, "token", parent="main.svenwb")
+
+        assert reason is None
+        assert names == ["main.svenwb.github", "main.svenwb.slack"]
+
+    def test_http_404_reason_surfaces_for_invalid_parent(self, monkeypatch):
+        monkeypatch.setattr(
+            db_mod,
+            "_http_get_json",
+            lambda url, token, timeout=30: (None, "HTTP 404 Not Found: NOT_FOUND"),
+        )
+
+        names, reason = db_mod.list_mcp_services(WS, "token", parent="nope.nope")
+
+        assert names == []
+        assert reason and reason.startswith("HTTP 404")
 
 
 def _foundation_models_payload(names):

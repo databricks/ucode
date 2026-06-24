@@ -888,10 +888,21 @@ def configure(
 
 
 @configure_app.command("mcp")
-def configure_mcp() -> None:
+def configure_mcp(
+    location: Annotated[
+        str | None,
+        typer.Option(
+            "--location",
+            help="Non-interactive: replace registered MCPs with exactly the services "
+            "in the given Unity Catalog `<catalog>.<schema>` (e.g. `system.ai`) and "
+            "exit without showing the picker. Any previously-registered MCPs outside "
+            "this location are removed.",
+        ),
+    ] = None,
+) -> None:
     """Add Databricks MCP servers to installed coding tools."""
     try:
-        configure_mcp_command()
+        configure_mcp_command(location=location)
     except RuntimeError as exc:
         print_err(str(exc))
         raise typer.Exit(1) from None
