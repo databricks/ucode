@@ -1103,7 +1103,57 @@ def purge_cross_workspace_mcp_residue(state: dict, workspace: str) -> None:
         )
 
 
-def configure_mcp_command() -> int:
+def _resolve_location_mcp_servers(
+    workspace: str,
+    profile: str | None,
+    clients: list[str],
+    location: str,
+    original_servers: list[dict],
+) -> list[dict]:
+    """Build the desired MCP server list for ``--location <cat>.<schema>``.
+
+    Strict replacement: the returned list is exactly the mcp-services
+    discovered at ``location``. Any previously-registered MCP entries outside
+    that location are removed by ``apply_mcp_server_changes``. Raises ``RuntimeError`` for an invalid
+    location (HTTP 404 from the listing API) or any other listing failure."""
+    if location.count(".") != 1 or not all(part.strip() for part in location.split(".")):
+        raise RuntimeError(f"--location must be `<catalog>.<schema>`, got `{location}`.")
+
+    token = get_databricks_token(workspace, profile)
+    with spinner(f"Discovering MCP services in {location}..."):
+        names, reason = list_mcp_services(workspace, token, parent=location)
+
+    if reason and reason.startswith("HTTP 404"):
+        raise RuntimeError(
+            f"Invalid location: `{location}` is not a valid Unity Catalog schema "
+            "in this workspace (or you lack USE permission on it)."
+        )
+    if reason:
+        raise RuntimeError(f"Failed to list MCP services at `{location}`: {reason}")
+    if not names:
+        print_note(f"No MCP services exist at `{location}`.")
+
+    original_by_name = _servers_by_name(original_servers)
+    working_servers: list[dict] = []
+    for full_name in names:
+        entry_name = full_name.replace(".", "-")
+        original = original_by_name.get(entry_name)
+        original_clients = list((original or {}).get("clients") or [])
+        merged_clients = original_clients + [c for c in clients if c not in original_clients]
+        candidate = {
+            "name": entry_name,
+            "url": build_mcp_service_url(workspace, full_name),
+            "auth": f"env:{MCP_AUTH_TOKEN_ENV_VAR}",
+            "clients": merged_clients,
+        }
+        if original is not None and original == candidate:
+            working_servers.append(original.copy())
+        else:
+            working_servers.append(candidate)
+    return working_servers
+
+
+def configure_mcp_command(location: str | None = None) -> int:
     state = load_state()
     workspace = state.get("workspace")
     if not workspace:
@@ -1140,6 +1190,20 @@ def configure_mcp_command() -> int:
             f"{MCP_CLIENTS[client]['display']} is configured in ucode but not installed; "
             "skipping MCP config."
         )
+
+    original_mcp_servers_for_location: list[dict] = list(state.get("mcp_servers") or [])
+    if location is not None:
+        working_mcp_servers = _resolve_location_mcp_servers(
+            workspace, profile, clients, location, original_mcp_servers_for_location
+        )
+        changed = apply_mcp_server_changes(
+            original_mcp_servers_for_location, working_mcp_servers, clients
+        )
+        if changed or original_mcp_servers_for_location != working_mcp_servers:
+            state["mcp_servers"] = working_mcp_servers
+            save_state(state)
+            print_success("Saved")
+        return 0
 
     available_external_mcp_names = _discover_mcp_source(
         "external connections",

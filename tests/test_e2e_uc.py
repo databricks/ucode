@@ -65,6 +65,22 @@ class TestListMcpServicesE2E:
         non_system = sorted({n for n in names if not n.startswith("system.ai.")})
         assert not non_system, f"Non-system.ai entries leaked through: {non_system[:5]}"
 
+    def test_custom_parent_filters_server_side(self, e2e_workspace, e2e_token):
+        names, _ = list_mcp_services(e2e_workspace, e2e_token, parent="main.default")
+        if not names:
+            pytest.skip("No mcp-services in main.default on this workspace.")
+        outside = sorted({n for n in names if not n.startswith("main.default.")})
+        assert not outside, f"Server returned entries outside main.default: {outside[:5]}"
+
+    def test_invalid_parent_returns_http_404(self, e2e_workspace, e2e_token):
+        names, reason = list_mcp_services(
+            e2e_workspace, e2e_token, parent="nope_catalog.nope_schema"
+        )
+        assert names == []
+        assert reason and reason.startswith("HTTP 404"), (
+            f"Expected HTTP 404 for bogus location, got: {reason}"
+        )
+
 
 # ---------------------------------------------------------------------------
 # `configure_shared_state` end-to-end: UC discovery is the default, with a
