@@ -899,10 +899,24 @@ def configure_mcp(
             "this location are removed.",
         ),
     ] = None,
+    services: Annotated[
+        str | None,
+        typer.Option(
+            "--services",
+            help="Configure exactly this comma-separated subset of MCP services (adding and "
+            "removing to match) instead of a whole schema. Full names like `system.ai.github` "
+            "work on their own; bare short names like `github` need --location to locate them. "
+            "Omit --services to configure the whole --location schema; pass an empty string "
+            "(with --location) to remove all.",
+        ),
+    ] = None,
 ) -> None:
     """Add Databricks MCP servers to installed coding tools."""
+    # `--services` absent -> None (whole schema); present (even empty) -> the
+    # explicit subset, so `--services ""` deselects everything.
+    selected = None if services is None else {s.strip() for s in services.split(",") if s.strip()}
     try:
-        configure_mcp_command(location=location)
+        configure_mcp_command(location=location, services=selected)
     except RuntimeError as exc:
         print_err(str(exc))
         raise typer.Exit(1) from None

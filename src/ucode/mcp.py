@@ -1109,13 +1109,22 @@ def _resolve_location_mcp_servers(
     clients: list[str],
     location: str,
     original_servers: list[dict],
+    services: set[str] | None = None,
 ) -> list[dict]:
     """Build the desired MCP server list for ``--location <cat>.<schema>``.
 
     Strict replacement: the returned list is exactly the mcp-services
     discovered at ``location``. Any previously-registered MCP entries outside
     that location are removed by ``apply_mcp_server_changes``. Raises ``RuntimeError`` for an invalid
-    location (HTTP 404 from the listing API) or any other listing failure."""
+    location (HTTP 404 from the listing API) or any other listing failure.
+
+    When ``services`` is given, the discovered set is narrowed to exactly that
+    subset (matched by full name like ``system.ai.github`` or bare short name
+    like ``github``); names not found at ``location`` are skipped with a
+    warning rather than failing, so a saved selection that references a
+    since-removed service still configures the rest. An empty set selects
+    nothing (every previously-registered service in the location is removed).
+    ``None`` keeps the whole schema."""
     if location.count(".") != 1 or not all(part.strip() for part in location.split(".")):
         raise RuntimeError(f"--location must be `<catalog>.<schema>`, got `{location}`.")
 
@@ -1132,6 +1141,21 @@ def _resolve_location_mcp_servers(
         raise RuntimeError(f"Failed to list MCP services at `{location}`: {reason}")
     if not names:
         print_note(f"No MCP services exist at `{location}`.")
+
+    if services is not None:
+        discovered_full = set(names)
+        discovered_short = {full_name.split(".")[-1] for full_name in names}
+        unknown = services - discovered_full - discovered_short
+        if unknown:
+            print_warning(
+                f"Ignoring requested MCP services not found in `{location}`: "
+                f"{', '.join(sorted(unknown))}."
+            )
+        names = [
+            full_name
+            for full_name in names
+            if full_name in services or full_name.split(".")[-1] in services
+        ]
 
     original_by_name = _servers_by_name(original_servers)
     working_servers: list[dict] = []
@@ -1153,7 +1177,24 @@ def _resolve_location_mcp_servers(
     return working_servers
 
 
-def configure_mcp_command(location: str | None = None) -> int:
+def configure_mcp_command(location: str | None = None, services: set[str] | None = None) -> int:
+    if services is not None and location is None:
+        # `--services` works standalone with full names (`system.ai.github`): the
+        # `<catalog>.<schema>` to configure is derived from them. Bare short names
+        # (`github`) can't be located without `--location`.
+        schemas = {".".join(s.split(".")[:2]) for s in services if s.count(".") >= 2}
+        bare = sorted(s for s in services if s.count(".") < 2)
+        if bare:
+            raise RuntimeError(
+                "--services short names need --location (or pass full names like "
+                f"`system.ai.<name>`): {', '.join(bare)}"
+            )
+        if len(schemas) != 1:
+            raise RuntimeError(
+                "--services without --location must all share one `<catalog>.<schema>` "
+                f"(got: {', '.join(sorted(schemas)) or 'none'}); pass --location instead."
+            )
+        location = next(iter(schemas))
     state = load_state()
     workspace = state.get("workspace")
     if not workspace:
@@ -1194,7 +1235,7 @@ def configure_mcp_command(location: str | None = None) -> int:
     original_mcp_servers_for_location: list[dict] = list(state.get("mcp_servers") or [])
     if location is not None:
         working_mcp_servers = _resolve_location_mcp_servers(
-            workspace, profile, clients, location, original_mcp_servers_for_location
+            workspace, profile, clients, location, original_mcp_servers_for_location, services
         )
         changed = apply_mcp_server_changes(
             original_mcp_servers_for_location, working_mcp_servers, clients
