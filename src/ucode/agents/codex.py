@@ -101,16 +101,26 @@ def _use_legacy_layout() -> bool:
     return parsed < MINIMUM_CODEX_VERSION
 
 
-def _provider_block(workspace: str, databricks_profile: str | None, use_pat: bool = False) -> dict:
+def _provider_block(
+    workspace: str,
+    databricks_profile: str | None,
+    use_pat: bool = False,
+    provider: str | None = None,
+) -> dict:
     auth_command = build_auth_shell_command(workspace, databricks_profile, use_pat=use_pat)
     base_url = build_tool_base_url("codex", workspace)
+    http_headers = {
+        "User-Agent": f"ucode/{ucode_version()} codex/{agent_version('codex')}",
+    }
+    # Route to an external Model Provider Service; the gateway selects the
+    # provider from this header on every request.
+    if provider:
+        http_headers["Databricks-Model-Provider-Service"] = provider
     return {
         "name": "Databricks AI Gateway",
         "base_url": base_url,
         "wire_api": "responses",
-        "http_headers": {
-            "User-Agent": f"ucode/{ucode_version()} codex/{agent_version('codex')}",
-        },
+        "http_headers": http_headers,
         "auth": {
             "command": "sh",
             "args": ["-c", auth_command],
@@ -125,12 +135,15 @@ def render_overlay(
     model: str | None = None,
     databricks_profile: str | None = None,
     use_pat: bool = False,
+    provider: str | None = None,
 ) -> dict:
     overlay: dict = {"model_provider": CODEX_MODEL_PROVIDER_NAME}
     if model:
         overlay["model"] = model
     overlay["model_providers"] = {
-        CODEX_MODEL_PROVIDER_NAME: _provider_block(workspace, databricks_profile, use_pat),
+        CODEX_MODEL_PROVIDER_NAME: _provider_block(
+            workspace, databricks_profile, use_pat, provider
+        ),
     }
     return overlay
 
@@ -140,6 +153,7 @@ def render_legacy_overlay(
     model: str | None = None,
     databricks_profile: str | None = None,
     use_pat: bool = False,
+    provider: str | None = None,
 ) -> dict:
     """Overlay for Codex CLI < 0.134.0, which only reads `~/.codex/config.toml`.
 
@@ -153,7 +167,9 @@ def render_legacy_overlay(
         "profile": CODEX_PROFILE_NAME,
         "profiles": {CODEX_PROFILE_NAME: profile_block},
         "model_providers": {
-            CODEX_MODEL_PROVIDER_NAME: _provider_block(workspace, databricks_profile, use_pat),
+            CODEX_MODEL_PROVIDER_NAME: _provider_block(
+                workspace, databricks_profile, use_pat, provider
+            ),
         },
     }
 
@@ -290,9 +306,12 @@ def _parse_gpt(model: str | None) -> tuple[int, int | None, int | None, str] | N
     )
 
 
-def write_tool_config(state: dict, model: str | None = None) -> dict:
+def write_tool_config(state: dict, model: str | None = None, provider: str | None = None) -> dict:
     workspace = state["workspace"]
-    chosen_model = _codex_model_id(model or default_model(state))
+    # With a Model Provider Service the gateway routes by header and Codex sends
+    # its own canonical model name (e.g. `gpt-5`) — leave `model` unset so no
+    # Databricks endpoint id is pinned.
+    chosen_model = None if provider else _codex_model_id(model or default_model(state))
     databricks_profile = state.get("profile")
 
     if _use_legacy_layout():
@@ -302,10 +321,20 @@ def write_tool_config(state: dict, model: str | None = None) -> dict:
         # ucode's entry from the shared file.
         backup_existing_file(LEGACY_CODEX_CONFIG_PATH, LEGACY_CODEX_BACKUP_PATH)
         overlay = render_legacy_overlay(
-            workspace, chosen_model, databricks_profile, use_pat=bool(state.get("use_pat"))
+            workspace,
+            chosen_model,
+            databricks_profile,
+            use_pat=bool(state.get("use_pat")),
+            provider=provider,
         )
         doc = read_toml_safe(LEGACY_CODEX_CONFIG_PATH)
         deep_merge_dict(doc, overlay)
+        if provider:
+            # deep_merge can't drop keys, so clear a `model` pinned by an
+            # earlier non-provider run that the provider overlay omits.
+            profiles = doc.get("profiles")
+            if isinstance(profiles, dict) and isinstance(profiles.get(CODEX_PROFILE_NAME), dict):
+                profiles[CODEX_PROFILE_NAME].pop("model", None)
         write_toml_file(LEGACY_CODEX_CONFIG_PATH, doc)
         state = mark_tool_managed(state, "codex", LEGACY_MANAGED_KEYS)
         save_state(state)
@@ -314,10 +343,18 @@ def write_tool_config(state: dict, model: str | None = None) -> dict:
     _remove_legacy_ucode_profile()
     backup_existing_file(CODEX_CONFIG_PATH, CODEX_BACKUP_PATH)
     overlay = render_overlay(
-        workspace, chosen_model, databricks_profile, use_pat=bool(state.get("use_pat"))
+        workspace,
+        chosen_model,
+        databricks_profile,
+        use_pat=bool(state.get("use_pat")),
+        provider=provider,
     )
     doc = read_toml_safe(CODEX_CONFIG_PATH)
     deep_merge_dict(doc, overlay)
+    if provider:
+        # deep_merge can't drop keys, so clear a `model` pinned by an earlier
+        # non-provider run that the provider overlay omits.
+        doc.pop("model", None)
     write_toml_file(CODEX_CONFIG_PATH, doc)
     state = mark_tool_managed(state, "codex", MANAGED_KEYS)
     save_state(state)

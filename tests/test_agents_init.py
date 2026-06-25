@@ -16,8 +16,30 @@ from ucode.agents import (
     ensure_tool_binary_available,
     install_tool_binary,
     normalize_tool,
+    provider_permission_error,
     resolve_launch_model,
 )
+
+
+class TestProviderPermissionError:
+    _CONN_ERR = (
+        "User does not have USE CONNECTION on SCHEMA_CONNECTION "
+        "'299433db-cb91-4b08-9761-edab72a27836'."
+    )
+
+    def test_rewrites_when_provider_configured(self):
+        state = {"provider_services": {"codex": "main.aarushi.aarushi-test-openai"}}
+        out = provider_permission_error("codex", state, self._CONN_ERR)
+        assert "main.aarushi.aarushi-test-openai" in out
+        assert "EXECUTE" in out
+        assert "SCHEMA_CONNECTION" not in out
+
+    def test_passthrough_without_provider(self):
+        assert provider_permission_error("codex", {}, self._CONN_ERR) == self._CONN_ERR
+
+    def test_passthrough_for_unrelated_error(self):
+        state = {"provider_services": {"codex": "main.a.b"}}
+        assert provider_permission_error("codex", state, "boom") == "boom"
 
 
 class TestToolSpecs:

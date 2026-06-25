@@ -1261,6 +1261,81 @@ def build_mcp_service_url(workspace: str, full_name: str) -> str:
     return f"{workspace}/ai-gateway/mcp-services/{full_name}"
 
 
+# Maps the gateway routing dialect a coding tool speaks to the Model Provider
+# Service `provider_type` it can be backed by. claude speaks Anthropic's API;
+# codex speaks OpenAI's.
+_TOOL_PROVIDER_TYPES: dict[str, str] = {
+    "claude": "anthropic",
+    "codex": "openai",
+}
+
+
+def _provider_type_tag(provider_type: str | None) -> str:
+    """Shorten `EXTERNAL_MODEL_PROVIDER_TYPE_ANTHROPIC` to `anthropic`."""
+    if not isinstance(provider_type, str):
+        return ""
+    prefix = "EXTERNAL_MODEL_PROVIDER_TYPE_"
+    tag = provider_type[len(prefix) :] if provider_type.startswith(prefix) else provider_type
+    return tag.lower()
+
+
+def list_model_provider_services(workspace: str, token: str) -> tuple[list[dict], str | None]:
+    """List Unity Catalog Model Provider Services on the workspace.
+
+    Returns ``(services, reason)`` where each service is
+    ``{"name": "<catalog>.<schema>.<service>", "provider_type": "anthropic"|...}``.
+    A non-None ``reason`` means the listing call itself failed.
+    """
+    hostname = workspace_hostname(workspace)
+    url = f"https://{hostname}/api/2.1/unity-catalog/model-provider-services"
+    payload, reason = _http_get_json(url, token, timeout=30)
+    if payload is None:
+        return [], reason
+    data = cast(dict, payload) if isinstance(payload, dict) else {}
+    services: list[dict] = []
+    for service in data.get("model_provider_services") or []:
+        if not isinstance(service, dict):
+            continue
+        raw_name = service.get("name")
+        if not isinstance(raw_name, str) or not raw_name:
+            continue
+        # The API returns `model-provider-services/<catalog>.<schema>.<name>`.
+        full_name = raw_name.split("/", 1)[1] if "/" in raw_name else raw_name
+        config = service.get("config") if isinstance(service.get("config"), dict) else {}
+        services.append(
+            {
+                "name": full_name,
+                "provider_type": _provider_type_tag(config.get("provider_type")),
+            }
+        )
+    services.sort(key=lambda s: s["name"])
+    return services, None
+
+
+def is_model_provider_feature_unavailable(reason: str | None) -> bool:
+    """True when a model-provider-services API failure means the workspace
+    simply hasn't enabled the feature (HTTP 400 "feature is not available"),
+    as opposed to a transient or auth error. Callers use this to fall back to
+    Databricks models silently rather than surfacing a scary error.
+    """
+    return bool(reason) and "feature is not available" in reason.lower()
+
+
+def list_tool_provider_services(
+    tool: str, workspace: str, token: str
+) -> tuple[list[str], str | None]:
+    """Provider-service names whose provider type matches ``tool``'s API dialect.
+
+    Returns ``(names, reason)``; ``reason`` is non-None when the listing failed.
+    """
+    wanted = _TOOL_PROVIDER_TYPES.get(tool)
+    services, reason = list_model_provider_services(workspace, token)
+    if reason is not None:
+        return [], reason
+    names = [s["name"] for s in services if not wanted or s["provider_type"] == wanted]
+    return names, None
+
+
 # `list_vector_search_catalog_schemas` walks Vector Search endpoints+indexes.
 # `list_uc_functions_catalog_schemas` walks UC catalogs+schemas in parallel and
 # keeps only schemas with at least one user function.

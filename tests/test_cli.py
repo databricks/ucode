@@ -634,6 +634,38 @@ class TestConfigureAgentsSelection:
         assert install_calls == ["claude", "codex"]
         assert configured == [["claude", "codex"]]
 
+    def test_provider_picker_gated_by_flag(self, monkeypatch):
+        import ucode.cli as cli_mod
+
+        state = {**MINIMAL_STATE, "available_tools": []}
+        monkeypatch.setattr(cli_mod, "configure_shared_state", lambda *a, **k: state)
+        monkeypatch.setattr(cli_mod, "check_gateway_endpoint", lambda s, t: t == "claude")
+        monkeypatch.setattr(cli_mod, "install_tool_binary", lambda *a, **k: True)
+        monkeypatch.setattr(
+            cli_mod, "configure_selected_tools", lambda s, tools: {**s, "available_tools": tools}
+        )
+        monkeypatch.setattr(cli_mod, "validate_all_tools", lambda s: None)
+        picked_for: list[str] = []
+        monkeypatch.setattr(
+            cli_mod,
+            "_maybe_select_provider_service",
+            lambda tool, s: picked_for.append(tool) or s,
+        )
+
+        # Default: no provider picker.
+        cli_mod.configure_workspace_command(
+            selected_tools=["claude"], workspaces=[("https://w.com", None)]
+        )
+        assert picked_for == []
+
+        # Opt-in: picker offered for the chosen tool.
+        cli_mod.configure_workspace_command(
+            selected_tools=["claude"],
+            workspaces=[("https://w.com", None)],
+            use_model_provider=True,
+        )
+        assert picked_for == ["claude"]
+
     def test_unavailable_selected_tool_errors_before_configure(self, monkeypatch):
         import ucode.cli as cli_mod
 
@@ -1113,3 +1145,52 @@ class TestConfigureSharedStateMcpCleanup:
         cli_mod.configure_shared_state("https://same.databricks.com")
 
         assert purge_calls == []
+
+
+class TestConfigureSharedStateSkipDiscovery:
+    """With skip_model_discovery (provider mode), the heavy family discovery is
+    skipped; only a single web-search model is fetched, and existing model lists
+    are preserved rather than clobbered."""
+
+    @staticmethod
+    def _stub(monkeypatch):
+        import ucode.cli as cli_mod
+
+        monkeypatch.setattr(cli_mod, "normalize_workspace_url", lambda w: w)
+        monkeypatch.setattr(cli_mod, "ensure_databricks_auth", lambda w, p=None: None)
+        monkeypatch.setattr(cli_mod, "run_databricks_login", lambda w, p: None)
+        monkeypatch.setattr(cli_mod, "find_profile_name_for_host", lambda w: None)
+        monkeypatch.setattr(cli_mod, "get_databricks_token", lambda w, p: "token")
+        monkeypatch.setattr(cli_mod, "ensure_ai_gateway_v2", lambda w, t: None)
+        monkeypatch.setattr(cli_mod, "build_shared_base_urls", lambda w: {})
+        monkeypatch.setattr(cli_mod, "save_state", lambda s: None)
+
+    def test_skips_family_discovery_and_fetches_web_search_model(self, monkeypatch):
+        import ucode.cli as cli_mod
+
+        ws = "https://prov.databricks.com"
+        self._stub(monkeypatch)
+        # Pretend a prior Databricks configure left models behind.
+        monkeypatch.setattr(
+            cli_mod,
+            "load_state",
+            lambda: {"workspace": ws, "claude_models": {"opus": "databricks-claude-opus-4-8"}},
+        )
+
+        def _boom(*a, **k):
+            raise AssertionError("discover_model_services must not run in provider mode")
+
+        monkeypatch.setattr(cli_mod, "discover_model_services", _boom)
+        codex_calls: list = []
+        monkeypatch.setattr(
+            cli_mod,
+            "discover_codex_models",
+            lambda w, t: codex_calls.append((w, t)) or (["databricks-gpt-5"], None),
+        )
+
+        state = cli_mod.configure_shared_state(ws, tools=["claude"], skip_model_discovery=True)
+
+        assert codex_calls == [(ws, "token")]
+        assert state["web_search_model"] == "databricks-gpt-5"
+        # Existing model list preserved, not overwritten to {}.
+        assert state["claude_models"] == {"opus": "databricks-claude-opus-4-8"}

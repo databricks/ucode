@@ -272,6 +272,70 @@ class TestDiscoverModelServices:
         assert calls["n"] == 3  # two failures, third succeeds
 
 
+class TestListModelProviderServices:
+    _PAYLOAD = {
+        "model_provider_services": [
+            {
+                "name": "model-provider-services/main.aarushi.anthropic-svc",
+                "config": {"provider_type": "EXTERNAL_MODEL_PROVIDER_TYPE_ANTHROPIC"},
+            },
+            {
+                "name": "model-provider-services/main.aarushi.openai-svc",
+                "config": {"provider_type": "EXTERNAL_MODEL_PROVIDER_TYPE_OPENAI"},
+            },
+            {
+                "name": "model-provider-services/main.bob.bedrock-svc",
+                "config": {"provider_type": "EXTERNAL_MODEL_PROVIDER_TYPE_BEDROCK"},
+            },
+        ]
+    }
+
+    def test_strips_prefix_and_tags_provider_type(self, monkeypatch):
+        monkeypatch.setattr(
+            db_mod, "_http_get_json", lambda url, token, timeout=30: (self._PAYLOAD, None)
+        )
+        services, reason = db_mod.list_model_provider_services(WS, "token")
+        assert reason is None
+        assert services[0] == {"name": "main.aarushi.anthropic-svc", "provider_type": "anthropic"}
+        assert {s["provider_type"] for s in services} == {"anthropic", "openai", "bedrock"}
+
+    def test_returns_reason_on_failure(self, monkeypatch):
+        monkeypatch.setattr(
+            db_mod, "_http_get_json", lambda url, token, timeout=30: (None, "HTTP 500 Server Error")
+        )
+        services, reason = db_mod.list_model_provider_services(WS, "token")
+        assert services == []
+        assert reason == "HTTP 500 Server Error"
+
+    def test_claude_filters_to_anthropic(self, monkeypatch):
+        monkeypatch.setattr(
+            db_mod, "_http_get_json", lambda url, token, timeout=30: (self._PAYLOAD, None)
+        )
+        names, reason = db_mod.list_tool_provider_services("claude", WS, "token")
+        assert reason is None
+        assert names == ["main.aarushi.anthropic-svc"]
+
+    def test_codex_filters_to_openai(self, monkeypatch):
+        monkeypatch.setattr(
+            db_mod, "_http_get_json", lambda url, token, timeout=30: (self._PAYLOAD, None)
+        )
+        names, _ = db_mod.list_tool_provider_services("codex", WS, "token")
+        assert names == ["main.aarushi.openai-svc"]
+
+
+class TestModelProviderFeatureUnavailable:
+    def test_detects_feature_not_available(self):
+        reason = (
+            'HTTP 400 Bad Request: {"error_code":"BAD_REQUEST",'
+            '"message":"ModelProviderService feature is not available"}'
+        )
+        assert db_mod.is_model_provider_feature_unavailable(reason) is True
+
+    def test_false_for_other_errors(self):
+        assert db_mod.is_model_provider_feature_unavailable("HTTP 500 Server Error") is False
+        assert db_mod.is_model_provider_feature_unavailable(None) is False
+
+
 class TestListMcpServices:
     def test_accepts_entries_without_connection_status(self, monkeypatch):
         payload = {

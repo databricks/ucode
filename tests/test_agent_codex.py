@@ -61,6 +61,20 @@ class TestRenderOverlay:
         auth = overlay["model_providers"]["ucode-databricks"]["auth"]
         assert auth["refresh_interval_ms"] == 900_000
 
+    def test_provider_adds_routing_header(self):
+        overlay = codex.render_overlay(WS, provider="main.aarushi.aarushi-openai")
+        headers = overlay["model_providers"]["ucode-databricks"]["http_headers"]
+        assert headers["Databricks-Model-Provider-Service"] == "main.aarushi.aarushi-openai"
+
+    def test_provider_omits_model(self):
+        overlay = codex.render_overlay(WS, model=None, provider="main.aarushi.aarushi-openai")
+        assert "model" not in overlay
+
+    def test_no_provider_header_without_flag(self):
+        overlay = codex.render_overlay(WS)
+        headers = overlay["model_providers"]["ucode-databricks"]["http_headers"]
+        assert "Databricks-Model-Provider-Service" not in headers
+
 
 class TestRenderOverlayUserAgent:
     def test_user_agent_set_on_provider(self, monkeypatch):
@@ -123,6 +137,29 @@ class TestCodexWriteConfig:
 
         doc = read_toml_safe(config_path)
         assert doc["model"] == "databricks-gpt-5-2-codex"
+
+    def test_provider_writes_header_and_drops_stale_model(self, tmp_path, monkeypatch):
+        config_path = tmp_path / ".codex" / "ucode.config.toml"
+        backup_path = tmp_path / "codex-ucode-config.backup.toml"
+        monkeypatch.setattr(codex, "CODEX_CONFIG_PATH", config_path)
+        monkeypatch.setattr(codex, "CODEX_BACKUP_PATH", backup_path)
+        monkeypatch.setattr(codex, "agent_version", lambda binary: "0.134.0")
+        monkeypatch.setattr(codex, "save_state", lambda state: None)
+
+        # An earlier non-provider run pinned a model.
+        codex.write_tool_config({"workspace": WS, "codex_models": ["gpt-5"]})
+        assert read_toml_safe(config_path)["model"] == "gpt-5"
+
+        # A provider run must clear it and add the routing header.
+        codex.write_tool_config(
+            {"workspace": WS, "codex_models": ["gpt-5"]},
+            provider="main.aarushi.aarushi-openai",
+        )
+
+        doc = read_toml_safe(config_path)
+        assert "model" not in doc
+        headers = doc["model_providers"]["ucode-databricks"]["http_headers"]
+        assert headers["Databricks-Model-Provider-Service"] == "main.aarushi.aarushi-openai"
 
     def test_removes_legacy_ucode_profile_from_shared_config(self, tmp_path, monkeypatch):
         config_dir = tmp_path / ".codex"
