@@ -57,6 +57,54 @@ def _debug_enabled() -> bool:
     return os.environ.get("UCODE_DEBUG") == "1"
 
 
+def _preferred_model_prefix() -> str | None:
+    """Return the user-configured model prefix preference, or None.
+
+    Set ``UCODE_MODEL_PREFERRED_PREFIX`` to a prefix string (e.g. ``companyname-``) to
+    promote any discovered model whose name starts with that prefix to the top
+    of each family's candidate list.  The normal newest-first ordering still
+    applies within the preferred and non-preferred groups, so the best version
+    of the preferred prefix always wins over an older version of the same prefix.
+    """
+    return os.environ.get("UCODE_MODEL_PREFERRED_PREFIX") or None
+
+
+def _model_bare_name(model_id: str) -> str:
+    """Return the bare model name, stripping any catalog prefix (e.g. ``system.ai.``)."""
+    return model_id.rsplit(".", 1)[-1]
+
+
+def _sort_candidates_by_prefix(
+    candidates: list[str],
+    preferred_prefix: str | None,
+    *,
+    sort_key=None,
+) -> list[str]:
+    """Sort model id candidates newest-first, with preferred_prefix promoted.
+
+    ``sort_key`` overrides the default reverse-alpha ordering within each group
+    (e.g. pass ``model_version_sort_key`` for Gemini).  Without a preferred
+    prefix this is equivalent to ``sorted(candidates, key=sort_key)`` (or
+    ``sorted(..., reverse=True)`` for the default key).  With one, preferred
+    items sort before others; both groups use the same criterion.
+
+    Prefix matching is anchored to the start of the bare model name so that
+    ``system.ai.companyname-claude-haiku-4-5`` matches prefix ``companyname-``
+    without false-positives from mid-string occurrences.
+    """
+    if not preferred_prefix:
+        return sorted(candidates, key=sort_key) if sort_key else sorted(candidates, reverse=True)
+    preferred = [m for m in candidates if _model_bare_name(m).startswith(preferred_prefix)]
+    others = [m for m in candidates if not _model_bare_name(m).startswith(preferred_prefix)]
+    if sort_key:
+        return sorted(preferred, key=sort_key) + sorted(others, key=sort_key)
+    return sorted(
+        candidates,
+        key=lambda m: (_model_bare_name(m).startswith(preferred_prefix), m),
+        reverse=True,
+    )
+
+
 _DEBUG_LOGGER: logging.Logger | None = None
 
 
@@ -1182,17 +1230,20 @@ def discover_model_services(
     if not ids:
         return {}, [], [], reason
 
+    preferred_prefix = _preferred_model_prefix()
     claude_models: dict[str, str] = {}
     for family in ("opus", "sonnet", "haiku"):
-        candidates = sorted(
+        candidates = _sort_candidates_by_prefix(
             [m for m in ids if f"claude-{family}-" in m],
-            reverse=True,
+            preferred_prefix,
         )
         if candidates:
             claude_models[family] = candidates[0]
 
-    codex_models = [m for m in ids if "gpt-" in m]
-    gemini_models = sorted([m for m in ids if "gemini-" in m], key=model_version_sort_key)
+    codex_models = _sort_candidates_by_prefix([m for m in ids if "gpt-" in m], preferred_prefix)
+    gemini_models = _sort_candidates_by_prefix(
+        [m for m in ids if "gemini-" in m], preferred_prefix, sort_key=model_version_sort_key
+    )
 
     if not (claude_models or codex_models or gemini_models):
         sample = ", ".join(ids[:5])
@@ -1533,12 +1584,21 @@ def discover_claude_models(workspace: str, token: str) -> tuple[dict[str, str], 
         if isinstance(m.get("id"), str) and not m["id"].endswith("-anthropic")
     ]
 
+    preferred_prefix = _preferred_model_prefix()
     result: dict[str, str] = {}
     for family, key in [("opus", "opus"), ("sonnet", "sonnet"), ("haiku", "haiku")]:
-        candidates = sorted(
-            [m for m in raw_ids if f"databricks-claude-{family}-" in m],
-            reverse=True,
-        )
+        # Accept both the standard databricks-claude-* prefix and any custom
+        # preferred prefix so that e.g. companyname-claude-haiku-4-5 is discoverable.
+        family_ids = [
+            m
+            for m in raw_ids
+            if f"claude-{family}-" in m
+            and (
+                f"databricks-claude-{family}-" in m
+                or (preferred_prefix and _model_bare_name(m).startswith(preferred_prefix))
+            )
+        ]
+        candidates = _sort_candidates_by_prefix(family_ids, preferred_prefix)
         if candidates:
             result[key] = candidates[0]
     if result:
@@ -1591,12 +1651,14 @@ def discover_endpoints_with_api_type(
     api_type: str,
     *,
     sort_key=None,
+    preferred_prefix: str | None = None,
 ) -> tuple[list[str], str | None]:
     """List endpoint names whose served_entities expose api_type with v2 support.
 
     Returns (endpoints, reason). reason is None on success; otherwise it
     describes why the list is empty. `sort_key` overrides the default
-    alphabetical ordering of the returned names.
+    newest-first (reverse-alphabetical) ordering of the returned names.  `preferred_prefix` promotes
+    matching endpoints to the front of the list (see ``_preferred_model_prefix``).
     """
     hostname = workspace_hostname(workspace)
     payload, reason = _http_get_json(
@@ -1624,7 +1686,7 @@ def discover_endpoints_with_api_type(
         if api_type in api_types:
             out.append(name)
     if out:
-        return sorted(out, key=sort_key), None
+        return _sort_candidates_by_prefix(out, preferred_prefix, sort_key=sort_key), None
     if not endpoints:
         return [], "foundation-models listing returned no endpoints"
     if saw_endpoint_without_v2:
@@ -1645,12 +1707,18 @@ def discover_gemini_models(workspace: str, token: str) -> tuple[list[str], str |
     # Order newest model version first so `default_model()` (which picks the
     # first entry) launches e.g. gemini-3.5-flash rather than gemini-2.5-flash.
     return discover_endpoints_with_api_type(
-        workspace, token, "gemini/v1/generateContent", sort_key=model_version_sort_key
+        workspace,
+        token,
+        "gemini/v1/generateContent",
+        sort_key=model_version_sort_key,
+        preferred_prefix=_preferred_model_prefix(),
     )
 
 
 def discover_codex_models(workspace: str, token: str) -> tuple[list[str], str | None]:
-    return discover_endpoints_with_api_type(workspace, token, "openai/v1/responses")
+    return discover_endpoints_with_api_type(
+        workspace, token, "openai/v1/responses", preferred_prefix=_preferred_model_prefix()
+    )
 
 
 def fetch_gemini_models(workspace: str, token: str) -> list[str]:
