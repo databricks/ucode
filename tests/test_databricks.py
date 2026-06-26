@@ -17,11 +17,13 @@ from ucode.databricks import (
     _scrub_databrickscfg,
     _scrub_json,
     build_auth_shell_command,
+    build_auth_token_argv,
     build_databricks_cli_env,
     build_opencode_base_urls,
     build_shared_base_urls,
     build_tool_base_url,
     ensure_databricks_cli_version,
+    ensure_pat_bearer,
     get_databricks_token,
     list_databricks_apps,
     list_databricks_connections,
@@ -551,106 +553,125 @@ class TestApplyPatEnvironment:
         assert os.environ["DATABRICKS_BEARER"] == "explicit-bearer"
 
 
+class TestBuildAuthTokenArgv:
+    def test_basic_argv(self):
+        argv = build_auth_token_argv(WS)
+        # First element resolves to the ucode executable; the rest is the
+        # cross-platform helper invocation — no `sh`, no `jq`, no shell syntax.
+        assert argv[0].endswith("ucode") or argv[0] == "ucode"
+        assert argv[1:] == ["auth-token", "--host", WS]
+
+    def test_strips_trailing_slash_from_host(self):
+        argv = build_auth_token_argv(WS + "/")
+        assert "--host" in argv
+        assert argv[argv.index("--host") + 1] == WS
+
+    def test_embeds_profile_when_provided(self):
+        argv = build_auth_token_argv(WS, profile="stablebox")
+        assert argv[argv.index("--profile") + 1] == "stablebox"
+
+    def test_profile_passed_as_separate_argv_element(self):
+        # Metacharacters need no shell quoting — argv is never parsed by a shell.
+        argv = build_auth_token_argv(WS, profile="weird name; rm -rf /")
+        assert "weird name; rm -rf /" in argv
+
+    def test_use_pat_flag(self):
+        argv = build_auth_token_argv(WS, profile="DEFAULT", use_pat=True)
+        assert "--use-pat" in argv
+        assert argv[argv.index("--profile") + 1] == "DEFAULT"
+
+    def test_no_use_pat_flag_by_default(self):
+        assert "--use-pat" not in build_auth_token_argv(WS)
+
+
 class TestBuildAuthShellCommand:
     def test_contains_workspace(self):
         cmd = build_auth_shell_command(WS)
         assert WS in cmd
 
-    def test_parses_access_token(self):
+    def test_is_ucode_auth_token_invocation(self):
+        # The persisted helper now points at the `ucode auth-token` executable
+        # on every platform — not a POSIX `databricks ... | jq` pipeline.
         cmd = build_auth_shell_command(WS)
-        assert "jq" in cmd
-        assert ".access_token" in cmd
-        assert "--force-refresh" in cmd
-        assert "DATABRICKS_BEARER" in cmd
-        assert "DATABRICKS_CONFIG_PROFILE" in cmd
-
-    def test_returns_token_when_auth_succeeds(self, tmp_path):
-        # Fake databricks binary that always returns a valid token JSON.
-        fake = tmp_path / "databricks"
-        fake.write_text(
-            '#!/bin/sh\necho \'{"access_token": "good-token", "token_type": "Bearer"}\'\n'
-        )
-        fake.chmod(0o755)
-        cmd = build_auth_shell_command(WS)
-        result = subprocess.run(
-            ["sh", "-c", cmd],
-            capture_output=True,
-            text=True,
-            env={
-                **os.environ,
-                "PATH": f"{tmp_path}:{os.environ['PATH']}",
-                "DATABRICKS_BEARER": "",
-            },
-        )
-        assert result.stdout.strip() == "good-token"
-
-    def test_prefers_databricks_bearer(self, tmp_path):
-        fake = tmp_path / "databricks"
-        fake.write_text("#!/bin/sh\nexit 1\n")
-        fake.chmod(0o755)
-        cmd = build_auth_shell_command(WS)
-        result = subprocess.run(
-            ["sh", "-c", cmd],
-            capture_output=True,
-            text=True,
-            env={
-                **os.environ,
-                "PATH": f"{tmp_path}:{os.environ['PATH']}",
-                "DATABRICKS_BEARER": "bearer-token",
-            },
-        )
-        assert result.stdout.strip() == "bearer-token"
+        assert "auth-token" in cmd
+        assert "--host" in cmd
+        # POSIX-only constructs that broke Windows (#116) must be gone.
+        assert "jq" not in cmd
+        assert "if [ -n" not in cmd
 
     def test_embeds_profile_when_provided(self):
         cmd = build_auth_shell_command(WS, profile="stablebox")
         assert "--profile stablebox" in cmd
-        # We do not strip DATABRICKS_CONFIG_PROFILE when we are explicit about
-        # which profile to use — the --profile flag wins.
-        assert "env -u DATABRICKS_CONFIG_PROFILE" not in cmd
 
     def test_quotes_profile_shell_metacharacters(self):
         cmd = build_auth_shell_command(WS, profile="weird name; rm -rf /")
-        # shlex.quote should wrap the value so the rest of the command cannot
-        # be interpreted as a shell injection.
-        assert "rm -rf /" in cmd
-        assert "'weird name; rm -rf /'" in cmd
+        # On POSIX shlex.join quotes the value so the string form cannot be
+        # interpreted as a shell injection if a tool runs it via a shell.
+        if os.name != "nt":
+            assert "'weird name; rm -rf /'" in cmd
 
-    def test_use_pat_reads_profile_token_via_describe(self):
+    def test_use_pat_emits_flag(self):
         cmd = build_auth_shell_command(WS, profile="DEFAULT", use_pat=True)
-        assert "auth describe --profile DEFAULT --sensitive" in cmd
-        assert ".details.configuration.token.value" in cmd
-        # No OAuth attempt for PAT profiles — `auth token` cannot serve them.
-        assert "auth token" not in cmd
-        # The DATABRICKS_BEARER escape hatch still takes precedence.
-        assert "DATABRICKS_BEARER" in cmd
+        assert "--use-pat" in cmd
+        assert "--profile DEFAULT" in cmd
 
-    def test_use_pat_command_emits_token(self, tmp_path):
-        fake = tmp_path / "databricks"
-        fake.write_text(
-            "#!/bin/sh\n"
-            'case "$*" in\n'
-            '  *"auth describe"*) echo \'{"details": {"configuration": '
-            '{"token": {"value": "dapi-pat"}}}}\' ;;\n'
-            "  *) exit 1 ;;\n"
-            "esac\n"
-        )
-        fake.chmod(0o755)
-        cmd = build_auth_shell_command(WS, profile="DEFAULT", use_pat=True)
-        result = subprocess.run(
-            ["sh", "-c", cmd],
-            capture_output=True,
-            text=True,
-            env={
-                **os.environ,
-                "PATH": f"{tmp_path}:{os.environ['PATH']}",
-                "DATABRICKS_BEARER": "",
-            },
-        )
-        assert result.stdout.strip() == "dapi-pat"
 
-    def test_use_pat_without_profile_falls_back_to_oauth_command(self):
-        cmd = build_auth_shell_command(WS, use_pat=True)
-        assert "auth token" in cmd
+class TestEnsurePatBearer:
+    """ensure_pat_bearer is the empty-aware DATABRICKS_BEARER export used by the
+    --use-pat path on configure, launch, and the auth-token helper."""
+
+    @pytest.fixture(autouse=True)
+    def _isolated_bearer(self):
+        # ensure_pat_bearer writes os.environ directly; restore it even though
+        # monkeypatch can't track writes made by code under test.
+        original = os.environ.pop("DATABRICKS_BEARER", None)
+        yield
+        if original is None:
+            os.environ.pop("DATABRICKS_BEARER", None)
+        else:
+            os.environ["DATABRICKS_BEARER"] = original
+
+    def test_exports_pat_when_env_absent(self, monkeypatch):
+        monkeypatch.setattr(db_mod, "resolve_pat_token", lambda p: "dapi-pat")
+        assert ensure_pat_bearer("p") is True
+        assert os.environ["DATABRICKS_BEARER"] == "dapi-pat"
+
+    def test_overwrites_empty_env(self, monkeypatch):
+        # The regression: an empty DATABRICKS_BEARER must be treated as absent
+        # so the PAT is still exported (old `if [ -n ... ]` parity).
+        monkeypatch.setenv("DATABRICKS_BEARER", "")
+        monkeypatch.setattr(db_mod, "resolve_pat_token", lambda p: "dapi-pat")
+        assert ensure_pat_bearer("p") is True
+        assert os.environ["DATABRICKS_BEARER"] == "dapi-pat"
+
+    def test_non_empty_env_wins_without_resolving(self, monkeypatch):
+        monkeypatch.setenv("DATABRICKS_BEARER", "ci-bearer")
+        called = []
+        monkeypatch.setattr(db_mod, "resolve_pat_token", lambda p: called.append(p) or "dapi-pat")
+        assert ensure_pat_bearer("p") is True
+        # Pre-set bearer is honored; we don't even read the PAT.
+        assert os.environ["DATABRICKS_BEARER"] == "ci-bearer"
+        assert called == []
+
+    def test_returns_false_when_no_pat(self, monkeypatch):
+        monkeypatch.setattr(db_mod, "resolve_pat_token", lambda p: None)
+        assert ensure_pat_bearer("p") is False
+        assert "DATABRICKS_BEARER" not in os.environ
+
+    def test_whitespace_only_env_treated_as_empty(self, monkeypatch):
+        monkeypatch.setenv("DATABRICKS_BEARER", "   ")
+        monkeypatch.setattr(db_mod, "resolve_pat_token", lambda p: "dapi-pat")
+        assert ensure_pat_bearer("p") is True
+        assert os.environ["DATABRICKS_BEARER"] == "dapi-pat"
+
+    def test_explicit_pat_arg_skips_cfg_read(self, monkeypatch):
+        # Callers that already resolved the PAT (configure_shared_state) pass it
+        # in; ensure_pat_bearer must use it without re-reading ~/.databrickscfg.
+        called = []
+        monkeypatch.setattr(db_mod, "resolve_pat_token", lambda p: called.append(p) or "from-cfg")
+        assert ensure_pat_bearer("p", "explicit-pat") is True
+        assert os.environ["DATABRICKS_BEARER"] == "explicit-pat"
+        assert called == []
 
 
 class TestFormatSubprocessResult:

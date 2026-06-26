@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 from unittest.mock import patch
 
@@ -153,6 +154,117 @@ class TestMcpSubcommands:
         result = runner.invoke(app, ["mcp", "--help"])
         assert result.exit_code == 0
         assert "web-search" in result.output
+
+
+class TestAuthTokenCommand:
+    """`ucode auth-token` is the cross-platform apiKeyHelper (#116)."""
+
+    @pytest.fixture(autouse=True)
+    def _isolated_bearer(self):
+        # The --use-pat path writes DATABRICKS_BEARER directly; restore it so
+        # writes by code under test don't leak into other tests.
+        original = os.environ.pop("DATABRICKS_BEARER", None)
+        yield
+        if original is None:
+            os.environ.pop("DATABRICKS_BEARER", None)
+        else:
+            os.environ["DATABRICKS_BEARER"] = original
+
+    def test_prints_only_the_token_to_stdout(self):
+        with (
+            patch("ucode.cli.load_state", return_value={"workspace": "https://ws"}),
+            patch("ucode.cli.get_databricks_token", return_value="tok-123") as fetch,
+        ):
+            result = runner.invoke(app, ["auth-token"])
+        assert result.exit_code == 0
+        # Nothing but the bare token (plus trailing newline) may reach stdout,
+        # or the consuming agent will treat the noise as part of the token.
+        assert result.stdout == "tok-123\n"
+        fetch.assert_called_once_with("https://ws", None)
+
+    def test_host_and_profile_override_state(self):
+        with (
+            patch("ucode.cli.load_state", return_value={"workspace": "https://saved"}),
+            patch("ucode.cli.get_databricks_token", return_value="tok") as fetch,
+        ):
+            result = runner.invoke(
+                app, ["auth-token", "--host", "https://override", "--profile", "prod"]
+            )
+        assert result.exit_code == 0
+        fetch.assert_called_once_with("https://override", "prod")
+
+    def test_errors_without_workspace(self):
+        with patch("ucode.cli.load_state", return_value={}):
+            result = runner.invoke(app, ["auth-token"])
+        assert result.exit_code == 1
+        # The error goes to stderr, never stdout.
+        assert result.stdout == ""
+
+    def test_hidden_from_top_level_help(self):
+        result = runner.invoke(app, ["--help"])
+        assert "auth-token" not in _strip_ansi(result.output)
+
+    def test_use_pat_emits_resolved_pat(self, monkeypatch):
+        # --use-pat reads the profile's static PAT, exports it as
+        # DATABRICKS_BEARER, and get_databricks_token returns it directly.
+        monkeypatch.delenv("DATABRICKS_BEARER", raising=False)
+        monkeypatch.setattr("ucode.databricks.resolve_pat_token", lambda p: "dapi-pat")
+        with (
+            patch("ucode.cli.load_state", return_value={"workspace": "https://ws"}),
+            patch(
+                "ucode.cli.get_databricks_token",
+                side_effect=lambda w, p: os.environ.get("DATABRICKS_BEARER", ""),
+            ),
+        ):
+            result = runner.invoke(app, ["auth-token", "--use-pat", "--profile", "p"])
+        assert result.exit_code == 0
+        assert result.stdout == "dapi-pat\n"
+
+    def test_use_pat_ignores_empty_bearer_env(self, monkeypatch):
+        # A stray empty DATABRICKS_BEARER must not shadow the PAT and force the
+        # OAuth path (the regression that motivated ensure_pat_bearer).
+        monkeypatch.setenv("DATABRICKS_BEARER", "")
+        monkeypatch.setattr("ucode.databricks.resolve_pat_token", lambda p: "dapi-pat")
+        with (
+            patch("ucode.cli.load_state", return_value={"workspace": "https://ws"}),
+            patch(
+                "ucode.cli.get_databricks_token",
+                side_effect=lambda w, p: os.environ.get("DATABRICKS_BEARER", ""),
+            ),
+        ):
+            result = runner.invoke(app, ["auth-token", "--use-pat", "--profile", "p"])
+        assert result.exit_code == 0
+        assert result.stdout == "dapi-pat\n"
+
+    def test_use_pat_fails_closed_without_pat(self, monkeypatch):
+        # --use-pat with no resolvable PAT must error, NOT fall through to OAuth
+        # (which can't serve a PAT-only profile and yields a misleading message).
+        monkeypatch.delenv("DATABRICKS_BEARER", raising=False)
+        monkeypatch.setattr("ucode.databricks.resolve_pat_token", lambda p: None)
+        with (
+            patch("ucode.cli.load_state", return_value={"workspace": "https://ws"}),
+            patch("ucode.cli.get_databricks_token", return_value="oauth-tok") as fetch,
+        ):
+            result = runner.invoke(app, ["auth-token", "--use-pat", "--profile", "p"])
+        assert result.exit_code == 1
+        # Never attempted OAuth, and nothing leaked to stdout.
+        fetch.assert_not_called()
+        assert result.stdout == ""
+
+    def test_use_pat_honors_non_empty_bearer_env(self, monkeypatch):
+        # A real pre-set bearer (CI escape hatch) wins over the profile PAT.
+        monkeypatch.setenv("DATABRICKS_BEARER", "ci-bearer")
+        monkeypatch.setattr("ucode.databricks.resolve_pat_token", lambda p: "dapi-pat")
+        with (
+            patch("ucode.cli.load_state", return_value={"workspace": "https://ws"}),
+            patch(
+                "ucode.cli.get_databricks_token",
+                side_effect=lambda w, p: os.environ.get("DATABRICKS_BEARER", ""),
+            ),
+        ):
+            result = runner.invoke(app, ["auth-token", "--use-pat", "--profile", "p"])
+        assert result.exit_code == 0
+        assert result.stdout == "ci-bearer\n"
 
 
 class TestStatus:

@@ -704,6 +704,28 @@ def resolve_pat_token(profile: str | None) -> str | None:
     return None
 
 
+def ensure_pat_bearer(profile: str | None, pat: str | None = None) -> bool:
+    """Ensure ``DATABRICKS_BEARER`` holds a usable token for a ``--use-pat`` profile.
+
+    If a non-empty bearer is already in the environment it wins (the CI escape
+    hatch). Otherwise the profile's static PAT is exported — callers that have
+    already resolved it (e.g. ``configure_shared_state``) pass it via ``pat`` to
+    skip a redundant ``~/.databrickscfg`` read; everyone else lets this resolve
+    it. An exported-but-*empty* ``DATABRICKS_BEARER`` is treated as absent —
+    matching ``get_databricks_token``'s own ``.strip()`` check — so a stray
+    ``export DATABRICKS_BEARER=`` does not shadow the PAT and silently force the
+    OAuth path (which fails for PAT-only profiles).
+
+    Returns ``True`` iff a usable bearer is now present in the environment."""
+    if os.environ.get("DATABRICKS_BEARER", "").strip():
+        return True
+    pat = pat or resolve_pat_token(profile)
+    if pat:
+        os.environ["DATABRICKS_BEARER"] = pat
+        return True
+    return False
+
+
 def apply_pat_environment(state: dict) -> None:
     """Export the configured profile's PAT as ``DATABRICKS_BEARER`` when the
     workspace was configured with ``--use-pat``.
@@ -711,12 +733,10 @@ def apply_pat_environment(state: dict) -> None:
     Every token fetch in this process (and in launched agent subprocesses,
     which inherit the environment) then takes the existing static-bearer
     short-circuit instead of the OAuth-only `databricks auth token` path.
-    A bearer already present in the environment is left untouched."""
+    A non-empty bearer already present in the environment is left untouched."""
     if not state.get("use_pat"):
         return
-    pat = resolve_pat_token(state.get("profile"))
-    if pat:
-        os.environ.setdefault("DATABRICKS_BEARER", pat)
+    ensure_pat_bearer(state.get("profile"))
 
 
 def run_databricks_login(workspace: str, profile: str | None = None) -> None:
@@ -1026,36 +1046,45 @@ def list_databricks_apps(workspace: str, profile: str | None = None) -> list[dic
         raise RuntimeError("Databricks apps listing returned invalid JSON.") from exc
 
 
+def _ucode_binary() -> str:
+    """Resolve the absolute path to the running `ucode` executable.
+
+    Agents persist the auth command into config files and re-run it on every
+    token refresh, possibly from launchers without a full PATH (desktop GUIs).
+    An absolute path keeps the helper working regardless of PATH. Falls back to
+    the bare name when resolution fails."""
+    return shutil.which("ucode") or "ucode"
+
+
+def build_auth_token_argv(
+    workspace: str, profile: str | None = None, *, use_pat: bool = False
+) -> list[str]:
+    """Argv for the cross-platform token helper: `ucode auth-token ...`.
+
+    Unlike the previous POSIX `databricks ... | jq` pipeline, this is a single
+    executable with plain arguments — no `sh`, no `jq`, no shell quoting — so it
+    runs identically on macOS, Linux, and Windows (issue #116). The DATABRICKS_BEARER
+    short-circuit and the PAT path both live inside `auth-token` itself."""
+    argv = [_ucode_binary(), "auth-token", "--host", workspace.rstrip("/")]
+    if profile:
+        argv += ["--profile", profile]
+    if use_pat:
+        argv.append("--use-pat")
+    return argv
+
+
 def build_auth_shell_command(
     workspace: str, profile: str | None = None, *, use_pat: bool = False
 ) -> str:
-    workspace_arg = shlex.quote(workspace.rstrip("/"))
-    if use_pat and profile:
-        # --use-pat profiles have no OAuth cache for `auth token` to read, so
-        # the persisted command reads the profile's static token instead.
-        profile_arg = shlex.quote(profile)
-        cli_command = (
-            f"databricks auth describe --profile {profile_arg} --sensitive --output json "
-            "| jq -r '.details.configuration.token.value'"
-        )
-    elif profile:
-        profile_arg = shlex.quote(profile)
-        cli_command = (
-            f"databricks auth token --host {workspace_arg} "
-            f"--profile {profile_arg} --force-refresh --output json "
-            "| jq -r '.access_token'"
-        )
-    else:
-        cli_command = (
-            "env -u DATABRICKS_CONFIG_PROFILE "
-            f"databricks auth token --host {workspace_arg} --force-refresh --output json "
-            "| jq -r '.access_token'"
-        )
-    return (
-        'if [ -n "${DATABRICKS_BEARER:-}" ]; then '
-        'printf "%s\\n" "$DATABRICKS_BEARER"; '
-        f"else {cli_command}; fi"
-    )
+    """Single-line, shell-quoted form of :func:`build_auth_token_argv`.
+
+    Used where a tool wants the helper as one command *string* (Claude Code's
+    `apiKeyHelper`). On every platform this resolves to the `ucode auth-token`
+    executable rather than a POSIX shell pipeline, so no `sh`/`jq` is required."""
+    argv = build_auth_token_argv(workspace, profile, use_pat=use_pat)
+    if platform.system() == "Windows":
+        return subprocess.list2cmdline(argv)
+    return shlex.join(argv)
 
 
 # A model-service's `name` is `model-services/system.ai.<model-name>`; the

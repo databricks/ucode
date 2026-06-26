@@ -5,7 +5,11 @@ from __future__ import annotations
 import json
 
 from ucode.config_io import APP_DIR, is_dry_run
-from ucode.databricks import build_auth_shell_command, build_shared_base_urls
+from ucode.databricks import (
+    build_auth_shell_command,
+    build_auth_token_argv,
+    build_shared_base_urls,
+)
 
 STATE_PATH = APP_DIR / "state.json"
 STATE_VERSION = 3
@@ -124,7 +128,9 @@ def build_agent_state(state: dict) -> dict[str, dict]:
     profile = state.get("profile") if isinstance(state.get("profile"), str) else None
     base_urls_value = state.get("base_urls")
     base_urls = base_urls_value if isinstance(base_urls_value, dict) else {}
-    auth_command = build_auth_shell_command(workspace, profile, use_pat=bool(state.get("use_pat")))
+    use_pat = bool(state.get("use_pat"))
+    auth_command = build_auth_shell_command(workspace, profile, use_pat=use_pat)
+    auth_argv = build_auth_token_argv(workspace, profile, use_pat=use_pat)
     claude_models_value = state.get("claude_models")
     claude_models: dict = claude_models_value if isinstance(claude_models_value, dict) else {}
     codex_models_value = state.get("codex_models")
@@ -155,8 +161,8 @@ def build_agent_state(state: dict) -> dict[str, dict]:
             "base_url": base_urls.get("codex"),
             "auth_command": auth_command,
             "auth": {
-                "command": "sh",
-                "args": ["-c", auth_command],
+                "command": auth_argv[0],
+                "args": auth_argv[1:],
                 "timeout_ms": AUTH_COMMAND_TIMEOUT_MS,
                 "refresh_interval_ms": AUTH_REFRESH_INTERVAL_MS,
             },
