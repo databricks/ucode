@@ -14,6 +14,7 @@ def _base_urls() -> dict[str, str]:
     return {
         "anthropic": f"{WS}/ai-gateway/anthropic/v1",
         "gemini": f"{WS}/ai-gateway/gemini/v1beta",
+        "openai": f"{WS}/ai-gateway/codex/v1",
     }
 
 
@@ -152,6 +153,101 @@ class TestRenderOverlay:
         assert overlay["model"] == "databricks-google/gemini-2"
 
 
+class TestRenderOverlayCodex:
+    """Regression coverage for #97: the GPT-5 / Codex (Responses) family must
+    land in opencode.json alongside Anthropic and Gemini. Before the fix, only
+    two providers were written and `databricks-gpt-5-5` could not be reached
+    from OpenCode at all."""
+
+    def test_openai_provider_added_when_codex_models_present(self):
+        models = {"openai": ["databricks-gpt-5-5"]}
+        overlay, _ = opencode.render_overlay("databricks-gpt-5-5", "tok", _base_urls(), models)
+        assert "databricks-openai" in overlay["provider"]
+
+    def test_openai_provider_uses_ai_sdk_openai_npm(self):
+        models = {"openai": ["databricks-gpt-5-5"]}
+        overlay, _ = opencode.render_overlay("databricks-gpt-5-5", "tok", _base_urls(), models)
+        assert overlay["provider"]["databricks-openai"]["npm"] == "@ai-sdk/openai"
+
+    def test_openai_base_url_points_at_codex_gateway(self):
+        models = {"openai": ["databricks-gpt-5-5"]}
+        overlay, _ = opencode.render_overlay("databricks-gpt-5-5", "tok", _base_urls(), models)
+        options = overlay["provider"]["databricks-openai"]["options"]
+        assert options["baseURL"] == f"{WS}/ai-gateway/codex/v1"
+
+    def test_use_responses_api_flag_set_per_model(self):
+        # Databricks GPT-5 / Codex models are Responses-only on
+        # /ai-gateway/codex/v1. The per-model `useResponsesApi: true` lives in
+        # `models.<m>.options` where opencode reads it.
+        models = {"openai": ["databricks-gpt-5-5"]}
+        overlay, _ = opencode.render_overlay("databricks-gpt-5-5", "tok", _base_urls(), models)
+        model_entry = overlay["provider"]["databricks-openai"]["models"]["databricks-gpt-5-5"]
+        assert model_entry["options"]["useResponsesApi"] is True
+
+    def test_use_responses_api_set_on_every_codex_model(self):
+        models = {"openai": ["databricks-gpt-5-5", "databricks-gpt-codex"]}
+        overlay, _ = opencode.render_overlay("databricks-gpt-5-5", "tok", _base_urls(), models)
+        provider_models = overlay["provider"]["databricks-openai"]["models"]
+        for m in ("databricks-gpt-5-5", "databricks-gpt-codex"):
+            assert provider_models[m]["options"]["useResponsesApi"] is True
+
+    def test_openai_token_in_api_key(self):
+        models = {"openai": ["databricks-gpt-5-5"]}
+        overlay, _ = opencode.render_overlay("databricks-gpt-5-5", "mytoken", _base_urls(), models)
+        assert overlay["provider"]["databricks-openai"]["options"]["apiKey"] == "mytoken"
+
+    def test_openai_authorization_header(self):
+        models = {"openai": ["databricks-gpt-5-5"]}
+        overlay, _ = opencode.render_overlay("databricks-gpt-5-5", "tok", _base_urls(), models)
+        headers = overlay["provider"]["databricks-openai"]["options"]["headers"]
+        assert headers["Authorization"] == "Bearer tok"
+
+    def test_user_agent_header_codex(self, monkeypatch):
+        monkeypatch.setattr(opencode, "ucode_version", lambda: "0.1.0")
+        monkeypatch.setattr(opencode, "agent_version", lambda binary: "0.74.0")
+        models = {"openai": ["databricks-gpt-5-5"]}
+        overlay, _ = opencode.render_overlay("databricks-gpt-5-5", "tok", _base_urls(), models)
+        model_headers = overlay["provider"]["databricks-openai"]["models"]["databricks-gpt-5-5"][
+            "headers"
+        ]
+        assert model_headers["User-Agent"] == "ucode/0.1.0 opencode/0.74.0"
+
+    def test_managed_keys_include_openai_provider(self):
+        models = {"openai": ["databricks-gpt-5-5"]}
+        _, keys = opencode.render_overlay("databricks-gpt-5-5", "tok", _base_urls(), models)
+        assert ["provider", "databricks-openai"] in keys
+
+    def test_prefixes_openai_model_with_provider_id(self):
+        models = {"openai": ["databricks-gpt-5-5"]}
+        overlay, _ = opencode.render_overlay("databricks-gpt-5-5", "tok", _base_urls(), models)
+        assert overlay["model"] == "databricks-openai/databricks-gpt-5-5"
+
+    def test_already_prefixed_codex_model_is_preserved(self):
+        models = {"openai": ["databricks-gpt-5-5"]}
+        overlay, _ = opencode.render_overlay(
+            "databricks-openai/databricks-gpt-5-5", "tok", _base_urls(), models
+        )
+        assert overlay["model"] == "databricks-openai/databricks-gpt-5-5"
+
+    def test_all_three_providers_when_all_present(self):
+        models = {
+            "anthropic": ["claude-sonnet"],
+            "gemini": ["gemini-2"],
+            "openai": ["databricks-gpt-5-5"],
+        }
+        overlay, _ = opencode.render_overlay("claude-sonnet", "tok", _base_urls(), models)
+        assert set(overlay["provider"].keys()) == {
+            "databricks-anthropic",
+            "databricks-google",
+            "databricks-openai",
+        }
+
+    def test_provider_keys_listed_in_module(self):
+        # `PROVIDER_KEYS` drives the stale-config cleanup. The codex provider
+        # must be in this list or stale entries would leak across configures.
+        assert ["provider", "databricks-openai"] in opencode.PROVIDER_KEYS
+
+
 class TestMcpServerConfig:
     def test_builds_remote_server_entry_with_oauth_token_env_header(self):
         entry = opencode.build_mcp_server_entry(f"{WS}/api/2.0/mcp/external/github")
@@ -263,6 +359,18 @@ class TestOpencodeDefaultModel:
     def test_prefers_anthropic(self):
         state = {"opencode_models": {"anthropic": ["claude-sonnet"], "gemini": ["gemini-2"]}}
         assert opencode.default_model(state) == "claude-sonnet"
+
+    def test_falls_back_to_openai_before_gemini(self):
+        # Codex/GPT-5 ranks above Gemini in the fallback order — these are the
+        # primary code models on Databricks once the codex provider is wired.
+        state = {
+            "opencode_models": {
+                "anthropic": [],
+                "openai": ["databricks-gpt-5-5"],
+                "gemini": ["gemini-2"],
+            }
+        }
+        assert opencode.default_model(state) == "databricks-gpt-5-5"
 
     def test_falls_back_to_gemini(self):
         state = {"opencode_models": {"anthropic": [], "gemini": ["gemini-2"]}}
