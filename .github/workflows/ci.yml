@@ -72,3 +72,27 @@ jobs:
           echo "=== installed claude-code + mlflow CLI ==="
           claude --version || true
           "$(uv tool dir --bin)/mlflow" --version || true
+      # Diagnostic: reproduce the client-side span export from the runner with
+      # verbose logging. The hook's `log_spans` failure is logged at WARNING to
+      # mlflow's own logger (not the hook file log), so surface it directly to
+      # see why the root span never reaches the trace server from CI.
+      - if: ${{ failure() }}
+        name: Probe MLflow span export
+        env:
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_BEARER }}
+        run: |
+          uv run --extra tracing python - <<'PY' 2>&1 || true
+          import logging
+          logging.basicConfig(level=logging.DEBUG)
+          import os, mlflow
+          mlflow.set_tracking_uri("databricks")
+          mlflow.set_experiment(experiment_id="2190569664060193")
+          print("=== starting probe span ===")
+          with mlflow.start_span(name="ci_export_probe") as span:
+              span.set_inputs({"probe": True})
+          try:
+              mlflow.flush_trace_async_logging()
+          except Exception as e:
+              print("flush error:", repr(e))
+          print("=== probe done ===")
+          PY
