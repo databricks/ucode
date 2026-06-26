@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import os
 from typing import Annotated
 
 import typer
@@ -38,6 +37,7 @@ from ucode.databricks import (
     discover_model_services,
     ensure_ai_gateway_v2,
     ensure_databricks_auth,
+    ensure_pat_bearer,
     find_profile_name_for_host,
     get_databricks_profiles,
     get_databricks_token,
@@ -228,9 +228,11 @@ def configure_shared_state(
                 f"entry under [{profile}], or re-run without --use-pat to use OAuth."
             )
         # Export the PAT for this process and launched agent subprocesses so
-        # every token fetch takes the static-bearer path; a bearer already in
-        # the environment wins.
-        os.environ.setdefault("DATABRICKS_BEARER", pat)
+        # every token fetch takes the static-bearer path. ensure_pat_bearer
+        # keeps a non-empty pre-set bearer (CI escape hatch) but treats an
+        # empty one as absent, so it never shadows the PAT. Pass the validated
+        # token to avoid re-reading ~/.databrickscfg.
+        ensure_pat_bearer(profile, pat)
         ensure_databricks_auth(workspace, profile)
     elif force_login:
         run_databricks_login(workspace, profile)
@@ -595,6 +597,56 @@ def mcp_web_search_cmd() -> None:
     from ucode.mcp_web_search import serve
 
     serve()
+
+
+@app.command("auth-token", hidden=True)
+def auth_token_cmd(
+    host: Annotated[
+        str | None, typer.Option("--host", help="Workspace URL. Defaults to the saved workspace.")
+    ] = None,
+    profile: Annotated[
+        str | None, typer.Option("--profile", help="Databricks CLI profile.")
+    ] = None,
+    use_pat: Annotated[
+        bool, typer.Option("--use-pat", help="Read the profile's static PAT instead of OAuth.")
+    ] = False,
+) -> None:
+    """Print a Databricks bearer token to stdout, then exit.
+
+    This is the cross-platform helper invoked by Claude Code's `apiKeyHelper`
+    and Codex's auth command on every token refresh. It is not meant for
+    interactive use. All token logic (DATABRICKS_BEARER short-circuit, PAT
+    profiles, OAuth refresh) lives in `get_databricks_token`, so the same
+    binary works on macOS, Linux, and Windows without any POSIX shell."""
+    import sys
+
+    state = load_state()
+    workspace = host or state.get("workspace")
+    if not workspace:
+        print_err("No workspace configured. Run `ucode configure` first.")
+        raise typer.Exit(1)
+    profile = profile or state.get("profile")
+    if use_pat or state.get("use_pat"):
+        # --use-pat explicitly means "serve the profile's static PAT". Fail
+        # closed if it can't be read rather than falling through to OAuth —
+        # `auth token` cannot serve a PAT-only profile, so that path would
+        # surface a misleading stale-login error instead of the real cause.
+        if not ensure_pat_bearer(profile):
+            print_err(
+                f"--use-pat: no personal access token available for profile "
+                f"'{profile or '<none>'}'. Add a `token = <PAT>` entry under "
+                f"[{profile or 'your-profile'}] in ~/.databrickscfg, or re-run "
+                "`ucode configure` without --use-pat to use OAuth."
+            )
+            raise typer.Exit(1)
+    try:
+        token = get_databricks_token(workspace, profile)
+    except RuntimeError as exc:
+        print_err(str(exc))
+        raise typer.Exit(1) from None
+    # Write the bare token (with trailing newline) to stdout — nothing else may
+    # land on stdout or the consuming agent will treat it as part of the token.
+    sys.stdout.write(token + "\n")
 
 
 def _auto_configure_tool(tool: str) -> None:

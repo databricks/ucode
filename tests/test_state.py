@@ -173,13 +173,15 @@ class TestHydrateState:
 
         assert result["agents"]["claude"]["model"] == "claude-opus"
         assert result["agents"]["claude"]["base_url"] == FAKE_URLS["claude"]
-        assert result["agents"]["claude"]["auth_command"].startswith("if [ -n")
+        # Cross-platform helper, not the old POSIX `if [ -n ... ]` pipeline (#116).
+        assert "auth-token" in result["agents"]["claude"]["auth_command"]
+        assert "if [ -n" not in result["agents"]["claude"]["auth_command"]
         assert result["agents"]["codex"]["model"] == "gpt-5"
         assert result["agents"]["codex"]["base_url"] == FAKE_URLS["codex"]
-        assert (
-            result["agents"]["codex"]["auth"]["args"][1]
-            == result["agents"]["codex"]["auth_command"]
-        )
+        # Codex runs the helper as argv (command + args), never via `sh -c`.
+        codex_auth = result["agents"]["codex"]["auth"]
+        assert codex_auth["command"] != "sh"
+        assert codex_auth["args"][0] == "auth-token"
         assert result["agents"]["pi"]["model"] == "claude-opus"
         assert result["agents"]["pi"]["base_urls"] == FAKE_URLS["pi"]
 
@@ -214,8 +216,11 @@ class TestBuildAgentState:
                 "base_urls": FAKE_URLS,
             }
         )
+        # --use-pat threads through to the `ucode auth-token --use-pat` helper,
+        # which resolves the static PAT internally on every platform.
         for agent in ("claude", "codex", "pi"):
-            assert "auth describe --profile DEFAULT --sensitive" in (result[agent]["auth_command"])
+            assert "--use-pat" in result[agent]["auth_command"]
+            assert "--profile DEFAULT" in result[agent]["auth_command"]
 
 
 # ---------------------------------------------------------------------------

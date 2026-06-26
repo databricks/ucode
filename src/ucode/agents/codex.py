@@ -16,10 +16,11 @@ from ucode.config_io import (
     write_toml_file,
 )
 from ucode.databricks import (
-    build_auth_shell_command,
+    build_auth_token_argv,
     build_tool_base_url,
     get_databricks_token,
 )
+from ucode.launcher import exec_or_spawn
 from ucode.state import mark_tool_managed, save_state
 from ucode.telemetry import agent_version, ucode_version
 
@@ -102,7 +103,7 @@ def _use_legacy_layout() -> bool:
 
 
 def _provider_block(workspace: str, databricks_profile: str | None, use_pat: bool = False) -> dict:
-    auth_command = build_auth_shell_command(workspace, databricks_profile, use_pat=use_pat)
+    auth_argv = build_auth_token_argv(workspace, databricks_profile, use_pat=use_pat)
     base_url = build_tool_base_url("codex", workspace)
     return {
         "name": "Databricks AI Gateway",
@@ -111,9 +112,11 @@ def _provider_block(workspace: str, databricks_profile: str | None, use_pat: boo
         "http_headers": {
             "User-Agent": f"ucode/{ucode_version()} codex/{agent_version('codex')}",
         },
+        # Run the `ucode auth-token` executable directly (not via `sh -c`) so the
+        # helper works on Windows, where there is no POSIX shell (issue #116).
         "auth": {
-            "command": "sh",
-            "args": ["-c", auth_command],
+            "command": auth_argv[0],
+            "args": auth_argv[1:],
             "timeout_ms": 5000,
             "refresh_interval_ms": 900000,
         },
@@ -356,7 +359,7 @@ def launch(state: dict, tool_args: list[str]) -> None:
     workspace = state.get("workspace")
     if workspace:
         os.environ["OAUTH_TOKEN"] = get_databricks_token(workspace, state.get("profile"))
-    os.execvp(binary, [binary, "--profile", CODEX_PROFILE_NAME, *tool_args])
+    exec_or_spawn([binary, "--profile", CODEX_PROFILE_NAME, *tool_args])
 
 
 def validate_cmd(binary: str) -> list[str]:
