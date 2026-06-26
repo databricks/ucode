@@ -940,10 +940,35 @@ def configure(
 
 
 @configure_app.command("mcp")
-def configure_mcp() -> None:
+def configure_mcp(
+    location: Annotated[
+        str | None,
+        typer.Option(
+            "--location",
+            help="Non-interactive: replace registered MCPs with exactly the services "
+            "in the given Unity Catalog `<catalog>.<schema>` (e.g. `system.ai`) and "
+            "exit without showing the picker. Any previously-registered MCPs outside "
+            "this location are removed.",
+        ),
+    ] = None,
+    services: Annotated[
+        str | None,
+        typer.Option(
+            "--services",
+            help="Configure exactly this comma-separated subset of MCP services (adding and "
+            "removing to match) instead of a whole schema. Full names like `system.ai.github` "
+            "work on their own; bare short names like `github` need --location to locate them. "
+            "Omit --services to configure the whole --location schema; pass an empty string "
+            "(with --location) to remove all.",
+        ),
+    ] = None,
+) -> None:
     """Add Databricks MCP servers to installed coding tools."""
+    # `--services` absent -> None (whole schema); present (even empty) -> the
+    # explicit subset, so `--services ""` deselects everything.
+    selected = None if services is None else {s.strip() for s in services.split(",") if s.strip()}
     try:
-        configure_mcp_command()
+        configure_mcp_command(location=location, services=selected)
     except RuntimeError as exc:
         print_err(str(exc))
         raise typer.Exit(1) from None

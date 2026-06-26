@@ -1242,6 +1242,406 @@ class TestConfigureMcpCommand:
         assert saved_states[-1]["mcp_servers"] == []
 
 
+def _stub_location_base(monkeypatch, state):
+    """Shared scaffolding for --location tests: no installed agents missing,
+    auth no-ops, no cross-workspace residue."""
+    monkeypatch.setattr(mcp, "load_state", lambda: state)
+    monkeypatch.setattr(mcp.shutil, "which", lambda binary: f"/usr/bin/{binary}")
+    monkeypatch.setattr(mcp, "ensure_databricks_auth", lambda workspace, profile=None: None)
+    monkeypatch.setattr(mcp, "available_mcp_clients", lambda: ["claude"])
+    monkeypatch.setattr(mcp, "purge_cross_workspace_mcp_residue", lambda state, workspace: None)
+    monkeypatch.setattr(mcp, "get_databricks_token", lambda workspace, profile=None: "token")
+
+
+class TestConfigureMcpFromLocation:
+    def test_rejects_malformed_location(self, monkeypatch):
+        _stub_location_base(monkeypatch, {**CLAUDE_STATE})
+        monkeypatch.setattr(mcp, "list_mcp_services", lambda *a, **kw: ([], None))
+
+        for bad in ("system", "system.ai.extra", ".ai", "system.", ""):
+            try:
+                mcp.configure_mcp_command(location=bad)
+            except RuntimeError as exc:
+                assert "--location" in str(exc)
+            else:
+                raise AssertionError(f"expected RuntimeError for `{bad}`")
+
+    def test_invalid_location_raises_with_clear_message(self, monkeypatch):
+        _stub_location_base(monkeypatch, {**CLAUDE_STATE})
+        monkeypatch.setattr(
+            mcp,
+            "list_mcp_services",
+            lambda workspace, token, parent: ([], "HTTP 404 Not Found: NOT_FOUND"),
+        )
+        try:
+            mcp.configure_mcp_command(location="nope.nope")
+        except RuntimeError as exc:
+            assert "Invalid location" in str(exc)
+            assert "nope.nope" in str(exc)
+        else:
+            raise AssertionError("expected RuntimeError")
+
+    def test_other_listing_failure_surfaces_reason(self, monkeypatch):
+        _stub_location_base(monkeypatch, {**CLAUDE_STATE})
+        monkeypatch.setattr(
+            mcp,
+            "list_mcp_services",
+            lambda workspace, token, parent: ([], "HTTP 500 Server Error"),
+        )
+        try:
+            mcp.configure_mcp_command(location="system.ai")
+        except RuntimeError as exc:
+            assert "HTTP 500" in str(exc)
+        else:
+            raise AssertionError("expected RuntimeError")
+
+    def test_registers_every_discovered_service(self, monkeypatch):
+        saved_states: list[dict] = []
+        configured: list[tuple[str, str, str, dict]] = []
+        seen: dict[str, str] = {}
+        picker_called: list[bool] = []
+        _stub_location_base(monkeypatch, {**CLAUDE_STATE})
+
+        def fake_list(workspace, token, parent):
+            seen["parent"] = parent
+            return ["system.ai.github", "system.ai.slack"], None
+
+        monkeypatch.setattr(mcp, "list_mcp_services", fake_list)
+        monkeypatch.setattr(
+            mcp,
+            "prompt_for_mcp_server_choices",
+            lambda *a, **kw: picker_called.append(True) or [],
+        )
+        monkeypatch.setattr(
+            mcp,
+            "configure_client_mcp_server",
+            lambda client, name, url, entry: configured.append((client, name, url, entry)) or [],
+        )
+        monkeypatch.setattr(mcp, "save_state", lambda state: saved_states.append(state.copy()))
+
+        assert mcp.configure_mcp_command(location="system.ai") == 0
+
+        assert seen == {"parent": "system.ai"}
+        assert picker_called == []
+        assert [c[1] for c in configured] == ["system-ai-github", "system-ai-slack"]
+        assert configured[0][2] == f"{WS}/ai-gateway/mcp-services/system.ai.github"
+        assert saved_states[-1]["mcp_servers"] == [
+            {
+                "name": "system-ai-github",
+                "url": f"{WS}/ai-gateway/mcp-services/system.ai.github",
+                "auth": "env:OAUTH_TOKEN",
+                "clients": ["claude"],
+            },
+            {
+                "name": "system-ai-slack",
+                "url": f"{WS}/ai-gateway/mcp-services/system.ai.slack",
+                "auth": "env:OAUTH_TOKEN",
+                "clients": ["claude"],
+            },
+        ]
+
+    def test_replaces_servers_outside_location(self, monkeypatch):
+        saved_states: list[dict] = []
+        configured: list[tuple[str, str, str, dict]] = []
+        removed: list[tuple[str, str]] = []
+        outside_entry = {
+            "name": "databricks-sql",
+            "url": f"{WS}/api/2.0/mcp/sql",
+            "auth": "env:OAUTH_TOKEN",
+            "clients": ["claude"],
+        }
+        _stub_location_base(
+            monkeypatch,
+            {**CLAUDE_STATE, "mcp_servers": [outside_entry]},
+        )
+        monkeypatch.setattr(
+            mcp,
+            "list_mcp_services",
+            lambda workspace, token, parent: (["system.ai.github"], None),
+        )
+        monkeypatch.setattr(
+            mcp,
+            "configure_client_mcp_server",
+            lambda client, name, url, entry: configured.append((client, name, url, entry)) or [],
+        )
+        monkeypatch.setattr(
+            mcp,
+            "remove_client_mcp_server",
+            lambda client, name: removed.append((client, name)) or [],
+        )
+        monkeypatch.setattr(mcp, "save_state", lambda state: saved_states.append(state.copy()))
+
+        assert mcp.configure_mcp_command(location="system.ai") == 0
+
+        assert removed == [("claude", "databricks-sql")]
+        assert [c[1] for c in configured] == ["system-ai-github"]
+        assert saved_states[-1]["mcp_servers"] == [
+            {
+                "name": "system-ai-github",
+                "url": f"{WS}/ai-gateway/mcp-services/system.ai.github",
+                "auth": "env:OAUTH_TOKEN",
+                "clients": ["claude"],
+            },
+        ]
+
+    def test_existing_entry_gets_reconfigured_for_newly_added_clients(self, monkeypatch):
+        """An entry registered before a second agent was configured should
+        get registered for that agent on the next --location run."""
+        saved_states: list[dict] = []
+        configured: list[tuple[str, str, str, dict]] = []
+        existing = {
+            "name": "system-ai-github",
+            "url": f"{WS}/ai-gateway/mcp-services/system.ai.github",
+            "auth": "env:OAUTH_TOKEN",
+            "clients": ["claude"],
+        }
+        _stub_location_base(
+            monkeypatch,
+            {
+                "workspace": WS,
+                "available_tools": ["claude", "codex"],
+                "mcp_servers": [existing],
+            },
+        )
+        monkeypatch.setattr(mcp, "available_mcp_clients", lambda: ["claude", "codex"])
+        monkeypatch.setattr(
+            mcp,
+            "list_mcp_services",
+            lambda workspace, token, parent: (["system.ai.github"], None),
+        )
+        monkeypatch.setattr(
+            mcp,
+            "configure_client_mcp_server",
+            lambda client, name, url, entry: configured.append((client, name, url, entry)) or [],
+        )
+        monkeypatch.setattr(mcp, "save_state", lambda state: saved_states.append(state.copy()))
+
+        assert mcp.configure_mcp_command(location="system.ai") == 0
+
+        assert [c[0] for c in configured] == ["claude", "codex"]
+        assert saved_states[-1]["mcp_servers"] == [
+            {
+                "name": "system-ai-github",
+                "url": f"{WS}/ai-gateway/mcp-services/system.ai.github",
+                "auth": "env:OAUTH_TOKEN",
+                "clients": ["claude", "codex"],
+            }
+        ]
+
+
+class TestConfigureMcpServicesSubset:
+    """`--location <schema> --services a,b,...` configures exactly the named subset."""
+
+    def test_configures_only_the_requested_subset(self, monkeypatch):
+        configured: list[tuple[str, str, str, dict]] = []
+        saved_states: list[dict] = []
+        _stub_location_base(monkeypatch, {**CLAUDE_STATE})
+        monkeypatch.setattr(
+            mcp,
+            "list_mcp_services",
+            lambda workspace, token, parent: (
+                ["system.ai.github", "system.ai.slack", "system.ai.gmail"],
+                None,
+            ),
+        )
+        monkeypatch.setattr(
+            mcp,
+            "configure_client_mcp_server",
+            lambda client, name, url, entry: configured.append((client, name, url, entry)) or [],
+        )
+        monkeypatch.setattr(mcp, "save_state", lambda state: saved_states.append(state.copy()))
+
+        assert (
+            mcp.configure_mcp_command(
+                location="system.ai", services={"system.ai.github", "system.ai.gmail"}
+            )
+            == 0
+        )
+
+        # slack is dropped; only the two requested services are configured.
+        assert sorted(c[1] for c in configured) == ["system-ai-github", "system-ai-gmail"]
+        assert sorted(s["name"] for s in saved_states[-1]["mcp_servers"]) == [
+            "system-ai-github",
+            "system-ai-gmail",
+        ]
+
+    def test_matches_bare_short_names(self, monkeypatch):
+        configured: list[tuple[str, str, str, dict]] = []
+        _stub_location_base(monkeypatch, {**CLAUDE_STATE})
+        monkeypatch.setattr(
+            mcp,
+            "list_mcp_services",
+            lambda workspace, token, parent: (["system.ai.github", "system.ai.slack"], None),
+        )
+        monkeypatch.setattr(
+            mcp,
+            "configure_client_mcp_server",
+            lambda client, name, url, entry: configured.append((client, name, url, entry)) or [],
+        )
+        monkeypatch.setattr(mcp, "save_state", lambda state: None)
+
+        assert mcp.configure_mcp_command(location="system.ai", services={"github"}) == 0
+
+        assert [c[1] for c in configured] == ["system-ai-github"]
+
+    def test_unknown_requested_service_warns_and_skips(self, monkeypatch):
+        configured: list[tuple[str, str, str, dict]] = []
+        warnings: list[str] = []
+        _stub_location_base(monkeypatch, {**CLAUDE_STATE})
+        monkeypatch.setattr(
+            mcp,
+            "list_mcp_services",
+            lambda workspace, token, parent: (["system.ai.github"], None),
+        )
+        monkeypatch.setattr(
+            mcp,
+            "configure_client_mcp_server",
+            lambda client, name, url, entry: configured.append((client, name, url, entry)) or [],
+        )
+        monkeypatch.setattr(mcp, "save_state", lambda state: None)
+        monkeypatch.setattr(mcp, "print_warning", lambda msg: warnings.append(msg))
+
+        assert (
+            mcp.configure_mcp_command(
+                location="system.ai", services={"system.ai.github", "system.ai.ghost"}
+            )
+            == 0
+        )
+
+        # The known service is still configured; the unknown one is reported, not fatal.
+        assert [c[1] for c in configured] == ["system-ai-github"]
+        assert any("system.ai.ghost" in w for w in warnings)
+
+    def test_empty_services_removes_everything(self, monkeypatch):
+        existing = {
+            "name": "system-ai-github",
+            "url": f"{WS}/ai-gateway/mcp-services/system.ai.github",
+            "auth": "env:OAUTH_TOKEN",
+            "clients": ["claude"],
+        }
+        configured: list[tuple[str, str, str, dict]] = []
+        removed: list[tuple[str, str]] = []
+        saved_states: list[dict] = []
+        _stub_location_base(monkeypatch, {**CLAUDE_STATE, "mcp_servers": [existing]})
+        monkeypatch.setattr(
+            mcp,
+            "list_mcp_services",
+            lambda workspace, token, parent: (["system.ai.github"], None),
+        )
+        monkeypatch.setattr(
+            mcp,
+            "configure_client_mcp_server",
+            lambda client, name, url, entry: configured.append((client, name, url, entry)) or [],
+        )
+        monkeypatch.setattr(
+            mcp,
+            "remove_client_mcp_server",
+            lambda client, name: removed.append((client, name)) or [],
+        )
+        monkeypatch.setattr(mcp, "save_state", lambda state: saved_states.append(state.copy()))
+
+        assert mcp.configure_mcp_command(location="system.ai", services=set()) == 0
+
+        assert configured == []
+        assert removed == [("claude", "system-ai-github")]
+        assert saved_states[-1]["mcp_servers"] == []
+
+    def test_adds_and_removes_to_match_new_selection(self, monkeypatch):
+        # The live case teammates want mid-session: started with github+slack,
+        # then the user deselects slack and selects gmail.
+        github = {
+            "name": "system-ai-github",
+            "url": f"{WS}/ai-gateway/mcp-services/system.ai.github",
+            "auth": "env:OAUTH_TOKEN",
+            "clients": ["claude"],
+        }
+        slack = {
+            "name": "system-ai-slack",
+            "url": f"{WS}/ai-gateway/mcp-services/system.ai.slack",
+            "auth": "env:OAUTH_TOKEN",
+            "clients": ["claude"],
+        }
+        configured: list[tuple[str, str, str, dict]] = []
+        removed: list[tuple[str, str]] = []
+        saved_states: list[dict] = []
+        _stub_location_base(monkeypatch, {**CLAUDE_STATE, "mcp_servers": [github, slack]})
+        monkeypatch.setattr(
+            mcp,
+            "list_mcp_services",
+            lambda workspace, token, parent: (
+                ["system.ai.github", "system.ai.slack", "system.ai.gmail"],
+                None,
+            ),
+        )
+        monkeypatch.setattr(
+            mcp,
+            "configure_client_mcp_server",
+            lambda client, name, url, entry: configured.append((client, name, url, entry)) or [],
+        )
+        monkeypatch.setattr(
+            mcp,
+            "remove_client_mcp_server",
+            lambda client, name: removed.append((client, name)) or [],
+        )
+        monkeypatch.setattr(mcp, "save_state", lambda state: saved_states.append(state.copy()))
+
+        assert (
+            mcp.configure_mcp_command(
+                location="system.ai", services={"system.ai.github", "system.ai.gmail"}
+            )
+            == 0
+        )
+
+        # slack removed, gmail added, github untouched (entry unchanged).
+        assert removed == [("claude", "system-ai-slack")]
+        assert [c[1] for c in configured] == ["system-ai-gmail"]
+        assert sorted(s["name"] for s in saved_states[-1]["mcp_servers"]) == [
+            "system-ai-github",
+            "system-ai-gmail",
+        ]
+
+    def test_full_names_without_location_derive_the_schema(self, monkeypatch):
+        configured: list[tuple[str, str, str, dict]] = []
+        seen: dict[str, str] = {}
+        _stub_location_base(monkeypatch, {**CLAUDE_STATE})
+
+        def fake_list(workspace, token, parent):
+            seen["parent"] = parent
+            return ["system.ai.github", "system.ai.slack"], None
+
+        monkeypatch.setattr(mcp, "list_mcp_services", fake_list)
+        monkeypatch.setattr(
+            mcp,
+            "configure_client_mcp_server",
+            lambda client, name, url, entry: configured.append((client, name, url, entry)) or [],
+        )
+        monkeypatch.setattr(mcp, "save_state", lambda state: None)
+
+        # No --location: the `<catalog>.<schema>` is derived from the full names.
+        assert mcp.configure_mcp_command(services={"system.ai.github", "system.ai.slack"}) == 0
+
+        assert seen == {"parent": "system.ai"}
+        assert sorted(c[1] for c in configured) == ["system-ai-github", "system-ai-slack"]
+
+    def test_short_name_without_location_raises(self):
+        try:
+            mcp.configure_mcp_command(services={"github"})
+        except RuntimeError as exc:
+            assert "--location" in str(exc)
+        else:
+            raise AssertionError("expected RuntimeError for a bare short name without --location")
+
+    def test_full_names_spanning_multiple_schemas_without_location_raises(self):
+        try:
+            mcp.configure_mcp_command(services={"system.ai.github", "other.cat.thing"})
+        except RuntimeError as exc:
+            assert "--location" in str(exc)
+        else:
+            raise AssertionError(
+                "expected RuntimeError for multi-schema services without --location"
+            )
+
+
 class TestRevertMcpConfigs:
     def test_removes_cli_registered_servers_and_restores_copilot_config(self, monkeypatch):
         removed: list[tuple[str, str]] = []

@@ -1241,16 +1241,16 @@ def discover_model_services(
 
 
 _MCP_SERVICE_NAME_PREFIX = "mcp-services/"
-_MCP_SERVICE_REQUIRED_PREFIX = "system.ai."
 
 
-def _mcp_service_full_name(service: dict) -> str | None:
-    """Extract `system.ai.<name>` from one mcp-service entry, or None."""
+def _mcp_service_full_name(service: dict, required_prefix: str) -> str | None:
+    """Extract the full UC name from one mcp-service entry, or None if it
+    doesn't live under ``required_prefix`` or isn't ACTIVE."""
     name = service.get("name")
     if not isinstance(name, str):
         return None
     name = name.strip().removeprefix(_MCP_SERVICE_NAME_PREFIX)
-    if not name.startswith(_MCP_SERVICE_REQUIRED_PREFIX):
+    if not name.startswith(required_prefix):
         return None
     status = ((service.get("config") or {}).get("connection") or {}).get("status")
     if status is not None and status != "ACTIVE":
@@ -1258,30 +1258,32 @@ def _mcp_service_full_name(service: dict) -> str | None:
     return name
 
 
-def list_mcp_services(workspace: str, token: str) -> tuple[list[str], str | None]:
-    """List Databricks-curated `system.ai.*` MCP services.
+def list_mcp_services(
+    workspace: str, token: str, parent: str = "system.ai"
+) -> tuple[list[str], str | None]:
+    """List UC MCP services under ``parent`` (a ``<catalog>.<schema>`` ref).
 
-    The listing endpoint requires `?parent=schemas/system.ai`; without it the
-    request returns 499 with a truncated body (verified against e2-dogfood
-    2026-06-11). Returns (full_names, reason).
+    A non-None string indicates the listing call itself failed. Callers can inspect
+    ``error`` for ``HTTP 404`` to distinguish "invalid location" from other failures.
     """
     hostname = workspace_hostname(workspace)
     url = (
         f"https://{hostname}/api/2.1/unity-catalog/mcp-services"
-        f"?{urlencode({'parent': 'schemas/system.ai'})}"
+        f"?{urlencode({'parent': f'schemas/{parent}'})}"
     )
     payload, reason = _http_get_json(url, token, timeout=30)
     if payload is None:
         return [], reason
+    expected_prefix = parent + "."
     data = cast(dict, payload) if isinstance(payload, dict) else {}
-    names = []
+    names: list[str] = []
     for service in data.get("mcp_services") or []:
         if not isinstance(service, dict):
             continue
-        full_name = _mcp_service_full_name(service)
+        full_name = _mcp_service_full_name(service, expected_prefix)
         if full_name:
             names.append(full_name)
-    return sorted(set(names)), None if names else (reason or "no `system.ai.*` mcp services found")
+    return sorted(set(names)), None
 
 
 def build_mcp_service_url(workspace: str, full_name: str) -> str:
