@@ -423,8 +423,8 @@ def _maybe_select_provider_service(tool: str, state: dict) -> dict:
     choice = prompt_for_selection(
         f"How should {display} be configured?",
         [
-            ("databricks", "Databricks models"),
-            ("mps", "Model Provider Service (external provider)"),
+            ("databricks", "Databricks Hosted"),
+            ("mps", "External Models"),
         ],
     )
     if choice is None:
