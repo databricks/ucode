@@ -60,3 +60,15 @@ jobs:
       # independent and one shouldn't mask the other.
       - if: ${{ !cancelled() }}
         run: uv run --extra tracing pytest tests/test_e2e_tracing.py -v < /dev/null
+      # Diagnostic: the Claude Stop hook writes its trace-creation log to
+      # $cwd/.claude/mlflow/claude_tracing.log. If the tracing test failed
+      # because no root `claude_code_conversation` span landed, this shows
+      # whether the hook fired on the runner and what its MLflow write did.
+      - if: ${{ failure() }}
+        name: Dump Claude tracing hook log
+        run: |
+          echo "=== claude_tracing.log ==="
+          cat .claude/mlflow/claude_tracing.log 2>/dev/null || echo "(no hook log — Stop hook never ran)"
+          echo "=== installed claude-code + mlflow CLI ==="
+          claude --version || true
+          "$(uv tool dir --bin)/mlflow" --version || true
