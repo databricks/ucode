@@ -77,22 +77,21 @@ jobs:
       # mlflow's own logger (not the hook file log), so surface it directly to
       # see why the root span never reaches the trace server from CI.
       - if: ${{ failure() }}
-        name: Probe MLflow span export
+        name: Probe MLflow span export (3.11.1 vs 3.12.0)
         env:
           DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_BEARER }}
         run: |
-          uv run --extra tracing python - <<'PY' 2>&1 || true
-          import logging
-          logging.basicConfig(level=logging.DEBUG)
-          import os, mlflow
+          for V in 3.11.1 3.12.0; do
+            echo "=== probing mlflow==$V ==="
+            uv run --with "mlflow[databricks]==$V" python - "$V" <<'PY' 2>&1 | grep -iE "probe|trace_id|version|error|exception|Failed to log" || true
+          import sys, mlflow
+          v = sys.argv[1]
           mlflow.set_tracking_uri("databricks")
           mlflow.set_experiment(experiment_id="2190569664060193")
-          print("=== starting probe span ===")
-          with mlflow.start_span(name="ci_export_probe") as span:
-              span.set_inputs({"probe": True})
-          try:
-              mlflow.flush_trace_async_logging()
-          except Exception as e:
-              print("flush error:", repr(e))
-          print("=== probe done ===")
+          print("mlflow version", mlflow.__version__)
+          with mlflow.start_span(name=f"ci_probe_{v.replace('.','_')}") as span:
+              span.set_inputs({"v": v})
+              print("trace_id", span.trace_id)
+          mlflow.flush_trace_async_logging()
           PY
+          done
