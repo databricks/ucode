@@ -403,18 +403,15 @@ def _maybe_select_provider_service(tool: str, state: dict) -> dict:
         return new_state
 
     # Probe first so we only offer the picker when it's actually usable. The
-    # caller already opted in via `--model-provider`, so explain any fallback
-    # rather than silently dropping back to Databricks.
+    # interactive path always reaches here, so explain any fallback rather than
+    # silently dropping back to Databricks.
     token = get_databricks_token(state["workspace"], state.get("profile"))
     with spinner("Checking for model provider services..."):
         names, reason = list_tool_provider_services(tool, state["workspace"], token)
     if reason is not None:
-        if is_model_provider_feature_unavailable(reason):
-            print_note(
-                "Model Provider Service feature is not available for this workspace; "
-                f"configuring {display} with Databricks models."
-            )
-        else:
+        # Most workspaces don't have the feature enabled — that's the common case,
+        # so fall back to Databricks silently. Only surface unexpected failures.
+        if not is_model_provider_feature_unavailable(reason):
             print_warning(f"Could not list model provider services: {reason}")
             print_note("Falling back to Databricks models.")
         return _use_databricks()
@@ -454,14 +451,14 @@ def configure_workspace_command(
     prompt_optional_updates: bool = True,
     use_pat: bool = False,
     skip_validate: bool = False,
-    use_model_provider: bool = False,
 ) -> int:
     if tool is not None and selected_tools is not None:
         raise RuntimeError("Use either --agent or --agents, not both.")
 
-    # The Databricks-vs-Model-Provider-Service picker is opt-in via
-    # `--model-provider`; without it, configure stays on the plain Databricks path.
-    offer_provider = use_model_provider
+    # The Databricks-vs-Model-Provider-Service picker is shown only on the fully
+    # interactive path (`ucode configure` with no --agent/--agents). Naming agents
+    # explicitly signals the non-interactive flow, which stays on Databricks.
+    offer_provider = tool is None and selected_tools is None
 
     workspace_entries = workspaces or [_prompt_for_configuration(tool)]
 
@@ -473,8 +470,6 @@ def configure_workspace_command(
             use_pat=use_pat,
         )
         state = states[0]
-        if offer_provider:
-            state = _maybe_select_provider_service(tool, state)
         state = configure_single_tool(tool, state)
         spec = TOOL_SPECS[tool]
         console.print(
@@ -551,8 +546,8 @@ def configure_workspace_command(
             prompt_optional_updates=prompt_optional_updates,
         )
 
-    # Offer the provider picker for the chosen claude/codex tools only when
-    # `--model-provider` was passed; otherwise stay on the Databricks path.
+    # Offer the provider picker for the chosen claude/codex tools only on the
+    # interactive path (no --agents); otherwise stay on the Databricks path.
     if offer_provider:
         for tool_name in picked:
             state = _maybe_select_provider_service(tool_name, state)
@@ -950,15 +945,6 @@ def configure(
             help="Also enable MLflow tracing for the configured workspace(s).",
         ),
     ] = False,
-    model_provider: Annotated[
-        bool,
-        typer.Option(
-            "--model-provider",
-            help="Offer to route claude/codex through a Unity Catalog Model Provider "
-            "Service (external Anthropic/OpenAI provider) instead of Databricks models. "
-            "Without this flag, configure stays on the Databricks path.",
-        ),
-    ] = False,
     skip_upgrade: Annotated[
         bool,
         typer.Option(
@@ -1007,8 +993,6 @@ def configure(
             skip_kwargs["use_pat"] = True
         if skip_validate:
             skip_kwargs["skip_validate"] = True
-        if model_provider:
-            skip_kwargs["use_model_provider"] = True
         if agent is not None:
             tool = normalize_tool(agent)
             install_tool_binary(

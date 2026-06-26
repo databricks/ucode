@@ -634,7 +634,7 @@ class TestConfigureAgentsSelection:
         assert install_calls == ["claude", "codex"]
         assert configured == [["claude", "codex"]]
 
-    def test_provider_picker_gated_by_flag(self, monkeypatch):
+    def test_provider_picker_gated_by_interactive_path(self, monkeypatch):
         import ucode.cli as cli_mod
 
         state = {**MINIMAL_STATE, "available_tools": []}
@@ -652,18 +652,18 @@ class TestConfigureAgentsSelection:
             lambda tool, s: picked_for.append(tool) or s,
         )
 
-        # Default: no provider picker.
+        # Non-interactive (--agents passed): no provider picker.
         cli_mod.configure_workspace_command(
             selected_tools=["claude"], workspaces=[("https://w.com", None)]
         )
         assert picked_for == []
 
-        # Opt-in: picker offered for the chosen tool.
-        cli_mod.configure_workspace_command(
-            selected_tools=["claude"],
-            workspaces=[("https://w.com", None)],
-            use_model_provider=True,
+        # Interactive (`ucode configure`): picker offered for each picked tool.
+        monkeypatch.setattr(
+            cli_mod, "_prompt_for_configuration", lambda tool=None: ("https://w.com", None)
         )
+        monkeypatch.setattr(cli_mod, "prompt_for_tools", lambda options: ["claude"])
+        cli_mod.configure_workspace_command()
         assert picked_for == ["claude"]
 
     def test_unavailable_selected_tool_errors_before_configure(self, monkeypatch):
@@ -714,6 +714,7 @@ class TestConfigureAgentsSelection:
         monkeypatch.setattr(cli_mod, "save_state", lambda state: saved.append(state["workspace"]))
         monkeypatch.setattr(cli_mod, "check_gateway_endpoint", lambda state, tool: True)
         monkeypatch.setattr(cli_mod, "prompt_for_tools", lambda available: ["codex"])
+        monkeypatch.setattr(cli_mod, "_maybe_select_provider_service", lambda tool, state: state)
         monkeypatch.setattr(cli_mod, "install_tool_binary", lambda *args, **kwargs: True)
         monkeypatch.setattr(
             cli_mod,
