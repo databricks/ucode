@@ -60,6 +60,8 @@ def e2e_state(e2e_workspace, e2e_token):
     opencode_models: dict = {}
     if claude_models:
         opencode_models["anthropic"] = list(claude_models.values())
+    if codex_models:
+        opencode_models["openai"] = codex_models
     if gemini_models:
         opencode_models["gemini"] = gemini_models
 

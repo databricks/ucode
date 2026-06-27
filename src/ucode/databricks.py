@@ -1878,6 +1878,11 @@ def build_tool_base_url(tool: str, workspace: str) -> str:
 def build_opencode_base_urls(workspace: str) -> dict[str, str]:
     return {
         "anthropic": build_tool_base_url("claude", workspace) + "/v1",
+        # codex gateway already includes /v1, no extra suffix needed. This is
+        # the same path Pi's `databricks-openai` provider uses (see
+        # `build_pi_base_urls`); @ai-sdk/openai negotiates the responses API
+        # against it.
+        "openai": build_tool_base_url("codex", workspace),
         "gemini": build_tool_base_url("gemini", workspace) + "/v1beta",
     }
 
