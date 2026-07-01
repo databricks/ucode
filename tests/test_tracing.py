@@ -82,6 +82,7 @@ class TestTracingEnv:
             "MLFLOW_TRACKING_URI": "databricks://p",
             "MLFLOW_EXPERIMENT_ID": "111",
             "MLFLOW_TRACING_SQL_WAREHOUSE_ID": "wh123",
+            "MLFLOW_ENABLE_ASYNC_TRACE_LOGGING": "false",
         }
 
     def test_empty_for_non_claude_agents(self):

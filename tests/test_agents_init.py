@@ -16,8 +16,30 @@ from ucode.agents import (
     ensure_tool_binary_available,
     install_tool_binary,
     normalize_tool,
+    provider_permission_error,
     resolve_launch_model,
 )
+
+
+class TestProviderPermissionError:
+    _CONN_ERR = (
+        "User does not have USE CONNECTION on SCHEMA_CONNECTION "
+        "'299433db-cb91-4b08-9761-edab72a27836'."
+    )
+
+    def test_rewrites_when_provider_configured(self):
+        state = {"provider_services": {"codex": "main.aarushi.aarushi-test-openai"}}
+        out = provider_permission_error("codex", state, self._CONN_ERR)
+        assert "main.aarushi.aarushi-test-openai" in out
+        assert "EXECUTE" in out
+        assert "SCHEMA_CONNECTION" not in out
+
+    def test_passthrough_without_provider(self):
+        assert provider_permission_error("codex", {}, self._CONN_ERR) == self._CONN_ERR
+
+    def test_passthrough_for_unrelated_error(self):
+        state = {"provider_services": {"codex": "main.a.b"}}
+        assert provider_permission_error("codex", state, "boom") == "boom"
 
 
 class TestToolSpecs:
@@ -178,6 +200,45 @@ class TestResolveLaunchModel:
     def test_raises_when_no_models_available(self):
         with pytest.raises(RuntimeError, match="No models available"):
             resolve_launch_model("claude", {}, None)
+
+
+class TestResolveProviderModels:
+    _STATE = {"workspace": "https://ws.databricks.com", "profile": None}
+
+    def _patch(self, monkeypatch, service, error):
+        monkeypatch.setattr(agents_mod, "get_databricks_token", lambda w, p: "token")
+        monkeypatch.setattr(
+            agents_mod, "resolve_provider_service", lambda t, n, w, tok: (service, error)
+        )
+
+    def test_none_provider_returns_none(self):
+        models, error = agents_mod.resolve_provider_models("claude", self._STATE, None)
+        assert (models, error) == (None, None)
+
+    def test_anthropic_returns_no_models(self, monkeypatch):
+        self._patch(monkeypatch, {"provider_type": "anthropic", "targets": []}, None)
+        models, error = agents_mod.resolve_provider_models("claude", self._STATE, "main.a.svc")
+        assert error is None
+        assert models is None
+
+    def test_bedrock_returns_pinned_models(self, monkeypatch):
+        service = {
+            "provider_type": "amazon_bedrock",
+            "targets": ["us.anthropic.claude-sonnet-4-6", "global.anthropic.claude-opus-4-8"],
+        }
+        self._patch(monkeypatch, service, None)
+        models, error = agents_mod.resolve_provider_models("claude", self._STATE, "main.b.svc")
+        assert error is None
+        assert models == {
+            "sonnet": "us.anthropic.claude-sonnet-4-6",
+            "opus": "global.anthropic.claude-opus-4-8",
+        }
+
+    def test_invalid_provider_returns_error(self, monkeypatch):
+        self._patch(monkeypatch, None, "boom")
+        models, error = agents_mod.resolve_provider_models("claude", self._STATE, "main.x.svc")
+        assert models is None
+        assert error == "boom"
 
 
 class TestInstallToolBinary:

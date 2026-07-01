@@ -12,11 +12,13 @@ from ucode.state import (
     STATE_VERSION,
     build_agent_state,
     clear_state,
+    get_provider_service,
     hydrate_state,
     load_full_state,
     load_state,
     mark_tool_managed,
     save_state,
+    set_provider_service,
 )
 
 FAKE_WS = "https://example.databricks.com"
@@ -137,6 +139,32 @@ class TestClearState:
 
     def test_clear_when_no_state_is_noop(self):
         clear_state()  # should not raise
+
+
+class TestProviderService:
+    def test_get_returns_none_when_unset(self):
+        assert get_provider_service({}, "claude") is None
+        assert get_provider_service({"provider_services": {}}, "claude") is None
+
+    def test_set_and_get_roundtrip(self):
+        state = set_provider_service({}, "claude", "main.a.anthropic")
+        assert state["provider_services"]["claude"] == "main.a.anthropic"
+        assert get_provider_service(state, "claude") == "main.a.anthropic"
+        assert get_provider_service(state, "codex") is None
+
+    def test_set_none_clears_entry_and_key(self):
+        state = set_provider_service({}, "claude", "main.a.anthropic")
+        state = set_provider_service(state, "claude", None)
+        assert get_provider_service(state, "claude") is None
+        # Drop the empty container entirely rather than leaving {}.
+        assert "provider_services" not in state
+
+    def test_clearing_one_tool_keeps_the_other(self):
+        state = set_provider_service({}, "claude", "main.a.anthropic")
+        state = set_provider_service(state, "codex", "main.a.openai")
+        state = set_provider_service(state, "claude", None)
+        assert get_provider_service(state, "claude") is None
+        assert get_provider_service(state, "codex") == "main.a.openai"
 
 
 # ---------------------------------------------------------------------------
