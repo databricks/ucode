@@ -5,3 +5,9 @@ build/
 dist/
 .venv/
 .DS_Store
+
+# Local artifacts
+.vscode/
+mlflow.db
+*.jpg
+*.pdf

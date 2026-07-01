@@ -51,6 +51,16 @@ WINDOWS_DATABRICKS_INSTALL_URL = (
 AI_GATEWAY_V2_DOCS_URL = "https://docs.databricks.com/aws/en/ai-gateway/overview-beta"
 MIN_DATABRICKS_CLI_VERSION = (0, 298, 0)
 TOKEN_REFRESH_INTERVAL_SECONDS = 1800
+BUDGET_ACCOUNT_CONFIGS = {
+    "staging": {
+        "host": "accounts.staging.cloud.databricks.com",
+        "account_id": "11d77e21-5e05-4196-af72-423257f74974",
+    },
+    "prod": {
+        "host": "accounts.cloud.databricks.com",
+        "account_id": "5a5e7a89-43b0-4d67-b90d-3fbdcfc7b28d",
+    },
+}
 
 
 def _debug_enabled() -> bool:
@@ -875,6 +885,232 @@ def get_databricks_token(
             f"{stale_profile_hint}"
         )
     return token
+
+
+def budget_account_config_for_workspace(workspace: str) -> dict[str, str]:
+    """Return the account-scoped budget API config for a workspace URL."""
+    hostname = workspace_hostname(workspace)
+    if "staging" in hostname:
+        return BUDGET_ACCOUNT_CONFIGS["staging"]
+    return BUDGET_ACCOUNT_CONFIGS["prod"]
+
+
+def _budget_account_auth_url(account: dict[str, str]) -> str:
+    return f"https://{account['host']}?account_id={account['account_id']}"
+
+
+def _account_token_profile_candidates(
+    account_auth_url: str, profile: str | None
+) -> list[str | None]:
+    candidates: list[str | None] = []
+    account_profile = find_account_profile_name(account_auth_url)
+    for candidate in (account_profile, profile, None):
+        if candidate not in candidates:
+            candidates.append(candidate)
+    return candidates
+
+
+def find_account_profile_name(account_auth_url: str) -> str | None:
+    """Find a Databricks CLI profile for an account-host URL.
+
+    Account auth profiles may persist hosts with extra query params such as
+    ``autoLogin=true``. Match by hostname and account_id instead of exact URL.
+    """
+    parsed = urlparse(account_auth_url)
+    account_host = parsed.hostname
+    query_params = dict(part.split("=", 1) for part in parsed.query.split("&") if "=" in part)
+    account_id = query_params.get("account_id")
+    if not account_host or not account_id:
+        return find_profile_name_for_host(account_auth_url)
+
+    for entry in list_profile_entries():
+        name = entry.get("name")
+        host_raw = entry.get("host")
+        if not isinstance(name, str) or not isinstance(host_raw, str):
+            continue
+        host = host_raw.rstrip("/")
+        parsed_host = urlparse(host)
+        if parsed_host.hostname != account_host:
+            continue
+        if f"account_id={account_id}" in host:
+            return name
+    return find_profile_name_for_host(account_auth_url)
+
+
+def _get_databricks_account_token(
+    account_auth_url: str,
+    profile: str | None = None,
+    *,
+    profile_only: bool = False,
+) -> tuple[str | None, str | None]:
+    """Fetch an account-host OAuth token without attempting interactive re-auth.
+
+    The launch path uses budget display as best-effort context; it must not open
+    a browser or block agent startup if the account-host profile is not logged in.
+    """
+    bearer = os.environ.get("DATABRICKS_BEARER", "").strip()
+    if bearer:
+        _debug("_get_databricks_account_token", "using DATABRICKS_BEARER env var")
+        return bearer, None
+
+    reasons: list[str] = []
+    if profile and profile_only:
+        try:
+            result = run(
+                [
+                    "databricks",
+                    "--profile",
+                    profile,
+                    "auth",
+                    "token",
+                    "--output",
+                    "json",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            reasons.append(f"{type(exc).__name__}: {exc}")
+        else:
+            _debug("_get_databricks_account_token.profile", _format_subprocess_result(result))
+            if result.returncode == 0:
+                try:
+                    token = json.loads(result.stdout or "{}").get("access_token", "")
+                except json.JSONDecodeError as exc:
+                    reasons.append(f"invalid token JSON ({exc.msg})")
+                else:
+                    if token:
+                        return token, None
+            stderr = (result.stderr or "").strip()
+            reasons.append(stderr[:200] if stderr else "`databricks auth token` returned no token")
+
+    for candidate in _account_token_profile_candidates(account_auth_url, profile):
+        env = build_databricks_cli_env(account_auth_url, candidate)
+        cmd = [
+            "databricks",
+            "auth",
+            "token",
+            "--host",
+            account_auth_url,
+            *_profile_args(candidate),
+            "--output",
+            "json",
+        ]
+        try:
+            result = run(
+                cmd,
+                check=False,
+                capture_output=True,
+                text=True,
+                env=env,
+                timeout=10,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            reasons.append(f"{type(exc).__name__}: {exc}")
+            continue
+
+        _debug("_get_databricks_account_token", _format_subprocess_result(result))
+        if result.returncode == 0:
+            try:
+                token = json.loads(result.stdout or "{}").get("access_token", "")
+            except json.JSONDecodeError as exc:
+                reasons.append(f"invalid token JSON ({exc.msg})")
+                continue
+            if token:
+                return token, None
+
+        stderr = (result.stderr or "").strip()
+        if stderr:
+            reasons.append(stderr[:200])
+        else:
+            reasons.append(f"`databricks auth token` exited {result.returncode}")
+
+    detail = "; ".join(reason for reason in reasons if reason) or "no account token returned"
+    return (
+        None,
+        f"account auth unavailable for {account_auth_url}. Run "
+        f"`databricks auth login --host {account_auth_url}`. Last error: {detail}",
+    )
+
+
+def _extract_budget_spend_statuses(payload: object) -> list[dict]:
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)]
+    if not isinstance(payload, dict):
+        return []
+    payload_dict = cast(dict[str, object], payload)
+    if payload_dict.get("budget_id"):
+        return [payload_dict]
+    for key in (
+        "spend_statuses",
+        "budgets",
+        "budget_spend_statuses",
+        "budget_spend_status",
+        "statuses",
+        "results",
+    ):
+        value = payload_dict.get(key)
+        if isinstance(value, list):
+            return [item for item in value if isinstance(item, dict)]
+    return []
+
+
+def fetch_current_user_budget_spend_status(
+    workspace: str,
+    profile: str | None = None,
+    *,
+    account_host: str | None = None,
+    account_id: str | None = None,
+    account_profile: str | None = None,
+    filter_budget_ids: list[str] | None = None,
+    filter_budget_tags: dict[str, str] | None = None,
+    filter_has_spending: bool = False,
+) -> tuple[list[dict], str | None]:
+    """Fetch current user's AI Gateway budget spend statuses from account APIs.
+
+    Returns (statuses, None) on success and ([], reason) on failure. Status
+    entries are intentionally returned as raw API dicts because the RPC is new
+    and may grow fields without requiring a ucode release.
+    """
+    account = dict(budget_account_config_for_workspace(workspace))
+    if account_host:
+        account["host"] = account_host
+    if account_id:
+        account["account_id"] = account_id
+    account_id = account["account_id"]
+    account_auth_url = _budget_account_auth_url(account)
+    token, reason = _get_databricks_account_token(
+        account_auth_url,
+        account_profile or profile,
+        profile_only=bool(account_profile),
+    )
+    if not token:
+        return [], reason or "could not fetch Databricks account token"
+
+    url = (
+        f"https://{account['host']}/api/2.1/accounts/{account_id}"
+        "/budgets:currentUserBudgetSpendStatus"
+    )
+    request_payload: dict[str, object] = {
+        "account_id": account_id,
+        "filter_has_spending": filter_has_spending,
+    }
+    if filter_budget_ids:
+        request_payload["filter_budget_ids"] = filter_budget_ids
+    if filter_budget_tags:
+        request_payload["filter_budget_tags"] = filter_budget_tags
+    payload, reason = _http_post_json(
+        url,
+        token,
+        request_payload,
+        timeout=10,
+    )
+    if reason:
+        return [], reason
+    statuses = _extract_budget_spend_statuses(payload)
+    return statuses, None
 
 
 def _extract_connection_page(payload: object) -> tuple[list[dict], str | None]:

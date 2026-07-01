@@ -94,6 +94,52 @@ class TestCodexWriteConfig:
         assert doc["model"] == "gpt-5"
         assert "profiles" not in doc
 
+    def test_writes_session_start_budget_hook(self, tmp_path, monkeypatch):
+        config_path = tmp_path / ".codex" / "ucode.config.toml"
+        backup_path = tmp_path / "codex-ucode-config.backup.toml"
+        monkeypatch.setattr(codex, "CODEX_CONFIG_PATH", config_path)
+        monkeypatch.setattr(codex, "CODEX_BACKUP_PATH", backup_path)
+        monkeypatch.setattr(codex, "agent_version", lambda binary: "0.134.0")
+        monkeypatch.setattr(codex, "save_state", lambda state: None)
+
+        codex.write_tool_config({"workspace": WS, "codex_models": ["gpt-5"]})
+
+        doc = read_toml_safe(config_path)
+        hook = doc["hooks"]["SessionStart"][0]["hooks"][0]
+        assert hook["type"] == "command"
+        assert "budget-hook --tool codex" in hook["command"]
+        assert hook["timeout"] == 10
+
+    def test_preserves_user_session_start_hooks(self, tmp_path, monkeypatch):
+        config_path = tmp_path / ".codex" / "ucode.config.toml"
+        config_path.parent.mkdir()
+        config_path.write_text(
+            """
+            [[hooks.SessionStart]]
+
+            [[hooks.SessionStart.hooks]]
+            type = "command"
+            command = "user-session-start"
+            """,
+            encoding="utf-8",
+        )
+        backup_path = tmp_path / "codex-ucode-config.backup.toml"
+        monkeypatch.setattr(codex, "CODEX_CONFIG_PATH", config_path)
+        monkeypatch.setattr(codex, "CODEX_BACKUP_PATH", backup_path)
+        monkeypatch.setattr(codex, "agent_version", lambda binary: "0.134.0")
+        monkeypatch.setattr(codex, "save_state", lambda state: None)
+
+        codex.write_tool_config({"workspace": WS, "codex_models": ["gpt-5"]})
+
+        doc = read_toml_safe(config_path)
+        commands = [
+            hook["command"]
+            for entry in doc["hooks"]["SessionStart"]
+            for hook in entry["hooks"]
+        ]
+        assert "user-session-start" in commands
+        assert sum("budget-hook --tool codex" in command for command in commands) == 1
+
     def test_writes_openai_model_id_for_databricks_gpt_endpoint(self, tmp_path, monkeypatch):
         config_path = tmp_path / ".codex" / "ucode.config.toml"
         backup_path = tmp_path / "codex-ucode-config.backup.toml"

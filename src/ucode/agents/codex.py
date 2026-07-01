@@ -6,7 +6,10 @@ import os
 import re
 from pathlib import Path
 
+import tomlkit
+
 from ucode.agent_updates import available_npm_package_update
+from ucode.budget_hooks import budget_hook_handler, is_budget_hook_handler
 from ucode.config_io import (
     APP_DIR,
     ToolSpec,
@@ -48,6 +51,7 @@ MANAGED_KEYS: list[list[str]] = [
     ["model"],
     ["model_providers", CODEX_MODEL_PROVIDER_NAME],
     ["model_providers", CODEX_MODEL_PROVIDER_NAME, "http_headers"],
+    ["hooks", "SessionStart"],
 ]
 
 LEGACY_MANAGED_KEYS: list[list[str]] = [
@@ -55,6 +59,7 @@ LEGACY_MANAGED_KEYS: list[list[str]] = [
     ["profiles", CODEX_PROFILE_NAME],
     ["model_providers", CODEX_MODEL_PROVIDER_NAME],
     ["model_providers", CODEX_MODEL_PROVIDER_NAME, "http_headers"],
+    ["hooks", "SessionStart"],
 ]
 
 _GPT_RE = re.compile(r"(?:databricks-)?gpt-(\d+)(?:[.-](\d+))?(?:[.-](\d+))?(-.+|[a-z].*)?")
@@ -309,6 +314,7 @@ def write_tool_config(state: dict, model: str | None = None) -> dict:
         )
         doc = read_toml_safe(LEGACY_CODEX_CONFIG_PATH)
         deep_merge_dict(doc, overlay)
+        _upsert_budget_session_start_hook(doc)
         write_toml_file(LEGACY_CODEX_CONFIG_PATH, doc)
         state = mark_tool_managed(state, "codex", LEGACY_MANAGED_KEYS)
         save_state(state)
@@ -321,10 +327,63 @@ def write_tool_config(state: dict, model: str | None = None) -> dict:
     )
     doc = read_toml_safe(CODEX_CONFIG_PATH)
     deep_merge_dict(doc, overlay)
+    _upsert_budget_session_start_hook(doc)
     write_toml_file(CODEX_CONFIG_PATH, doc)
     state = mark_tool_managed(state, "codex", MANAGED_KEYS)
     save_state(state)
     return state
+
+
+def _remove_budget_session_start_hook(doc: dict) -> None:
+    hooks = doc.get("hooks")
+    if not isinstance(hooks, dict):
+        return
+    entries = hooks.get("SessionStart")
+    if not isinstance(entries, list):
+        return
+
+    cleaned_entries = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            cleaned_entries.append(entry)
+            continue
+        hook_list = entry.get("hooks")
+        if not isinstance(hook_list, list):
+            cleaned_entries.append(entry)
+            continue
+        cleaned_hooks = [hook for hook in hook_list if not is_budget_hook_handler(hook, "codex")]
+        if cleaned_hooks:
+            cleaned_entry = dict(entry)
+            cleaned_entry["hooks"] = cleaned_hooks
+            cleaned_entries.append(cleaned_entry)
+
+    if cleaned_entries:
+        hooks["SessionStart"] = cleaned_entries
+    else:
+        hooks.pop("SessionStart", None)
+    if not hooks:
+        doc.pop("hooks", None)
+
+
+def _upsert_budget_session_start_hook(doc: dict) -> None:
+    _remove_budget_session_start_hook(doc)
+    hooks = doc.get("hooks")
+    if not isinstance(hooks, dict):
+        hooks = tomlkit.table()
+        doc["hooks"] = hooks
+    entries = hooks.get("SessionStart")
+    if not isinstance(entries, list):
+        entries = tomlkit.aot()
+        hooks["SessionStart"] = entries
+    entry = tomlkit.table()
+    entry["matcher"] = "startup|resume"
+    handlers = tomlkit.aot()
+    handler = tomlkit.table()
+    for key, value in budget_hook_handler("codex").items():
+        handler[key] = value
+    handlers.append(handler)
+    entry["hooks"] = handlers
+    entries.append(entry)
 
 
 def default_model(state: dict) -> str | None:

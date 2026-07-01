@@ -24,6 +24,7 @@ from ucode.databricks import (
     build_tool_base_url,
     ensure_databricks_cli_version,
     ensure_pat_bearer,
+    fetch_current_user_budget_spend_status,
     get_databricks_token,
     list_databricks_apps,
     list_databricks_connections,
@@ -115,6 +116,170 @@ class TestBuildSharedBaseUrls:
     def test_codex_url_format(self):
         urls = build_shared_base_urls(WS)
         assert urls["codex"] == f"{WS}/ai-gateway/codex/v1"
+
+
+class TestBudgetSpendStatus:
+    def test_selects_prod_account_by_default(self):
+        account = db_mod.budget_account_config_for_workspace(WS)
+
+        assert account["host"] == "accounts.cloud.databricks.com"
+        assert account["account_id"] == "5a5e7a89-43b0-4d67-b90d-3fbdcfc7b28d"
+
+    def test_selects_staging_account_for_staging_workspace(self):
+        account = db_mod.budget_account_config_for_workspace(
+            "https://workspace.staging.cloud.databricks.com"
+        )
+
+        assert account["host"] == "accounts.staging.cloud.databricks.com"
+        assert account["account_id"] == "11d77e21-5e05-4196-af72-423257f74974"
+
+    def test_finds_account_profile_by_host_and_account_id(self, monkeypatch):
+        monkeypatch.setattr(
+            db_mod,
+            "list_profile_entries",
+            lambda: [
+                {
+                    "name": "eng-ml-inference-account-staging",
+                    "host": (
+                        "https://accounts.staging.cloud.databricks.com/"
+                        "?autoLogin=true&account_id=11d77e21-5e05-4196-af72-423257f74974"
+                    ),
+                }
+            ],
+        )
+
+        profile = db_mod.find_account_profile_name(
+            "https://accounts.staging.cloud.databricks.com"
+            "?account_id=11d77e21-5e05-4196-af72-423257f74974"
+        )
+
+        assert profile == "eng-ml-inference-account-staging"
+
+    def test_fetch_posts_current_user_budget_rpc(self, monkeypatch):
+        calls: list[tuple[str, str, dict, int]] = []
+        payload = {
+            "spend_statuses": [
+                {
+                    "budget_id": "abc",
+                    "spend_status": {
+                        "user_id": "user-1",
+                        "spend": 12.5,
+                        "effective_alert_threshold": 20,
+                    },
+                }
+            ]
+        }
+
+        monkeypatch.setattr(
+            db_mod,
+            "_get_databricks_account_token",
+            lambda account_auth_url, profile=None, **kwargs: ("account-token", None),
+        )
+
+        def fake_post(url, token, body, timeout=10):
+            calls.append((url, token, body, timeout))
+            return payload, None
+
+        monkeypatch.setattr(db_mod, "_http_post_json", fake_post)
+
+        statuses, reason = fetch_current_user_budget_spend_status(WS, "acct-profile")
+
+        assert reason is None
+        assert statuses == payload["spend_statuses"]
+        assert calls == [
+            (
+                "https://accounts.cloud.databricks.com/api/2.1/accounts/"
+                "5a5e7a89-43b0-4d67-b90d-3fbdcfc7b28d/"
+                "budgets:currentUserBudgetSpendStatus",
+                "account-token",
+                {
+                    "account_id": "5a5e7a89-43b0-4d67-b90d-3fbdcfc7b28d",
+                    "filter_has_spending": False,
+                },
+                10,
+            )
+        ]
+
+    def test_fetch_returns_account_auth_reason(self, monkeypatch):
+        monkeypatch.setattr(
+            db_mod,
+            "_get_databricks_account_token",
+            lambda account_auth_url, profile=None, **kwargs: (None, "login required"),
+        )
+
+        statuses, reason = fetch_current_user_budget_spend_status(WS)
+
+        assert statuses == []
+        assert reason == "login required"
+
+    def test_fetch_includes_optional_filters(self, monkeypatch):
+        bodies: list[dict] = []
+        monkeypatch.setattr(
+            db_mod,
+            "_get_databricks_account_token",
+            lambda account_auth_url, profile=None, **kwargs: ("account-token", None),
+        )
+
+        def fake_post(url, token, body, timeout=10):
+            bodies.append(body)
+            return {"spend_statuses": []}, None
+
+        monkeypatch.setattr(db_mod, "_http_post_json", fake_post)
+
+        statuses, reason = fetch_current_user_budget_spend_status(
+            WS,
+            filter_budget_ids=["budget-1"],
+            filter_budget_tags={"demo": "true"},
+            filter_has_spending=True,
+        )
+
+        assert statuses == []
+        assert reason is None
+        assert bodies == [
+            {
+                "account_id": "5a5e7a89-43b0-4d67-b90d-3fbdcfc7b28d",
+                "filter_has_spending": True,
+                "filter_budget_ids": ["budget-1"],
+                "filter_budget_tags": {"demo": "true"},
+            }
+        ]
+
+    def test_fetch_uses_account_profile_without_host_override(self, monkeypatch):
+        runs: list[list[str]] = []
+        monkeypatch.delenv("DATABRICKS_BEARER", raising=False)
+
+        def fake_run(args, **kwargs):
+            runs.append(args)
+            return subprocess.CompletedProcess(
+                args,
+                0,
+                stdout=json.dumps({"access_token": "account-token"}),
+                stderr="",
+            )
+
+        monkeypatch.setattr(db_mod, "run", fake_run)
+        monkeypatch.setattr(
+            db_mod,
+            "_http_post_json",
+            lambda url, token, body, timeout=10: ({"spend_statuses": []}, None),
+        )
+
+        statuses, reason = fetch_current_user_budget_spend_status(
+            WS,
+            account_host="accounts.staging.cloud.databricks.com",
+            account_id="11d77e21-5e05-4196-af72-423257f74974",
+            account_profile="eng-ml-inference-account-staging",
+        )
+
+        assert statuses == []
+        assert reason is None
+        assert runs[0][:4] == [
+            "databricks",
+            "--profile",
+            "eng-ml-inference-account-staging",
+            "auth",
+        ]
+        assert "--host" not in runs[0]
 
 
 class TestDiscoverClaudeModels:

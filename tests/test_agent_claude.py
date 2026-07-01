@@ -282,6 +282,46 @@ class TestWriteToolConfigMcpRegistration:
         assert calls == [("register", WS, "explicit-model")]
 
 
+class TestClaudeBudgetHook:
+    def test_writes_session_start_budget_hook(self, monkeypatch):
+        written: list[dict] = []
+        monkeypatch.setattr(claude, "backup_existing_file", lambda *a, **kw: True)
+        monkeypatch.setattr(claude, "read_json_safe", lambda path: {})
+        monkeypatch.setattr(claude, "write_json_file", lambda path, payload: written.append(payload))
+        monkeypatch.setattr(claude, "save_state", lambda state: None)
+
+        claude.write_tool_config({"workspace": WS, "codex_models": []}, "databricks-claude-sonnet-4")
+
+        hook = written[0]["hooks"]["SessionStart"][0]["hooks"][0]
+        assert hook["type"] == "command"
+        assert "budget-hook --tool claude" in hook["command"]
+        assert hook["timeout"] == 10
+
+    def test_preserves_user_session_start_hooks(self, monkeypatch):
+        existing = {
+            "hooks": {
+                "SessionStart": [
+                    {"hooks": [{"type": "command", "command": "user-session-start"}]}
+                ]
+            }
+        }
+        written: list[dict] = []
+        monkeypatch.setattr(claude, "backup_existing_file", lambda *a, **kw: True)
+        monkeypatch.setattr(claude, "read_json_safe", lambda path: existing)
+        monkeypatch.setattr(claude, "write_json_file", lambda path, payload: written.append(payload))
+        monkeypatch.setattr(claude, "save_state", lambda state: None)
+
+        claude.write_tool_config({"workspace": WS, "codex_models": []}, "databricks-claude-sonnet-4")
+
+        commands = [
+            hook["command"]
+            for entry in written[0]["hooks"]["SessionStart"]
+            for hook in entry["hooks"]
+        ]
+        assert "user-session-start" in commands
+        assert sum("budget-hook --tool claude" in command for command in commands) == 1
+
+
 class TestRegisterWebSearchMcp:
     def test_clears_existing_then_adds(self, monkeypatch):
         import ucode.mcp as mcp_mod

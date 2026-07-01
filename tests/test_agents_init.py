@@ -170,6 +170,32 @@ class TestResolveLaunchModel:
         _, model = resolve_launch_model("claude", {}, "my-model")
         assert model == "my-model"
 
+    def test_claude_policy_model_alias_resolves_family(self):
+        state = {"claude_models": {"opus": "system.ai.claude-opus-4-8"}}
+        _, model = resolve_launch_model("claude", state, "opus")
+        assert model == "system.ai.claude-opus-4-8"
+
+    def test_codex_policy_model_alias_resolves_available_model(self):
+        state = {"codex_models": ["system.ai.gpt-5-4-mini"]}
+        _, model = resolve_launch_model("codex", state, "gpt-5-4-mini")
+        assert model == "system.ai.gpt-5-4-mini"
+
+    def test_codex_policy_model_keeps_system_ai_prefix_when_no_match(self):
+        # The policy names a model the workspace did not discover, but the
+        # workspace routes by `system.ai.<name>`. Keep that prefix rather than
+        # falling through to the OpenAI-id rewrite (`gpt-5.4-mini`), which is
+        # unroutable on a model-services gateway.
+        state = {"codex_models": ["system.ai.gpt-5", "system.ai.gpt-5-mini"]}
+        _, model = resolve_launch_model("codex", state, "gpt-5-4-mini")
+        assert model == "system.ai.gpt-5-4-mini"
+
+    def test_codex_policy_model_unchanged_on_foundation_models_workspace(self):
+        # Legacy foundation-models workspaces use `databricks-*` endpoint names;
+        # an unmatched bare id must not gain a spurious `system.ai.` prefix.
+        state = {"codex_models": ["databricks-gpt-5-4"]}
+        _, model = resolve_launch_model("codex", state, "gpt-5-4-mini")
+        assert model == "gpt-5-4-mini"
+
     def test_default_model_used_when_no_explicit(self):
         state = {"claude_models": {"sonnet": "s4"}}
         _, model = resolve_launch_model("claude", state, None)
@@ -475,6 +501,234 @@ class TestConfigureSelectedTools:
         state = {"workspace": "https://x.databricks.com", "available_tools": ["codex"]}
         result = configure_selected_tools(state, [])
         assert result["available_tools"] == ["codex"]
+
+
+class TestLaunchBudgetStatus:
+    def test_prints_budget_status_for_codex(self, monkeypatch, capsys):
+        launched: list[tuple[dict, list[str]]] = []
+        monkeypatch.setenv("UCODE_BUDGET_POLICY", "/tmp/ucode-test-missing-policy.json")
+
+        monkeypatch.setattr(
+            agents_mod,
+            "fetch_current_user_budget_spend_status",
+            lambda workspace, profile=None, **kwargs: (
+                [
+                    {
+                        "budget_id": "abcdef12-3456",
+                        "spend_status": {
+                            "spend": 3.5,
+                            "effective_alert_threshold": 10,
+                        },
+                    }
+                ],
+                None,
+            ),
+        )
+        monkeypatch.setattr(
+            agents_mod._MODULES["codex"],
+            "launch",
+            lambda state, args: launched.append((state, args)),
+        )
+
+        state = {"workspace": "https://x.databricks.com", "profile": "acct-profile"}
+        agents_mod.launch("codex", state, ["--search"])
+
+        assert launched == [(state, ["--search"])]
+        out = capsys.readouterr().out
+        assert "Budget abcdef12" in out
+        assert "$3.50 / $10.00 (35%)" in out
+        assert "Claude Code under 80%" in out
+        assert "Codex" in out and "at/after 80%" in out
+        assert "Budget policy recommends Claude Code (current 35% < 80%)" in out
+
+    def test_budget_policy_recommends_codex_at_or_after_80_percent(self, monkeypatch, capsys):
+        launched: list[bool] = []
+        monkeypatch.setenv("UCODE_BUDGET_POLICY", "/tmp/ucode-test-missing-policy.json")
+        monkeypatch.setattr(
+            agents_mod,
+            "fetch_current_user_budget_spend_status",
+            lambda workspace, profile=None, **kwargs: (
+                [
+                    {
+                        "budget_id": "budget-1",
+                        "spend_status": {
+                            "spend": 8,
+                            "effective_alert_threshold": 10,
+                        },
+                    }
+                ],
+                None,
+            ),
+        )
+        monkeypatch.setattr(
+            agents_mod._MODULES["claude"],
+            "launch",
+            lambda state, args: launched.append(True),
+        )
+
+        agents_mod.launch("claude", {"workspace": "https://x.databricks.com"}, [])
+
+        assert launched == [True]
+        out = capsys.readouterr().out
+        assert "Budget policy recommends Codex (current 80% >= 80%)" in out
+
+    def test_reads_custom_budget_policy_json(self, tmp_path, monkeypatch, capsys):
+        policy_path = tmp_path / "budget-policy.json"
+        calls: list[dict] = []
+        policy_path.write_text(
+            """
+            {
+              "name": "Team budget policy",
+              "switch_percent": 60,
+              "below": {"agent": "codex"},
+              "at_or_above": {"agent": "claude"},
+              "budget_ids": ["3f142f2c-c75d-495d-8b62-25f7ac37bf6d"],
+              "budget_tags": {"demo": "true"},
+              "filter_has_spending": true
+            }
+            """,
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("UCODE_BUDGET_POLICY", str(policy_path))
+        monkeypatch.setattr(
+            agents_mod,
+            "fetch_current_user_budget_spend_status",
+            lambda workspace, profile=None, **kwargs: (
+                calls.append(kwargs)
+                or (
+                    [
+                        {
+                            "budget_id": "3f142f2c-c75d-495d-8b62-25f7ac37bf6d",
+                            "spend_status": {
+                                "spend": 5,
+                                "effective_alert_threshold": 10,
+                            },
+                        }
+                    ],
+                    None,
+                )
+            ),
+        )
+        monkeypatch.setattr(
+            agents_mod._MODULES["claude"],
+            "launch",
+            lambda state, args: None,
+        )
+
+        agents_mod.launch("claude", {"workspace": "https://x.databricks.com"}, [])
+
+        out = capsys.readouterr().out
+        assert "Codex under 60%" in out
+        assert "Budget policy recommends Codex (current 50% < 60%)" in out
+        assert calls == [
+            {
+                "account_host": None,
+                "account_id": None,
+                "account_profile": None,
+                "filter_budget_ids": ["3f142f2c-c75d-495d-8b62-25f7ac37bf6d"],
+                "filter_budget_tags": {"demo": "true"},
+                "filter_has_spending": True,
+            }
+        ]
+
+    def test_reads_tiered_budget_policy_json(self, tmp_path, monkeypatch, capsys):
+        policy_path = tmp_path / "budget-policy.json"
+        calls: list[dict] = []
+        policy_path.write_text(
+            """
+            {
+              "version": 1,
+              "budget": "3f142f2c-c75d-495d-8b62-25f7ac37bf6d",
+              "policy_name": "Demo tiered policy",
+              "tiers": {
+                "20": {"agent": "claude code", "model": "opus"},
+                "60": {"agent": "claude code", "model": "sonnet"},
+                "80": {"agent": "codex", "model": "gpt-5-4-mini"}
+              }
+            }
+            """,
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("UCODE_BUDGET_POLICY", str(policy_path))
+        monkeypatch.setattr(
+            agents_mod,
+            "fetch_current_user_budget_spend_status",
+            lambda workspace, profile=None, **kwargs: (
+                calls.append(kwargs)
+                or (
+                    [
+                        {
+                            "budget_id": "3f142f2c-c75d-495d-8b62-25f7ac37bf6d",
+                            "spend_status": {
+                                "spend": 250,
+                                "effective_alert_threshold": 500,
+                            },
+                        }
+                    ],
+                    None,
+                )
+            ),
+        )
+        monkeypatch.setattr(
+            agents_mod._MODULES["codex"],
+            "launch",
+            lambda state, args: None,
+        )
+
+        agents_mod.launch("codex", {"workspace": "https://x.databricks.com"}, [])
+
+        out = capsys.readouterr().out
+        assert "20% Claude Code/opus" in out
+        assert "60% Claude" in out and "Code/sonnet" in out
+        assert "80%" in out and "Codex/gpt-5-4-mini" in out
+        assert "Budget policy recommends Claude Code / sonnet (current 50% < 60%)" in out
+        assert calls == [
+            {
+                "account_host": None,
+                "account_id": None,
+                "account_profile": None,
+                "filter_budget_ids": ["3f142f2c-c75d-495d-8b62-25f7ac37bf6d"],
+                "filter_budget_tags": None,
+                "filter_has_spending": False,
+            }
+        ]
+
+    def test_prints_budget_warning_without_blocking_launch(self, monkeypatch, capsys):
+        launched: list[bool] = []
+        monkeypatch.setattr(
+            agents_mod,
+            "fetch_current_user_budget_spend_status",
+            lambda workspace, profile=None, **kwargs: ([], "login required"),
+        )
+        monkeypatch.setattr(
+            agents_mod._MODULES["claude"],
+            "launch",
+            lambda state, args: launched.append(True),
+        )
+
+        agents_mod.launch("claude", {"workspace": "https://x.databricks.com"}, [])
+
+        assert launched == [True]
+        assert "Budget spend unavailable: login required" in capsys.readouterr().out
+
+    def test_skips_budget_status_for_other_tools(self, monkeypatch):
+        fetched: list[bool] = []
+        launched: list[bool] = []
+        monkeypatch.setattr(
+            agents_mod,
+            "fetch_current_user_budget_spend_status",
+            lambda workspace, profile=None, **kwargs: fetched.append(True) or ([], None),
+        )
+        monkeypatch.setattr(
+            agents_mod._MODULES["gemini"],
+            "launch",
+            lambda state, args: launched.append(True),
+        )
+
+        agents_mod.launch("gemini", {"workspace": "https://x.databricks.com"}, [])
+
+        assert fetched == []
+        assert launched == [True]
 
 
 class TestValidateAllToolsVerbosity:

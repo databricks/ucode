@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import cast
 
 from ucode.agent_updates import available_npm_package_update
+from ucode.budget_hooks import budget_hook_handler, is_budget_hook_handler
 from ucode.config_io import (
     APP_DIR,
     ToolSpec,
@@ -255,6 +256,7 @@ def write_tool_config(state: dict, model: str) -> dict:
         profile=state.get("profile"),
         use_pat=bool(state.get("use_pat")),
     )
+    managed_keys = managed_keys + [["hooks", "SessionStart"]]
     tracing_env_vars = tracing_env(state, "claude")
     stop_hook_command = claude_tracing_stop_hook_command() if tracing_env_vars else None
     if tracing_env_vars:
@@ -272,6 +274,7 @@ def write_tool_config(state: dict, model: str) -> dict:
 
     existing = read_json_safe(CLAUDE_SETTINGS_PATH)
     merged = deep_merge_dict(existing, overlay)
+    _upsert_budget_session_start_hook(merged)
     if tracing_env_vars and stop_hook_command:
         _upsert_tracing_stop_hook(merged, stop_hook_command)
     if not tracing_env_vars:
@@ -297,6 +300,57 @@ def write_tool_config(state: dict, model: str) -> dict:
     state = mark_tool_managed(state, "claude", managed_keys)
     save_state(state)
     return state
+
+
+def _remove_budget_session_start_hook(settings: dict) -> None:
+    hooks = settings.get("hooks")
+    if not isinstance(hooks, dict):
+        return
+    entries = hooks.get("SessionStart")
+    if not isinstance(entries, list):
+        return
+
+    cleaned_entries = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            cleaned_entries.append(entry)
+            continue
+        hook_list = entry.get("hooks")
+        if not isinstance(hook_list, list):
+            cleaned_entries.append(entry)
+            continue
+        cleaned_hooks = [
+            hook for hook in hook_list if not is_budget_hook_handler(hook, "claude")
+        ]
+        if cleaned_hooks:
+            cleaned_entry = dict(entry)
+            cleaned_entry["hooks"] = cleaned_hooks
+            cleaned_entries.append(cleaned_entry)
+
+    if cleaned_entries:
+        hooks["SessionStart"] = cleaned_entries
+    else:
+        hooks.pop("SessionStart", None)
+    if not hooks:
+        settings.pop("hooks", None)
+
+
+def _upsert_budget_session_start_hook(settings: dict) -> None:
+    _remove_budget_session_start_hook(settings)
+    hooks = settings.get("hooks")
+    if not isinstance(hooks, dict):
+        hooks = {}
+        settings["hooks"] = hooks
+    entries = hooks.get("SessionStart")
+    if not isinstance(entries, list):
+        entries = []
+        hooks["SessionStart"] = entries
+    entries.append(
+        {
+            "matcher": "startup|resume",
+            "hooks": [budget_hook_handler("claude")],
+        }
+    )
 
 
 def _is_tracing_stop_hook(hook: object) -> bool:

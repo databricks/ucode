@@ -143,6 +143,55 @@ class TestSubcommandRouting:
         result = runner.invoke(app, ["--agent", "claude"])
         assert result.exit_code != 0
 
+    def test_bare_ucode_uses_budget_policy_target(self):
+        with (
+            patch("ucode.cli.load_state", return_value=MINIMAL_STATE),
+            patch(
+                "ucode.cli.resolve_budget_policy_launch",
+                return_value=("codex", "gpt-5-4-mini"),
+            ),
+            patch("ucode.cli._launch_tool") as mock_launch,
+        ):
+            result = runner.invoke(
+                app,
+                [],
+                env={"UCODE_BUDGET_POLICY": "/tmp/budget-policy.json"},
+            )
+
+        assert result.exit_code == 0, result.output
+        mock_launch.assert_called_once()
+        assert mock_launch.call_args.args[0] == "codex"
+        assert mock_launch.call_args.kwargs["explicit_model"] == "gpt-5-4-mini"
+
+    def test_bare_ucode_pins_claude_policy_model(self):
+        with (
+            patch("ucode.cli.load_state", return_value=MINIMAL_STATE),
+            patch("ucode.cli.apply_pat_environment"),
+            patch("ucode.cli.resolve_budget_policy_launch", return_value=("claude", "opus")),
+            patch("ucode.cli.ensure_bootstrap_dependencies"),
+            patch("ucode.cli.ensure_provider_state", return_value=MINIMAL_STATE),
+            patch("ucode.cli.configure_shared_state", return_value=MINIMAL_STATE),
+            patch(
+                "ucode.cli.resolve_launch_model",
+                return_value=(MINIMAL_STATE, "system.ai.claude-opus-4-8"),
+            ),
+            patch("ucode.cli.configure_tool", return_value=MINIMAL_STATE) as mock_configure,
+            patch("ucode.cli.launch_agent") as mock_launch,
+        ):
+            result = runner.invoke(
+                app,
+                [],
+                env={"UCODE_BUDGET_POLICY": "/tmp/budget-policy.json"},
+            )
+
+        assert result.exit_code == 0, result.output
+        mock_configure.assert_called_once_with(
+            "claude", MINIMAL_STATE, "system.ai.claude-opus-4-8"
+        )
+        mock_launch.assert_called_once()
+        assert mock_launch.call_args.args[0] == "claude"
+        assert mock_launch.call_args.args[2] == ["--model", "opus"]
+
 
 class TestMcpSubcommands:
     def test_web_search_subcommand_help(self):
@@ -265,6 +314,19 @@ class TestAuthTokenCommand:
             result = runner.invoke(app, ["auth-token", "--use-pat", "--profile", "p"])
         assert result.exit_code == 0
         assert result.stdout == "ci-bearer\n"
+
+
+class TestBudgetHookCommand:
+    def test_budget_hook_prints_compact_status(self):
+        with (
+            patch("ucode.cli.load_state", return_value=MINIMAL_STATE),
+            patch("ucode.cli.apply_pat_environment"),
+            patch("ucode.cli.budget_hook_status_line", return_value="ucode budget: 5%"),
+        ):
+            result = runner.invoke(app, ["budget-hook", "--tool", "claude"])
+
+        assert result.exit_code == 0, result.output
+        assert "ucode budget: 5%" in result.output
 
 
 class TestStatus:

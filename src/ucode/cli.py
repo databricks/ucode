@@ -10,6 +10,8 @@ from rich.panel import Panel
 
 from ucode.agents import (
     TOOL_SPECS,
+    budget_hook_status_line,
+    budget_policy_env_configured,
     check_gateway_endpoint,
     configure_selected_tools,
     configure_single_tool,
@@ -18,6 +20,7 @@ from ucode.agents import (
     ensure_provider_state,
     install_tool_binary,
     normalize_tool,
+    resolve_budget_policy_launch,
     resolve_launch_model,
     validate_all_tools,
     validate_tool,
@@ -582,7 +585,7 @@ def revert() -> int:
 
 app = typer.Typer(
     add_completion=False,
-    no_args_is_help=True,
+    no_args_is_help=False,
     context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
 )
 configure_app = typer.Typer(add_completion=False, no_args_is_help=False)
@@ -649,6 +652,22 @@ def auth_token_cmd(
     sys.stdout.write(token + "\n")
 
 
+@app.command("budget-hook", hidden=True)
+def budget_hook_cmd(
+    tool: Annotated[
+        str,
+        typer.Option("--tool", help="Agent tool name for policy context."),
+    ] = "codex",
+) -> None:
+    """Print compact budget status for agent lifecycle hooks."""
+    try:
+        state = load_state()
+        apply_pat_environment(state)
+        console.print(budget_hook_status_line(normalize_tool(tool), state))
+    except Exception as exc:  # pragma: no cover - hook must not block launch
+        console.print(f"ucode budget: unavailable ({exc})")
+
+
 def _auto_configure_tool(tool: str) -> None:
     """First-time setup for a single tool — mirrors configure_workspace_command."""
     existing = load_state()
@@ -685,7 +704,12 @@ def _auto_configure_tool(tool: str) -> None:
         raise RuntimeError(f"{spec['display']} validation failed — config reverted.")
 
 
-def _launch_tool(tool_name: str, ctx: typer.Context) -> None:
+def _launch_tool(
+    tool_name: str,
+    ctx: typer.Context,
+    *,
+    explicit_model: str | None = None,
+) -> None:
     try:
         tool = normalize_tool(tool_name)
         existing = load_state()
@@ -707,8 +731,9 @@ def _launch_tool(tool_name: str, ctx: typer.Context) -> None:
         state = configure_shared_state(
             state["workspace"], profile=state.get("profile"), tools=[tool]
         )
-        state, resolved_model = resolve_launch_model(tool, state, None)
+        state, resolved_model = resolve_launch_model(tool, state, explicit_model)
         state = configure_tool(tool, state, resolved_model)
+        tool_args = _launch_args_for_model(tool, ctx.args, explicit_model)
         print_section(f"ucode with {TOOL_SPECS[tool]['display']}")
         if resolved_model:
             print_kv("Model", resolved_model)
@@ -718,13 +743,63 @@ def _launch_tool(tool_name: str, ctx: typer.Context) -> None:
                 f"every 30 minutes while the session is running."
             )
         print_success(f"Starting {TOOL_SPECS[tool]['display']}")
-        launch_agent(tool, state, ctx.args)
+        launch_agent(tool, state, tool_args)
     except RuntimeError as exc:
         print_err(str(exc))
         raise typer.Exit(1) from None
     except KeyboardInterrupt:
         print_err("Interrupted.")
         raise typer.Exit(130) from None
+
+
+def _launch_args_for_model(
+    tool: str,
+    tool_args: list[str],
+    explicit_model: str | None,
+) -> list[str]:
+    if tool != "claude" or not explicit_model or _has_model_arg(tool_args):
+        return tool_args
+    return ["--model", _claude_model_selector(explicit_model), *tool_args]
+
+
+def _has_model_arg(tool_args: list[str]) -> bool:
+    return any(arg == "--model" or arg.startswith("--model=") for arg in tool_args)
+
+
+def _claude_model_selector(model: str) -> str:
+    lowered = model.lower()
+    for family in ("opus", "sonnet", "haiku"):
+        if family in lowered:
+            return family
+    return model
+
+
+def _launch_from_budget_policy(ctx: typer.Context) -> None:
+    try:
+        state = load_state()
+        apply_pat_environment(state)
+        target = resolve_budget_policy_launch(state)
+        if target is None:
+            raise RuntimeError(
+                "Budget policy did not resolve a launch target. Check account auth, budget id, "
+                "and live spend status."
+            )
+        tool, model = target
+        _launch_tool(tool, ctx, explicit_model=model)
+    except RuntimeError as exc:
+        print_err(str(exc))
+        raise typer.Exit(1) from None
+
+
+@app.callback(invoke_without_command=True)
+def root(ctx: typer.Context) -> None:
+    if ctx.invoked_subcommand is not None:
+        return
+    if budget_policy_env_configured():
+        _launch_from_budget_policy(ctx)
+        return
+    console.print(ctx.get_help())
+    raise typer.Exit(0)
 
 
 @app.command("codex", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
