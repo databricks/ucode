@@ -23,6 +23,7 @@ from ucode.databricks import (
     build_tool_base_url,
     get_databricks_token,
 )
+from ucode.launcher import exec_or_spawn
 from ucode.state import mark_tool_managed, save_state
 from ucode.telemetry import agent_version, ucode_version
 from ucode.tracing import tracing_env
@@ -499,7 +500,7 @@ def launch(state: dict, tool_args: list[str]) -> None:
     workspace = state.get("workspace")
     if workspace:
         os.environ["OAUTH_TOKEN"] = get_databricks_token(workspace, state.get("profile"))
-    os.execvp(binary, [binary, "--settings", str(CLAUDE_SETTINGS_PATH), *tool_args])
+    exec_or_spawn([binary, "--settings", str(CLAUDE_SETTINGS_PATH), *tool_args])
 
 
 def validate_cmd(binary: str) -> list[str]:

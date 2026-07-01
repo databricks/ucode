@@ -45,11 +45,14 @@ class TestRenderOverlay:
         provider = overlay["model_providers"]["ucode-databricks"]
         assert provider["wire_api"] == "responses"
 
-    def test_auth_uses_sh(self):
+    def test_auth_runs_ucode_auth_token(self):
+        # The auth command runs the `ucode auth-token` executable directly
+        # (not `sh -c`), so it works on Windows where there is no POSIX shell.
         overlay = codex.render_overlay(WS)
         auth = overlay["model_providers"]["ucode-databricks"]["auth"]
-        assert auth["command"] == "sh"
-        assert "-c" in auth["args"]
+        assert auth["command"].endswith("ucode") or auth["command"] == "ucode"
+        assert auth["args"][0] == "auth-token"
+        assert auth["command"] != "sh"
 
     def test_auth_contains_workspace(self):
         overlay = codex.render_overlay(WS)
