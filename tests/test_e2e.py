@@ -31,6 +31,7 @@ from ucode.databricks import (
     is_model_provider_feature_unavailable,
     list_model_provider_services,
     list_tool_provider_services,
+    service_usable_for_tool,
     workspace_hostname,
 )
 from ucode.ui import normalize_workspace_url
@@ -162,7 +163,7 @@ class TestModelProviderServicesDiscovery:
         assert reason is None, f"listing failed: {reason}"
         assert isinstance(services, list)
         for svc in services:
-            assert set(svc) >= {"name", "provider_type"}
+            assert set(svc) >= {"name", "provider_type", "targets", "allow_all_targets"}
             # Names are stripped of the `model-provider-services/` API prefix.
             assert svc["name"] and "/" not in svc["name"]
 
@@ -173,10 +174,14 @@ class TestModelProviderServicesDiscovery:
         assert reason is None
         claude_names, _ = list_tool_provider_services("claude", e2e_workspace, e2e_token)
         codex_names, _ = list_tool_provider_services("codex", e2e_workspace, e2e_token)
+        # claude routes through Anthropic and Bedrock services (Bedrock only when
+        # it exposes Claude models); codex through OpenAI.
         assert set(claude_names) == {
-            s["name"] for s in services if s["provider_type"] == "anthropic"
+            s["name"] for s in services if service_usable_for_tool("claude", s)
         }
-        assert set(codex_names) == {s["name"] for s in services if s["provider_type"] == "openai"}
+        assert set(codex_names) == {
+            s["name"] for s in services if service_usable_for_tool("codex", s)
+        }
 
 
 # ---------------------------------------------------------------------------

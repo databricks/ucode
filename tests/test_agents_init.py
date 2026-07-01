@@ -202,6 +202,45 @@ class TestResolveLaunchModel:
             resolve_launch_model("claude", {}, None)
 
 
+class TestResolveProviderModels:
+    _STATE = {"workspace": "https://ws.databricks.com", "profile": None}
+
+    def _patch(self, monkeypatch, service, error):
+        monkeypatch.setattr(agents_mod, "get_databricks_token", lambda w, p: "token")
+        monkeypatch.setattr(
+            agents_mod, "resolve_provider_service", lambda t, n, w, tok: (service, error)
+        )
+
+    def test_none_provider_returns_none(self):
+        models, error = agents_mod.resolve_provider_models("claude", self._STATE, None)
+        assert (models, error) == (None, None)
+
+    def test_anthropic_returns_no_models(self, monkeypatch):
+        self._patch(monkeypatch, {"provider_type": "anthropic", "targets": []}, None)
+        models, error = agents_mod.resolve_provider_models("claude", self._STATE, "main.a.svc")
+        assert error is None
+        assert models is None
+
+    def test_bedrock_returns_pinned_models(self, monkeypatch):
+        service = {
+            "provider_type": "amazon_bedrock",
+            "targets": ["us.anthropic.claude-sonnet-4-6", "global.anthropic.claude-opus-4-8"],
+        }
+        self._patch(monkeypatch, service, None)
+        models, error = agents_mod.resolve_provider_models("claude", self._STATE, "main.b.svc")
+        assert error is None
+        assert models == {
+            "sonnet": "us.anthropic.claude-sonnet-4-6",
+            "opus": "global.anthropic.claude-opus-4-8",
+        }
+
+    def test_invalid_provider_returns_error(self, monkeypatch):
+        self._patch(monkeypatch, None, "boom")
+        models, error = agents_mod.resolve_provider_models("claude", self._STATE, "main.x.svc")
+        assert models is None
+        assert error == "boom"
+
+
 class TestInstallToolBinary:
     def test_non_strict_returns_false_when_npm_missing(self, monkeypatch):
         monkeypatch.setattr("ucode.agents.shutil.which", lambda _: None)

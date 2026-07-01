@@ -21,6 +21,7 @@ from ucode.agents import (
     normalize_tool,
     provider_permission_error,
     resolve_launch_model,
+    resolve_provider_models,
     validate_all_tools,
     validate_tool,
 )
@@ -44,7 +45,6 @@ from ucode.databricks import (
     get_databricks_token,
     install_databricks_cli,
     is_model_provider_feature_unavailable,
-    list_model_provider_services,
     list_profile_entries,
     list_tool_provider_services,
     normalize_workspace_url,
@@ -769,19 +769,17 @@ def _launch_tool(tool_name: str, ctx: typer.Context, provider: str | None = None
         state = ensure_provider_state(tool)
         # An explicit --provider overrides the persisted choice; otherwise fall
         # back to whatever `ucode configure` saved for this tool.
-        explicit_provider = provider is not None
         provider = provider or get_provider_service(state, tool)
-        if provider and explicit_provider:
-            # Verify the feature only for an explicit --provider; a persisted
-            # choice was already validated at `ucode configure` time, so trust it
-            # and keep the launch fast. Surfaces a clear error up front instead of
-            # a cryptic gateway error mid-session.
-            token = get_databricks_token(state["workspace"], state.get("profile"))
-            _, reason = list_model_provider_services(state["workspace"], token)
-            if is_model_provider_feature_unavailable(reason):
-                raise RuntimeError(
-                    "Model Provider Service feature is not available yet for this workspace."
-                )
+        # Validate the provider service before launching — it must exist, be a
+        # provider type this tool can route to (e.g. claude can't use an OpenAI
+        # or Foundry service), and, for Bedrock, expose Claude models to pin.
+        # Surfaces a clear error up front instead of a cryptic gateway failure
+        # mid-session. For a Bedrock service this also returns the model ids.
+        provider_models = None
+        if provider:
+            provider_models, error = resolve_provider_models(tool, state, provider)
+            if error:
+                raise RuntimeError(error)
         # Re-fetch model lists on every launch so newly-added Databricks
         # endpoints show up without a manual `ucode configure` (and so that
         # tools like pi which read multiple model bundles never run on
@@ -801,7 +799,9 @@ def _launch_tool(tool_name: str, ctx: typer.Context, provider: str | None = None
             resolved_model = None
         else:
             state, resolved_model = resolve_launch_model(tool, state, None)
-        state = configure_tool(tool, state, resolved_model, provider=provider)
+        state = configure_tool(
+            tool, state, resolved_model, provider=provider, provider_models=provider_models
+        )
         print_section(f"ucode with {TOOL_SPECS[tool]['display']}")
         if provider:
             print_kv("Provider", provider)
