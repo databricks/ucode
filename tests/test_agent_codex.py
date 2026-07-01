@@ -339,6 +339,9 @@ class TestCodexDefaultModel:
 
     def test_codex_model_id_preserves_openai_incompatible_models(self):
         assert codex._codex_model_id("databricks-gpt-5-2-codex") == "databricks-gpt-5-2-codex"
+        assert codex._codex_model_id("databricks-gpt-5-6-luna") == "databricks-gpt-5-6-luna"
+        assert codex._codex_model_id("databricks-gpt-5-6-sol") == "databricks-gpt-5-6-sol"
+        assert codex._codex_model_id("databricks-gpt-5-6-terra") == "databricks-gpt-5-6-terra"
         assert codex._codex_model_id("databricks-gpt-5-4-nano") == "databricks-gpt-5-4-nano"
 
     def test_codex_model_id_passes_model_services_id_verbatim(self):
