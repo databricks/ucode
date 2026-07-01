@@ -274,6 +274,200 @@ class TestDiscoverModelServices:
         assert calls["n"] == 3  # two failures, third succeeds
 
 
+class TestListModelProviderServices:
+    _PAYLOAD = {
+        "model_provider_services": [
+            {
+                "name": "model-provider-services/main.aarushi.anthropic-svc",
+                "config": {"provider_type": "EXTERNAL_MODEL_PROVIDER_TYPE_ANTHROPIC"},
+            },
+            {
+                "name": "model-provider-services/main.aarushi.openai-svc",
+                "config": {"provider_type": "EXTERNAL_MODEL_PROVIDER_TYPE_OPENAI"},
+            },
+            {
+                "name": "model-provider-services/main.bob.bedrock-svc",
+                "config": {
+                    "provider_type": "EXTERNAL_MODEL_PROVIDER_TYPE_AMAZON_BEDROCK",
+                    "allow_all_targets": False,
+                    "targets": [
+                        {
+                            "model": "us.anthropic.claude-sonnet-4-6",
+                            "native_api_types": ["anthropic/v1/messages"],
+                        },
+                        {"model": "global.anthropic.claude-opus-4-8"},
+                    ],
+                },
+            },
+            {
+                "name": "model-provider-services/main.bob.bedrock-titan-svc",
+                "config": {
+                    "provider_type": "EXTERNAL_MODEL_PROVIDER_TYPE_AMAZON_BEDROCK",
+                    "targets": [{"model": "amazon.titan-text-express-v1"}],
+                },
+            },
+        ]
+    }
+
+    def test_strips_prefix_and_tags_provider_type(self, monkeypatch):
+        monkeypatch.setattr(
+            db_mod, "_http_get_json", lambda url, token, timeout=30: (self._PAYLOAD, None)
+        )
+        services, reason = db_mod.list_model_provider_services(WS, "token")
+        assert reason is None
+        assert services[0] == {
+            "name": "main.aarushi.anthropic-svc",
+            "provider_type": "anthropic",
+            "targets": [],
+            "allow_all_targets": False,
+        }
+        assert {s["provider_type"] for s in services} == {
+            "anthropic",
+            "openai",
+            "amazon_bedrock",
+        }
+
+    def test_extracts_targets(self, monkeypatch):
+        monkeypatch.setattr(
+            db_mod, "_http_get_json", lambda url, token, timeout=30: (self._PAYLOAD, None)
+        )
+        services, _ = db_mod.list_model_provider_services(WS, "token")
+        bedrock = next(s for s in services if s["name"] == "main.bob.bedrock-svc")
+        assert bedrock["targets"] == [
+            "us.anthropic.claude-sonnet-4-6",
+            "global.anthropic.claude-opus-4-8",
+        ]
+
+    def test_returns_reason_on_failure(self, monkeypatch):
+        monkeypatch.setattr(
+            db_mod, "_http_get_json", lambda url, token, timeout=30: (None, "HTTP 500 Server Error")
+        )
+        services, reason = db_mod.list_model_provider_services(WS, "token")
+        assert services == []
+        assert reason == "HTTP 500 Server Error"
+
+    def test_claude_includes_anthropic_and_usable_bedrock(self, monkeypatch):
+        monkeypatch.setattr(
+            db_mod, "_http_get_json", lambda url, token, timeout=30: (self._PAYLOAD, None)
+        )
+        names, reason = db_mod.list_tool_provider_services("claude", WS, "token")
+        assert reason is None
+        # Anthropic + the Bedrock service with Claude targets; the Bedrock service
+        # exposing only Titan is hidden (no Claude models to pin).
+        assert names == ["main.aarushi.anthropic-svc", "main.bob.bedrock-svc"]
+
+    def test_codex_filters_to_openai(self, monkeypatch):
+        monkeypatch.setattr(
+            db_mod, "_http_get_json", lambda url, token, timeout=30: (self._PAYLOAD, None)
+        )
+        names, _ = db_mod.list_tool_provider_services("codex", WS, "token")
+        assert names == ["main.aarushi.openai-svc"]
+
+
+class TestMapBedrockClaudeModels:
+    def test_maps_families(self):
+        models = db_mod.map_bedrock_claude_models(
+            [
+                "us.anthropic.claude-sonnet-4-6",
+                "global.anthropic.claude-opus-4-8",
+                "anthropic.claude-haiku-4-5",
+                "amazon.titan-text-express-v1",
+            ]
+        )
+        assert models == {
+            "sonnet": "us.anthropic.claude-sonnet-4-6",
+            "opus": "global.anthropic.claude-opus-4-8",
+            "haiku": "anthropic.claude-haiku-4-5",
+        }
+
+    def test_prefers_highest_version(self):
+        models = db_mod.map_bedrock_claude_models(
+            ["us.anthropic.claude-sonnet-4-5", "us.anthropic.claude-sonnet-4-6"]
+        )
+        assert models["sonnet"] == "us.anthropic.claude-sonnet-4-6"
+
+    def test_region_tie_break_prefers_global(self):
+        models = db_mod.map_bedrock_claude_models(
+            [
+                "us.anthropic.claude-opus-4-8",
+                "global.anthropic.claude-opus-4-8",
+                "eu.anthropic.claude-opus-4-8",
+            ]
+        )
+        assert models["opus"] == "global.anthropic.claude-opus-4-8"
+
+    def test_empty_when_no_claude(self):
+        assert db_mod.map_bedrock_claude_models(["amazon.titan-text-express-v1"]) == {}
+
+
+class TestResolveProviderService:
+    _PAYLOAD = TestListModelProviderServices._PAYLOAD
+
+    def _patch(self, monkeypatch):
+        monkeypatch.setattr(
+            db_mod, "_http_get_json", lambda url, token, timeout=30: (self._PAYLOAD, None)
+        )
+
+    def test_anthropic_ok(self, monkeypatch):
+        self._patch(monkeypatch)
+        service, error = db_mod.resolve_provider_service(
+            "claude", "main.aarushi.anthropic-svc", WS, "token"
+        )
+        assert error is None
+        assert service["provider_type"] == "anthropic"
+
+    def test_bedrock_with_claude_ok(self, monkeypatch):
+        self._patch(monkeypatch)
+        service, error = db_mod.resolve_provider_service(
+            "claude", "main.bob.bedrock-svc", WS, "token"
+        )
+        assert error is None
+        assert service["provider_type"] == "amazon_bedrock"
+
+    def test_wrong_type_rejected(self, monkeypatch):
+        self._patch(monkeypatch)
+        service, error = db_mod.resolve_provider_service(
+            "claude", "main.aarushi.openai-svc", WS, "token"
+        )
+        assert service is None
+        assert "can't route to" in error
+
+    def test_bedrock_without_claude_rejected(self, monkeypatch):
+        self._patch(monkeypatch)
+        service, error = db_mod.resolve_provider_service(
+            "claude", "main.bob.bedrock-titan-svc", WS, "token"
+        )
+        assert service is None
+        assert "no Claude models" in error
+
+    def test_not_found_lists_usable(self, monkeypatch):
+        self._patch(monkeypatch)
+        service, error = db_mod.resolve_provider_service("claude", "main.x.missing", WS, "token")
+        assert service is None
+        assert "was not found" in error
+        assert "main.aarushi.anthropic-svc" in error
+
+    def test_feature_unavailable(self, monkeypatch):
+        reason = "HTTP 400 Bad Request: ModelProviderService feature is not available"
+        monkeypatch.setattr(db_mod, "_http_get_json", lambda url, token, timeout=30: (None, reason))
+        service, error = db_mod.resolve_provider_service("claude", "main.x.y", WS, "token")
+        assert service is None
+        assert "not available" in error
+
+
+class TestModelProviderFeatureUnavailable:
+    def test_detects_feature_not_available(self):
+        reason = (
+            'HTTP 400 Bad Request: {"error_code":"BAD_REQUEST",'
+            '"message":"ModelProviderService feature is not available"}'
+        )
+        assert db_mod.is_model_provider_feature_unavailable(reason) is True
+
+    def test_false_for_other_errors(self):
+        assert db_mod.is_model_provider_feature_unavailable("HTTP 500 Server Error") is False
+        assert db_mod.is_model_provider_feature_unavailable(None) is False
+
+
 class TestListMcpServices:
     def test_accepts_entries_without_connection_status(self, monkeypatch):
         payload = {

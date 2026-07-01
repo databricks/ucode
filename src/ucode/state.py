@@ -200,3 +200,30 @@ def mark_tool_managed(state: dict, tool: str, managed_keys: list) -> dict:
     state["managed_configs"] = managed_configs
     state["last_tool"] = tool
     return state
+
+
+def get_provider_service(state: dict, tool: str) -> str | None:
+    """Return the persisted Model Provider Service for ``tool``, if any.
+
+    Launches route through this provider (skipping Databricks model pinning)
+    unless overridden by an explicit ``--provider`` flag.
+    """
+    providers = state.get("provider_services")
+    if not isinstance(providers, dict):
+        return None
+    name = providers.get(tool)
+    return name if isinstance(name, str) and name else None
+
+
+def set_provider_service(state: dict, tool: str, full_name: str | None) -> dict:
+    """Persist (or clear, when ``full_name`` is None) ``tool``'s provider service."""
+    providers = dict(state.get("provider_services") or {})
+    if full_name:
+        providers[tool] = full_name
+    else:
+        providers.pop(tool, None)
+    if providers:
+        state["provider_services"] = providers
+    else:
+        state.pop("provider_services", None)
+    return state

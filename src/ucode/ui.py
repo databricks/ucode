@@ -266,6 +266,32 @@ def prompt_for_tools(available: list[tuple[str, str]]) -> list[str]:
     return list(answer) if answer else []
 
 
+def prompt_for_selection(prompt: str, options: list[tuple[str, str]]) -> str | None:
+    """Single-select arrow-key picker. `options` is [(value, label), ...].
+
+    The prompt renders above the choices (questionary convention). Returns the
+    chosen value, or None if the user cancels (Ctrl-C / empty).
+    """
+    style = questionary.Style(
+        [
+            ("pointer", "fg:cyan bold"),
+            ("highlighted", "noinherit"),
+            ("selected", "noinherit"),
+            ("answer", "fg:cyan"),
+        ]
+    )
+    choices = [questionary.Choice(title=label, value=value) for value, label in options]
+    answer = questionary.select(
+        prompt,
+        choices=choices,
+        style=style,
+        pointer="›",
+        qmark="",
+        instruction="(use arrow keys)",
+    ).ask()
+    return answer
+
+
 def prompt_yes_no(prompt: str) -> bool:
     while True:
         response = console.input(f"{label(prompt)} {muted('(y/n)')} {muted('›')} ").strip().lower()

@@ -1290,6 +1290,208 @@ def build_mcp_service_url(workspace: str, full_name: str) -> str:
     return f"{workspace}/ai-gateway/mcp-services/{full_name}"
 
 
+# Maps the gateway routing dialect a coding tool speaks to the Model Provider
+# Service `provider_type`s it can be backed by. claude speaks Anthropic's API,
+# which both the `anthropic` and `amazon_bedrock` provider types serve (Bedrock
+# just exposes different model ids); codex speaks OpenAI's. Tags are the short
+# form produced by `_provider_type_tag` (e.g. `amazon_bedrock`).
+_TOOL_PROVIDER_TYPES: dict[str, tuple[str, ...]] = {
+    "claude": ("anthropic", "amazon_bedrock"),
+    "codex": ("openai",),
+}
+
+# Provider types that expose Bedrock-style model ids (e.g.
+# `us.anthropic.claude-sonnet-4-6`) instead of the agent's canonical model
+# names, so ucode must pin them explicitly.
+BEDROCK_PROVIDER_TYPES: tuple[str, ...] = ("amazon_bedrock",)
+
+
+def tool_supports_provider_type(tool: str, provider_type: str) -> bool:
+    """True when ``tool``'s API dialect can be backed by ``provider_type``."""
+    return provider_type in _TOOL_PROVIDER_TYPES.get(tool, ())
+
+
+def _provider_type_tag(provider_type: str | None) -> str:
+    """Shorten `EXTERNAL_MODEL_PROVIDER_TYPE_ANTHROPIC` to `anthropic`."""
+    if not isinstance(provider_type, str):
+        return ""
+    prefix = "EXTERNAL_MODEL_PROVIDER_TYPE_"
+    tag = provider_type[len(prefix) :] if provider_type.startswith(prefix) else provider_type
+    return tag.lower()
+
+
+def list_model_provider_services(workspace: str, token: str) -> tuple[list[dict], str | None]:
+    """List Unity Catalog Model Provider Services on the workspace.
+
+    Returns ``(services, reason)`` where each service is
+    ``{"name": "<catalog>.<schema>.<service>", "provider_type": "anthropic"|...,
+    "targets": [model_id, ...], "allow_all_targets": bool}``. ``targets`` is the
+    provider-side model ids the service exposes (used to pin Bedrock model
+    names). A non-None ``reason`` means the listing call itself failed.
+    """
+    hostname = workspace_hostname(workspace)
+    url = f"https://{hostname}/api/2.1/unity-catalog/model-provider-services"
+    payload, reason = _http_get_json(url, token, timeout=30)
+    if payload is None:
+        return [], reason
+    data = cast(dict, payload) if isinstance(payload, dict) else {}
+    services: list[dict] = []
+    for service in data.get("model_provider_services") or []:
+        if not isinstance(service, dict):
+            continue
+        raw_name = service.get("name")
+        if not isinstance(raw_name, str) or not raw_name:
+            continue
+        # The API returns `model-provider-services/<catalog>.<schema>.<name>`.
+        full_name = raw_name.split("/", 1)[1] if "/" in raw_name else raw_name
+        config = service.get("config") if isinstance(service.get("config"), dict) else {}
+        targets = []
+        for target in config.get("targets") or []:
+            model_id = target.get("model") if isinstance(target, dict) else None
+            if isinstance(model_id, str) and model_id:
+                targets.append(model_id)
+        services.append(
+            {
+                "name": full_name,
+                "provider_type": _provider_type_tag(config.get("provider_type")),
+                "targets": targets,
+                "allow_all_targets": bool(config.get("allow_all_targets")),
+            }
+        )
+    services.sort(key=lambda s: s["name"])
+    return services, None
+
+
+def is_model_provider_feature_unavailable(reason: str | None) -> bool:
+    """True when a model-provider-services API failure means the workspace
+    simply hasn't enabled the feature (HTTP 400 "feature is not available"),
+    as opposed to a transient or auth error. Callers use this to fall back to
+    Databricks models silently rather than surfacing a scary error.
+    """
+    return bool(reason) and "feature is not available" in reason.lower()
+
+
+def list_tool_provider_services(
+    tool: str, workspace: str, token: str
+) -> tuple[list[str], str | None]:
+    """Provider-service names whose provider type matches ``tool``'s API dialect.
+
+    Returns ``(names, reason)``; ``reason`` is non-None when the listing failed.
+    """
+    services, reason = list_model_provider_services(workspace, token)
+    if reason is not None:
+        return [], reason
+    names = [s["name"] for s in services if service_usable_for_tool(tool, s)]
+    return names, None
+
+
+def service_usable_for_tool(tool: str, service: dict) -> bool:
+    """True when ``tool`` can actually route through ``service``.
+
+    Beyond the provider-type match, a Bedrock service is only usable for claude
+    if it exposes at least one Claude model in its targets — otherwise there's no
+    routable model id to pin. (Anthropic services use canonical names, so any
+    match is usable.)
+    """
+    provider_type = service.get("provider_type", "")
+    if not tool_supports_provider_type(tool, provider_type):
+        return False
+    if provider_type in BEDROCK_PROVIDER_TYPES:
+        return bool(map_bedrock_claude_models(service.get("targets") or []))
+    return True
+
+
+def resolve_provider_service(
+    tool: str, service_name: str, workspace: str, token: str
+) -> tuple[dict | None, str | None]:
+    """Validate that ``service_name`` exists and is usable by ``tool``.
+
+    Returns ``(service, error)``. On success ``service`` is the full service
+    dict (``name``/``provider_type``/``targets``/``allow_all_targets``) and
+    ``error`` is None. On failure ``service`` is None and ``error`` is an
+    actionable message: the feature is off, the listing failed, the service
+    doesn't exist, or its provider type isn't one ``tool`` can route to (e.g.
+    pointing claude at an OpenAI service).
+    """
+    services, reason = list_model_provider_services(workspace, token)
+    if is_model_provider_feature_unavailable(reason):
+        return None, "Model Provider Service feature is not available yet for this workspace."
+    if reason is not None:
+        return None, f"Could not list model provider services: {reason}"
+    match = next((s for s in services if s["name"] == service_name), None)
+    if match is None:
+        usable = [
+            s["name"] for s in services if tool_supports_provider_type(tool, s["provider_type"])
+        ]
+        suffix = f" Available for {tool}: {', '.join(usable)}." if usable else ""
+        return None, f"Model provider service '{service_name}' was not found.{suffix}"
+    provider_type = match["provider_type"]
+    if not tool_supports_provider_type(tool, provider_type):
+        supported = ", ".join(_TOOL_PROVIDER_TYPES.get(tool, ())) or "none"
+        return None, (
+            f"Model provider service '{service_name}' is a '{provider_type}' provider, "
+            f"which {tool} can't route to (supported: {supported})."
+        )
+    if provider_type in BEDROCK_PROVIDER_TYPES and not map_bedrock_claude_models(
+        match.get("targets") or []
+    ):
+        return None, (
+            f"Model provider service '{service_name}' exposes no Claude models — "
+            f"add Claude targets to it or pick a different service."
+        )
+    return match, None
+
+
+# Bedrock exposes Claude under provider-side ids like
+# `us.anthropic.claude-sonnet-4-6`, `global.anthropic.claude-opus-4-8`, or the
+# region-less `anthropic.claude-opus-4-8`. We map each service target to a
+# Claude family and keep the best id per family. Claude Code only takes one
+# default per family; users switch to any other listed region profile at runtime
+# with `/model <full-id>` or `--model`.
+_BEDROCK_CLAUDE_FAMILIES = ("opus", "sonnet", "haiku")
+# When the same model/version is offered under several cross-region inference
+# profiles, prefer the broadest-routing one as the pinned default.
+_BEDROCK_REGION_RANK = {"global": 5, "us": 4, "eu": 3, "apac": 2, "": 1}
+
+
+def _bedrock_target_family(model_id: str) -> str | None:
+    lowered = model_id.lower()
+    if "claude" not in lowered:
+        return None
+    return next((fam for fam in _BEDROCK_CLAUDE_FAMILIES if fam in lowered), None)
+
+
+def _bedrock_region_rank(model_id: str) -> int:
+    """Rank a target's cross-region inference profile (`us.`/`eu.`/`global.`/
+    region-less) so ties on model version resolve deterministically."""
+    head = model_id.lower().split("anthropic.", 1)[0].rstrip(".")
+    return _BEDROCK_REGION_RANK.get(head, 0)
+
+
+def _bedrock_sort_key(model_id: str) -> tuple:
+    """Order targets best-first: highest model version, then preferred region."""
+    version = tuple(int(n) for n in re.findall(r"\d+", model_id))
+    return (version, _bedrock_region_rank(model_id))
+
+
+def map_bedrock_claude_models(targets: list[str]) -> dict[str, str]:
+    """Map Bedrock service targets to ``{family: model_id}`` for opus/sonnet/
+    haiku, choosing the highest-versioned id per family and, on a version tie,
+    the broadest-routing region profile. Targets that don't name a Claude family
+    are ignored."""
+    best_key: dict[str, tuple] = {}
+    result: dict[str, str] = {}
+    for model_id in targets:
+        family = _bedrock_target_family(model_id)
+        if not family:
+            continue
+        key = _bedrock_sort_key(model_id)
+        if family not in best_key or key > best_key[family]:
+            best_key[family] = key
+            result[family] = model_id
+    return result
+
+
 # `list_vector_search_catalog_schemas` walks Vector Search endpoints+indexes.
 # `list_uc_functions_catalog_schemas` walks UC catalogs+schemas in parallel and
 # keeps only schemas with at least one user function.

@@ -125,28 +125,39 @@ def _web_search_mcp_entry(workspace: str, search_model: str, profile: str | None
 
 def render_overlay(
     workspace: str,
-    model: str,
+    model: str | None,
     claude_models: dict[str, str] | None = None,
     disable_web_search: bool = False,
     profile: str | None = None,
     use_pat: bool = False,
+    provider: str | None = None,
+    provider_models: dict[str, str] | None = None,
 ) -> tuple[dict, list[list[str]]]:
     """Return (overlay, managed_key_paths) for Claude settings.json.
 
     NOTE: MCP servers are NOT written here. Claude Code reads `mcpServers`
     from `~/.claude.json`, not `~/.claude/settings.json` — registration goes
-    through `claude mcp add-json` (see `_register_web_search_mcp`)."""
+    through `claude mcp add-json` (see `_register_web_search_mcp`).
+
+    When `provider` is set (a `<catalog>.<schema>.<name>` Model Provider
+    Service), the request is routed to that external provider via the
+    `Databricks-Model-Provider-Service` header. An Anthropic-backed provider
+    understands Claude Code's own canonical model names, so no model id is
+    pinned. A Bedrock-backed provider exposes different model ids (e.g.
+    `us.anthropic.claude-sonnet-4-6`), passed in `provider_models` by family —
+    those get pinned via the `ANTHROPIC_DEFAULT_*_MODEL` env vars."""
     base_url = build_tool_base_url("claude", workspace)
     # ANTHROPIC_CUSTOM_HEADERS is parsed as `key: value` pairs separated by
     # newlines (Anthropic SDK convention). Setting User-Agent here overrides
     # the SDK's default UA on outbound requests so the gateway can attribute
     # traffic to ucode.
-    custom_headers = "\n".join(
-        [
-            "x-databricks-use-coding-agent-mode: true",
-            f"User-Agent: ucode/{ucode_version()} claude/{agent_version('claude')}",
-        ]
-    )
+    header_lines = [
+        "x-databricks-use-coding-agent-mode: true",
+        f"User-Agent: ucode/{ucode_version()} claude/{agent_version('claude')}",
+    ]
+    if provider:
+        header_lines.append(f"Databricks-Model-Provider-Service: {provider}")
+    custom_headers = "\n".join(header_lines)
     env: dict[str, str] = {
         "ANTHROPIC_BASE_URL": base_url,
         "ANTHROPIC_CUSTOM_HEADERS": custom_headers,
@@ -160,7 +171,21 @@ def render_overlay(
     # only one row per model. `ucode claude -- --model X` still overrides for a
     # single session via Claude Code's own --model flag.
     _ = model  # API stability; no longer pinned via env.
-    if claude_models:
+    # A Bedrock-backed provider needs its provider-side ids pinned verbatim
+    # (Claude Code's canonical names aren't routable there). These come from the
+    # service's targets, already de-duped to one id per family upstream.
+    if provider and provider_models:
+        if provider_models.get("opus"):
+            env["ANTHROPIC_DEFAULT_OPUS_MODEL"] = provider_models["opus"]
+        if provider_models.get("sonnet"):
+            env["ANTHROPIC_DEFAULT_SONNET_MODEL"] = provider_models["sonnet"]
+        if provider_models.get("haiku"):
+            env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = provider_models["haiku"]
+    # With an Anthropic Model Provider Service, the header routes to the external
+    # provider and Claude Code's own canonical model names are sent verbatim —
+    # pinning a Databricks model id here would mislabel the picker and isn't
+    # routable.
+    elif claude_models and not provider:
         # Picker rows show the raw routable id (e.g. "system.ai.claude-opus-4-8[1m]")
         # so users can see which gateway-routable model is behind each shortcut.
         # We deliberately don't set the `_NAME` companion env vars — the raw id
@@ -244,7 +269,12 @@ def _unregister_web_search_mcp() -> None:
             pass
 
 
-def write_tool_config(state: dict, model: str) -> dict:
+def write_tool_config(
+    state: dict,
+    model: str | None,
+    provider: str | None = None,
+    provider_models: dict[str, str] | None = None,
+) -> dict:
     backup_existing_file(CLAUDE_SETTINGS_PATH, CLAUDE_BACKUP_PATH)
     web_search_model = _resolve_web_search_model(state)
     overlay, managed_keys = render_overlay(
@@ -254,6 +284,8 @@ def write_tool_config(state: dict, model: str) -> dict:
         disable_web_search=web_search_model is not None,
         profile=state.get("profile"),
         use_pat=bool(state.get("use_pat")),
+        provider=provider,
+        provider_models=provider_models,
     )
     tracing_env_vars = tracing_env(state, "claude")
     stop_hook_command = claude_tracing_stop_hook_command() if tracing_env_vars else None
