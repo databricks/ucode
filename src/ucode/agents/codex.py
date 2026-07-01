@@ -64,9 +64,6 @@ _GPT_RE = re.compile(r"(?:databricks-)?gpt-(\d+)(?:[.-](\d+))?(?:[.-](\d+))?(-.+
 CODEX_OPENAI_ID_INCOMPATIBLE_MODELS = {
     "databricks-gpt-5-2-codex",
     "databricks-gpt-5-4-nano",
-    "databricks-gpt-5-6-luna",
-    "databricks-gpt-5-6-sol",
-    "databricks-gpt-5-6-terra",
 }
 
 

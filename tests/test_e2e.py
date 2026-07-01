@@ -366,6 +366,11 @@ class TestCodexLaunch:
     CODEX_INCOMPATIBLE_MODEL_FRAGMENTS = (
         # nano endpoint is unreliably slow and times out past the 60s budget.
         "gpt-5-4-nano",
+        # These endpoints are discoverable as responses-capable, but the
+        # backing OpenAI endpoint returns ENDPOINT_NOT_FOUND in the CI region.
+        "gpt-5-6-luna",
+        "gpt-5-6-sol",
+        "gpt-5-6-terra",
     )
 
     def _codex_models(self, e2e_state: dict) -> list[str]:
