@@ -387,8 +387,12 @@ class TestCodexLaunch:
         models = self._codex_models(e2e_state)
 
         monkeypatch.setattr(config_io_mod, "APP_DIR", tmp_path)
-        config_dir = tmp_path / "codex_home" / ".codex"
-        config_dir.mkdir(parents=True)
+        # Codex CLI refuses to create helper binaries when CODEX_HOME is under
+        # /tmp, so place the codex home outside the pytest tmp_path.
+        codex_home = tmp_path.parent / "e2e_codex_home"
+        codex_home.mkdir(parents=True, exist_ok=True)
+        config_dir = codex_home / ".codex"
+        config_dir.mkdir(parents=True, exist_ok=True)
         config_path = config_dir / "ucode.config.toml"
         backup_path = tmp_path / "codex-config.backup.toml"
         monkeypatch.setattr(codex, "CODEX_CONFIG_PATH", config_path)
@@ -673,6 +677,8 @@ class TestCopilotLaunch:
         # gpt-5.5 rejects function tools + reasoning_effort on /chat/completions
         # ("Please use /v1/responses instead").
         "gpt-5-5",
+        # gpt-5.6 models similarly reject /chat/completions with 404.
+        "gpt-5-6",
     )
 
     def _all_models(self, e2e_state: dict) -> list[tuple[str, str]]:
