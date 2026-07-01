@@ -304,7 +304,7 @@ def check_gateway_endpoint(state: dict, tool: str) -> bool:
 
 _TOOL_DISCOVERY_SOURCES: dict[str, tuple[str, ...]] = {
     "claude": ("claude",),
-    "opencode": ("claude", "gemini"),
+    "opencode": ("claude", "gemini", "oss"),
     "codex": ("codex",),
     "gemini": ("gemini",),
     "copilot": ("claude", "codex"),

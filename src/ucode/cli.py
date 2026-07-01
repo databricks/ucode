@@ -76,6 +76,7 @@ _DISCOVERY_CONSUMERS: dict[str, tuple[str, ...]] = {
     "claude": ("claude", "opencode", "copilot", "pi"),
     "codex": ("codex", "copilot", "pi"),
     "gemini": ("gemini", "opencode", "pi"),
+    "oss": ("opencode",),
 }
 
 
@@ -85,7 +86,12 @@ def _print_discovery_diagnostics(state: dict) -> None:
     reasons = state.get("_discovery_reasons") or {}
     if not reasons:
         return
-    labels = {"claude": "Claude models", "codex": "Codex models", "gemini": "Gemini models"}
+    labels = {
+        "claude": "Claude models",
+        "codex": "Codex models",
+        "gemini": "Gemini models",
+        "oss": "OSS models",
+    }
     for source, reason in reasons.items():
         consumers = ", ".join(_DISCOVERY_CONSUMERS.get(source, ()))
         label = labels.get(source, source)
@@ -252,19 +258,24 @@ def configure_shared_state(
     )
     want_gemini = fetch_all or "gemini" in tools or "opencode" in tools or "pi" in tools
     want_codex = fetch_all or "codex" in tools or "copilot" in tools or "pi" in tools
+    want_oss = fetch_all or "opencode" in tools
 
     claude_reason: str | None = None
     gemini_reason: str | None = None
     codex_reason: str | None = None
+    oss_reason: str | None = None
     claude_models = {}
     gemini_models = []
     codex_models = []
+    oss_models = []
     # UC-first, best-effort: one UC model-services call yields all families as
     # `system.ai.<model-name>` ids, bucketed by name. If a family comes back
     # empty (workspace without UC model-services, or the listing failed), fall
     # back to the per-family AI Gateway listing for that family only.
     with spinner("Fetching available models..."):
-        ms_claude, ms_codex, ms_gemini, ms_reason = discover_model_services(workspace, token)
+        ms_claude, ms_codex, ms_gemini, ms_oss, ms_reason = discover_model_services(
+            workspace, token
+        )
         if want_claude:
             claude_models, claude_reason = ms_claude, ms_reason
             if not claude_models:
@@ -277,11 +288,15 @@ def configure_shared_state(
             codex_models, codex_reason = ms_codex, ms_reason
             if not codex_models:
                 codex_models, codex_reason = discover_codex_models(workspace, token)
+        if want_oss:
+            oss_models, oss_reason = ms_oss, ms_reason
     opencode_models: dict[str, list[str]] = {}
     if claude_models:
         opencode_models["anthropic"] = list(claude_models.values())
     if gemini_models:
         opencode_models["gemini"] = gemini_models
+    if oss_models:
+        opencode_models["oss"] = oss_models
 
     # Merge into existing workspace state so prior tool configs are preserved.
     state = load_state()
@@ -305,6 +320,8 @@ def configure_shared_state(
         state["gemini_models"] = gemini_models
     if want_codex:
         state["codex_models"] = codex_models
+    if want_oss:
+        state["oss_models"] = oss_models
     if fetch_all or "opencode" in tools:
         state["opencode_models"] = opencode_models
     save_state(state)
@@ -318,6 +335,7 @@ def configure_shared_state(
         "claude": claude_reason,
         "gemini": gemini_reason,
         "codex": codex_reason,
+        "oss": oss_reason,
     }
     return state
 

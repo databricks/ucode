@@ -1012,7 +1012,7 @@ class TestConfigureSharedStateUsePat:
         monkeypatch.setattr(cli_mod, "find_profile_name_for_host", lambda w: None)
         monkeypatch.setattr(cli_mod, "get_databricks_token", lambda w, p: "token")
         monkeypatch.setattr(cli_mod, "ensure_ai_gateway_v2", lambda w, t: None)
-        monkeypatch.setattr(cli_mod, "discover_model_services", lambda w, t: ({}, [], [], None))
+        monkeypatch.setattr(cli_mod, "discover_model_services", lambda w, t: ({}, [], [], [], None))
         monkeypatch.setattr(cli_mod, "discover_claude_models", lambda w, t: ({}, None))
         monkeypatch.setattr(cli_mod, "discover_gemini_models", lambda w, t: ([], None))
         monkeypatch.setattr(cli_mod, "discover_codex_models", lambda w, t: ([], None))
@@ -1084,7 +1084,13 @@ class TestConfigureSharedStateUsePat:
         monkeypatch.setattr(
             cli_mod,
             "discover_model_services",
-            lambda w, t: ({"opus": "system.ai.claude-opus-4-8"}, ["system.ai.gpt-5"], [], None),
+            lambda w, t: (
+                {"opus": "system.ai.claude-opus-4-8"},
+                ["system.ai.gpt-5"],
+                [],
+                [],
+                None,
+            ),
         )
         legacy_called: list[str] = []
         monkeypatch.setattr(
@@ -1104,7 +1110,7 @@ class TestConfigureSharedStateUsePat:
         # No UC model-services: each family falls back to the legacy listing.
         cli_mod, *_ = self._stub_deps(monkeypatch, pat_token="dapi-pat")
         monkeypatch.setattr(
-            cli_mod, "discover_model_services", lambda w, t: ({}, [], [], "no model services")
+            cli_mod, "discover_model_services", lambda w, t: ({}, [], [], [], "no model services")
         )
         monkeypatch.setattr(
             cli_mod,
@@ -1182,7 +1188,7 @@ class TestConfigureSharedStateMcpCleanup:
         monkeypatch.setattr(cli_mod, "find_profile_name_for_host", lambda w: None)
         monkeypatch.setattr(cli_mod, "get_databricks_token", lambda w, p: "token")
         monkeypatch.setattr(cli_mod, "ensure_ai_gateway_v2", lambda w, t: None)
-        monkeypatch.setattr(cli_mod, "discover_model_services", lambda w, t: ({}, [], [], None))
+        monkeypatch.setattr(cli_mod, "discover_model_services", lambda w, t: ({}, [], [], [], None))
         monkeypatch.setattr(cli_mod, "discover_claude_models", lambda w, t: ({}, None))
         monkeypatch.setattr(cli_mod, "discover_gemini_models", lambda w, t: ([], None))
         monkeypatch.setattr(cli_mod, "discover_codex_models", lambda w, t: ([], None))

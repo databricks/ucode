@@ -94,10 +94,11 @@ class TestBuildToolBaseUrl:
 
 
 class TestBuildOpencodeBaseUrls:
-    def test_returns_anthropic_and_gemini(self):
+    def test_returns_anthropic_gemini_and_oss(self):
         urls = build_opencode_base_urls(WS)
         assert urls["anthropic"] == f"{WS}/ai-gateway/anthropic/v1"
         assert urls["gemini"] == f"{WS}/ai-gateway/gemini/v1beta"
+        assert urls["oss"] == f"{WS}/ai-gateway/mlflow/v1"
 
 
 class TestBuildSharedBaseUrls:
@@ -149,6 +150,7 @@ class TestDiscoverModelServices:
                 _model_service("system.ai.gpt-5"),
                 _model_service("system.ai.gemini-2-5-flash"),
                 _model_service("system.ai.gemini-3-5-flash"),
+                _model_service("system.ai.kimi-k2-7-code"),
                 _model_service("system.ai.llama-4-maverick"),
             ]
         }
@@ -156,7 +158,7 @@ class TestDiscoverModelServices:
             db_mod, "_http_get_json", lambda url, token, timeout=10: (payload, None)
         )
 
-        claude, codex, gemini, reason = db_mod.discover_model_services(WS, "token")
+        claude, codex, gemini, oss, reason = db_mod.discover_model_services(WS, "token")
 
         assert reason is None
         # Newest opus wins; sonnet bucketed; haiku absent.
@@ -167,8 +169,9 @@ class TestDiscoverModelServices:
         assert codex == ["system.ai.gpt-5"]
         # Gemini ordered newest-first via the shared sort key.
         assert gemini[0] == "system.ai.gemini-3-5-flash"
-        # llama is not bucketed into any of the three families.
-        assert "system.ai.llama-4-maverick" not in codex + gemini
+        assert oss == ["system.ai.kimi-k2-7-code"]
+        # llama is not bucketed into any of the four families.
+        assert "system.ai.llama-4-maverick" not in codex + gemini + oss
 
     def test_paginates_via_next_page_token(self, monkeypatch):
         pages = {
@@ -189,7 +192,7 @@ class TestDiscoverModelServices:
 
         monkeypatch.setattr(db_mod, "_http_get_json", fake_get)
 
-        claude, codex, _, reason = db_mod.discover_model_services(WS, "token")
+        claude, codex, _, _, reason = db_mod.discover_model_services(WS, "token")
 
         assert reason is None
         assert codex == ["system.ai.gpt-5"]
@@ -200,9 +203,9 @@ class TestDiscoverModelServices:
             db_mod, "_http_get_json", lambda url, token, timeout=10: (None, "HTTP 500 Server Error")
         )
 
-        claude, codex, gemini, reason = db_mod.discover_model_services(WS, "token")
+        claude, codex, gemini, oss, reason = db_mod.discover_model_services(WS, "token")
 
-        assert (claude, codex, gemini) == ({}, [], [])
+        assert (claude, codex, gemini, oss) == ({}, [], [], [])
         assert reason == "HTTP 500 Server Error"
 
     def test_no_matching_families_reports_sample(self, monkeypatch):
@@ -211,9 +214,9 @@ class TestDiscoverModelServices:
             db_mod, "_http_get_json", lambda url, token, timeout=10: (payload, None)
         )
 
-        claude, codex, gemini, reason = db_mod.discover_model_services(WS, "token")
+        claude, codex, gemini, oss, reason = db_mod.discover_model_services(WS, "token")
 
-        assert (claude, codex, gemini) == ({}, [], [])
+        assert (claude, codex, gemini, oss) == ({}, [], [], [])
         assert reason is not None and "llama-4-maverick" in reason
 
     def test_ignores_non_system_ai_schemas(self, monkeypatch):
@@ -223,6 +226,7 @@ class TestDiscoverModelServices:
             "model_services": [
                 _model_service("system.ai.gpt-5"),
                 _model_service("main.svenwb.gpt-5-5"),
+                _model_service("temp.erni.kimi-k2-7-code"),
                 _model_service("temp.erni.claude-opus-4-8"),
                 _model_service("dnasi_agent_cuj.default.dnasi-gpt55-test"),
             ]
@@ -231,12 +235,13 @@ class TestDiscoverModelServices:
             db_mod, "_http_get_json", lambda url, token, timeout=10: (payload, None)
         )
 
-        claude, codex, gemini, reason = db_mod.discover_model_services(WS, "token")
+        claude, codex, gemini, oss, reason = db_mod.discover_model_services(WS, "token")
 
         assert reason is None
         assert codex == ["system.ai.gpt-5"]
         assert claude == {}  # temp.erni.claude-* must not be bucketed
         assert gemini == []
+        assert oss == []
 
     def test_requests_bounded_page_size(self, monkeypatch):
         # The endpoint 499s without a bounded page_size, so every request must

@@ -1193,15 +1193,16 @@ def list_model_services(
 
 def discover_model_services(
     workspace: str, token: str
-) -> tuple[dict[str, str], list[str], list[str], str | None]:
+) -> tuple[dict[str, str], list[str], list[str], list[str], str | None]:
     """Discover models via UC model-services and bucket them by family name.
 
-    Returns (claude_models, codex_models, gemini_models, reason):
+    Returns (claude_models, codex_models, gemini_models, oss_models, reason):
 
     - ``claude_models`` maps ``opus``/``sonnet``/``haiku`` to the newest
       matching ``system.ai.claude-*`` id (mirrors ``discover_claude_models``).
     - ``codex_models`` is the list of ``system.ai.*gpt-*`` ids.
     - ``gemini_models`` is the list of ``system.ai.*gemini-*`` ids, newest first.
+    - ``oss_models`` is the list of OSS-model ``system.ai.*`` ids.
 
     ``reason`` is None on success, else explains why nothing was found. Family
     bucketing is by name substring because the model-services API does not
@@ -1209,7 +1210,7 @@ def discover_model_services(
     """
     ids, reason = list_model_services(workspace, token)
     if not ids:
-        return {}, [], [], reason
+        return {}, [], [], [], reason
 
     claude_models: dict[str, str] = {}
     for family in ("opus", "sonnet", "haiku"):
@@ -1222,19 +1223,21 @@ def discover_model_services(
 
     codex_models = [m for m in ids if "gpt-" in m]
     gemini_models = sorted([m for m in ids if "gemini-" in m], key=model_version_sort_key)
+    oss_models = [m for m in ids if "kimi-" in m]
 
-    if not (claude_models or codex_models or gemini_models):
+    if not (claude_models or codex_models or gemini_models or oss_models):
         sample = ", ".join(ids[:5])
         return (
             {},
             [],
             [],
+            [],
             (
                 "model-services returned model ids but none matched "
-                f"claude/gpt/gemini families (got: {sample})"
+                f"claude/gpt/gemini/oss families (got: {sample})"
             ),
         )
-    return claude_models, codex_models, gemini_models, None
+    return claude_models, codex_models, gemini_models, oss_models, None
 
 
 # --- MCP services (parallel to model services) -----------------------------
@@ -1879,6 +1882,7 @@ def build_opencode_base_urls(workspace: str) -> dict[str, str]:
     return {
         "anthropic": build_tool_base_url("claude", workspace) + "/v1",
         "gemini": build_tool_base_url("gemini", workspace) + "/v1beta",
+        "oss": f"{workspace}/ai-gateway/mlflow/v1",
     }
 
 

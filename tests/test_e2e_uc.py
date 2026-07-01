@@ -23,14 +23,15 @@ from ucode.state import load_state
 
 
 def _has_uc_models(workspace: str, token: str) -> bool:
-    claude, codex, gemini, _reason = discover_model_services(workspace, token)
-    return bool(claude or codex or gemini)
+    claude, codex, gemini, oss, _reason = discover_model_services(workspace, token)
+    return bool(claude or codex or gemini or oss)
 
 
 def _all_resolved_model_ids(state: dict) -> list[str]:
     ids: list[str] = list((state.get("claude_models") or {}).values())
     ids += state.get("codex_models") or []
     ids += state.get("gemini_models") or []
+    ids += state.get("oss_models") or []
     return ids
 
 
@@ -42,14 +43,19 @@ def _all_resolved_model_ids(state: dict) -> list[str]:
 
 class TestDiscoverModelServicesE2E:
     def test_returns_only_system_ai_models(self, e2e_workspace, e2e_token):
-        claude, codex, gemini, reason = discover_model_services(e2e_workspace, e2e_token)
-        if not (claude or codex or gemini):
+        claude, codex, gemini, oss, reason = discover_model_services(e2e_workspace, e2e_token)
+        if not (claude or codex or gemini or oss):
             pytest.skip(f"No system.ai.* model services on workspace: {reason}")
         non_system = sorted(
             {
                 m
                 for m in _all_resolved_model_ids(
-                    {"claude_models": claude, "codex_models": codex, "gemini_models": gemini}
+                    {
+                        "claude_models": claude,
+                        "codex_models": codex,
+                        "gemini_models": gemini,
+                        "oss_models": oss,
+                    }
                 )
                 if not m.startswith("system.ai.")
             }

@@ -1,4 +1,4 @@
-"""OpenCode agent: writes opencode.json with two Databricks-backed providers."""
+"""OpenCode agent: writes opencode.json with Databricks-backed providers."""
 
 from __future__ import annotations
 
@@ -41,6 +41,7 @@ SPEC: ToolSpec = {
 PROVIDER_KEYS: list[list[str]] = [
     ["provider", "databricks-anthropic"],
     ["provider", "databricks-google"],
+    ["provider", "databricks-oss"],
 ]
 
 
@@ -50,7 +51,7 @@ def is_update_available() -> tuple[str, str] | None:
 
 def _resolve_model_selector(model: str, opencode_models: dict[str, list[str]]) -> str:
     """Return an OpenCode model selector in provider/model form when possible."""
-    if model.startswith("databricks-anthropic/") or model.startswith("databricks-google/"):
+    if model.startswith(("databricks-anthropic/", "databricks-google/", "databricks-oss/")):
         return model
 
     anthropic_models = opencode_models.get("anthropic") or []
@@ -60,6 +61,10 @@ def _resolve_model_selector(model: str, opencode_models: dict[str, list[str]]) -
     gemini_models = opencode_models.get("gemini") or []
     if model in gemini_models:
         return f"databricks-google/{model}"
+
+    oss_models = opencode_models.get("oss") or []
+    if model in oss_models:
+        return f"databricks-oss/{model}"
 
     return model
 
@@ -82,6 +87,7 @@ def render_overlay(
 
     anthropic_models = opencode_models.get("anthropic") or []
     gemini_models = opencode_models.get("gemini") or []
+    oss_models = opencode_models.get("oss") or []
 
     providers: dict = {}
     keys: list[list[str]] = [["model"]]
@@ -116,6 +122,17 @@ def render_overlay(
             "models": {m: {"headers": ua_header} for m in gemini_models},
         }
         keys.append(["provider", "databricks-google"])
+    if oss_models:
+        providers["databricks-oss"] = {
+            "npm": "@ai-sdk/openai",
+            "options": {
+                "baseURL": opencode_base_urls["oss"],
+                "apiKey": token,
+                "headers": auth_headers,
+            },
+            "models": {m: {"headers": ua_header} for m in oss_models},
+        }
+        keys.append(["provider", "databricks-oss"])
 
     overlay: dict = {"model": _resolve_model_selector(model, opencode_models)}
     if providers:
@@ -147,7 +164,12 @@ def write_tool_config(
     existing = read_json_safe(OPENCODE_CONFIG_PATH)
     providers = existing.get("provider")
     if isinstance(providers, dict):
-        for stale in ("databricks-anthropic", "databricks-google", "databricks-openai"):
+        for stale in (
+            "databricks-anthropic",
+            "databricks-google",
+            "databricks-openai",
+            "databricks-oss",
+        ):
             providers.pop(stale, None)
     merged = deep_merge_dict(existing, overlay)
     write_json_file(OPENCODE_CONFIG_PATH, merged)
@@ -197,7 +219,10 @@ def default_model(state: dict) -> str | None:
     if anthropic:
         return anthropic[0]
     gemini = opencode_models.get("gemini") or []
-    return gemini[0] if gemini else None
+    if gemini:
+        return gemini[0]
+    oss = opencode_models.get("oss") or []
+    return oss[0] if oss else None
 
 
 def _refresh_token_once(state: dict, *, force_refresh: bool = False) -> str:

@@ -14,6 +14,7 @@ def _base_urls() -> dict[str, str]:
     return {
         "anthropic": f"{WS}/ai-gateway/anthropic/v1",
         "gemini": f"{WS}/ai-gateway/gemini/v1beta",
+        "oss": f"{WS}/ai-gateway/mlflow/v1",
     }
 
 
@@ -48,6 +49,20 @@ class TestRenderOverlay:
         overlay, _ = opencode.render_overlay("gemini-2", "tok", _base_urls(), models)
         assert "databricks-google" in overlay["provider"]
 
+    def test_oss_provider_added_when_models_present(self):
+        models = {"oss": ["system.ai.kimi-k2-7-code"]}
+        overlay, _ = opencode.render_overlay(
+            "system.ai.kimi-k2-7-code", "tok", _base_urls(), models
+        )
+        assert "databricks-oss" in overlay["provider"]
+
+    def test_oss_provider_uses_ai_sdk_openai_package(self):
+        models = {"oss": ["system.ai.kimi-k2-7-code"]}
+        overlay, _ = opencode.render_overlay(
+            "system.ai.kimi-k2-7-code", "tok", _base_urls(), models
+        )
+        assert overlay["provider"]["databricks-oss"]["npm"] == "@ai-sdk/openai"
+
     def test_both_providers_when_both_present(self):
         models = {"anthropic": ["claude-sonnet"], "gemini": ["gemini-2"]}
         overlay, _ = opencode.render_overlay("claude-sonnet", "tok", _base_urls(), models)
@@ -69,6 +84,14 @@ class TestRenderOverlay:
         overlay, _ = opencode.render_overlay("gemini-2", "tok", _base_urls(), models)
         options = overlay["provider"]["databricks-google"]["options"]
         assert options["baseURL"] == f"{WS}/ai-gateway/gemini/v1beta"
+
+    def test_oss_base_url(self):
+        models = {"oss": ["system.ai.kimi-k2-7-code"]}
+        overlay, _ = opencode.render_overlay(
+            "system.ai.kimi-k2-7-code", "tok", _base_urls(), models
+        )
+        options = overlay["provider"]["databricks-oss"]["options"]
+        assert options["baseURL"] == f"{WS}/ai-gateway/mlflow/v1"
 
     def test_token_in_api_key(self):
         models = {"anthropic": ["claude-sonnet"]}
@@ -134,6 +157,11 @@ class TestRenderOverlay:
         _, keys = opencode.render_overlay("gemini-2", "tok", _base_urls(), models)
         assert ["provider", "databricks-google"] in keys
 
+    def test_managed_keys_include_oss_provider(self):
+        models = {"oss": ["system.ai.kimi-k2-7-code"]}
+        _, keys = opencode.render_overlay("system.ai.kimi-k2-7-code", "tok", _base_urls(), models)
+        assert ["provider", "databricks-oss"] in keys
+
     def test_anthropic_models_listed(self):
         models = {"anthropic": ["claude-sonnet", "claude-haiku"]}
         overlay, _ = opencode.render_overlay("claude-sonnet", "tok", _base_urls(), models)
@@ -150,6 +178,13 @@ class TestRenderOverlay:
         models = {"anthropic": [], "gemini": ["gemini-2"]}
         overlay, _ = opencode.render_overlay("gemini-2", "tok", _base_urls(), models)
         assert overlay["model"] == "databricks-google/gemini-2"
+
+    def test_prefixes_oss_model_with_provider_id(self):
+        models = {"oss": ["system.ai.kimi-k2-7-code"]}
+        overlay, _ = opencode.render_overlay(
+            "system.ai.kimi-k2-7-code", "tok", _base_urls(), models
+        )
+        assert overlay["model"] == "databricks-oss/system.ai.kimi-k2-7-code"
 
 
 class TestMcpServerConfig:
@@ -267,6 +302,16 @@ class TestOpencodeDefaultModel:
     def test_falls_back_to_gemini(self):
         state = {"opencode_models": {"anthropic": [], "gemini": ["gemini-2"]}}
         assert opencode.default_model(state) == "gemini-2"
+
+    def test_falls_back_to_oss(self):
+        state = {
+            "opencode_models": {
+                "anthropic": [],
+                "gemini": [],
+                "oss": ["system.ai.kimi-k2-7-code"],
+            }
+        }
+        assert opencode.default_model(state) == "system.ai.kimi-k2-7-code"
 
     def test_returns_none_when_empty(self):
         assert opencode.default_model({}) is None
