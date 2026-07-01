@@ -110,6 +110,54 @@ class TestRenderOverlay:
         env = overlay["env"]
         assert "ANTHROPIC_DEFAULT_SONNET_MODEL" not in env
 
+    def test_provider_adds_routing_header(self):
+        overlay, _ = claude.render_overlay(WS, "s4", provider="main.aarushi.aarushi-claude")
+        assert (
+            "Databricks-Model-Provider-Service: main.aarushi.aarushi-claude"
+            in overlay["env"]["ANTHROPIC_CUSTOM_HEADERS"]
+        )
+
+    def test_provider_skips_model_pinning(self):
+        models = {
+            "opus": "databricks-claude-opus-4-7",
+            "sonnet": "databricks-claude-sonnet-4-6",
+            "haiku": "databricks-claude-haiku-4-6",
+        }
+        overlay, _ = claude.render_overlay(
+            WS, "s4", claude_models=models, provider="main.aarushi.aarushi-claude"
+        )
+        env = overlay["env"]
+        assert "ANTHROPIC_DEFAULT_OPUS_MODEL" not in env
+        assert "ANTHROPIC_DEFAULT_SONNET_MODEL" not in env
+        assert "ANTHROPIC_DEFAULT_HAIKU_MODEL" not in env
+
+    def test_no_provider_header_without_flag(self):
+        overlay, _ = claude.render_overlay(WS, "s4")
+        assert "Databricks-Model-Provider-Service" not in overlay["env"]["ANTHROPIC_CUSTOM_HEADERS"]
+
+    def test_bedrock_provider_pins_model_ids(self):
+        provider_models = {
+            "opus": "global.anthropic.claude-opus-4-8",
+            "sonnet": "us.anthropic.claude-sonnet-4-6",
+            "haiku": "anthropic.claude-haiku-4-5",
+        }
+        overlay, _ = claude.render_overlay(
+            WS,
+            None,
+            provider="main.bob.bedrock-svc",
+            provider_models=provider_models,
+        )
+        env = overlay["env"]
+        assert env["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "global.anthropic.claude-opus-4-8"
+        assert env["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "us.anthropic.claude-sonnet-4-6"
+        assert env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "anthropic.claude-haiku-4-5"
+        # Bedrock ids are pinned verbatim — no `[1m]` suffix mangling.
+        assert "[1m]" not in env["ANTHROPIC_DEFAULT_OPUS_MODEL"]
+        assert (
+            "Databricks-Model-Provider-Service: main.bob.bedrock-svc"
+            in env["ANTHROPIC_CUSTOM_HEADERS"]
+        )
+
     def test_picker_labels_show_raw_routable_id(self):
         # We deliberately don't set the `_NAME` companion env vars. Showing the
         # raw `system.ai.…` / `databricks-…` id in the picker label tells users

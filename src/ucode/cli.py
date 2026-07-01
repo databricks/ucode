@@ -18,7 +18,9 @@ from ucode.agents import (
     ensure_provider_state,
     install_tool_binary,
     normalize_tool,
+    provider_permission_error,
     resolve_launch_model,
+    resolve_provider_models,
     validate_all_tools,
     validate_tool,
 )
@@ -42,7 +44,9 @@ from ucode.databricks import (
     get_databricks_profiles,
     get_databricks_token,
     install_databricks_cli,
+    is_model_provider_feature_unavailable,
     list_profile_entries,
+    list_tool_provider_services,
     normalize_workspace_url,
     resolve_pat_token,
     run_databricks_login,
@@ -53,7 +57,15 @@ from ucode.mcp import (
     purge_cross_workspace_mcp_residue,
     revert_mcp_configs,
 )
-from ucode.state import STATE_PATH, clear_state, load_full_state, load_state, save_state
+from ucode.state import (
+    STATE_PATH,
+    clear_state,
+    get_provider_service,
+    load_full_state,
+    load_state,
+    save_state,
+    set_provider_service,
+)
 from ucode.tracing import configure_tracing_command
 from ucode.ui import (
     console,
@@ -64,6 +76,8 @@ from ucode.ui import (
     print_note,
     print_section,
     print_success,
+    print_warning,
+    prompt_for_selection,
     prompt_for_tools,
     prompt_for_workspace,
     set_verbosity,
@@ -195,6 +209,7 @@ def configure_shared_state(
     tools: list[str] | None = None,
     force_login: bool = False,
     use_pat: bool | None = None,
+    skip_model_discovery: bool = False,
 ) -> dict:
     """Log into Databricks, enforce AI Gateway v2, fetch model lists, persist state.
 
@@ -259,24 +274,36 @@ def configure_shared_state(
     claude_models = {}
     gemini_models = []
     codex_models = []
-    # UC-first, best-effort: one UC model-services call yields all families as
-    # `system.ai.<model-name>` ids, bucketed by name. If a family comes back
-    # empty (workspace without UC model-services, or the listing failed), fall
-    # back to the per-family AI Gateway listing for that family only.
-    with spinner("Fetching available models..."):
-        ms_claude, ms_codex, ms_gemini, ms_reason = discover_model_services(workspace, token)
+    web_search_model: str | None = None
+    if skip_model_discovery:
+        # Provider mode: the agent routes through a Model Provider Service and
+        # pins no Databricks model, so the full family discovery is unused. Web
+        # search (claude only) still needs one Responses-capable model, so fetch
+        # just that with a single call.
         if want_claude:
-            claude_models, claude_reason = ms_claude, ms_reason
-            if not claude_models:
-                claude_models, claude_reason = discover_claude_models(workspace, token)
-        if want_gemini:
-            gemini_models, gemini_reason = ms_gemini, ms_reason
-            if not gemini_models:
-                gemini_models, gemini_reason = discover_gemini_models(workspace, token)
-        if want_codex:
-            codex_models, codex_reason = ms_codex, ms_reason
-            if not codex_models:
-                codex_models, codex_reason = discover_codex_models(workspace, token)
+            with spinner("Fetching web search model..."):
+                ws_models, _ = discover_codex_models(workspace, token)
+            if ws_models:
+                web_search_model = ws_models[0]
+    else:
+        # UC-first, best-effort: one UC model-services call yields all families as
+        # `system.ai.<model-name>` ids, bucketed by name. If a family comes back
+        # empty (workspace without UC model-services, or the listing failed), fall
+        # back to the per-family AI Gateway listing for that family only.
+        with spinner("Fetching available models..."):
+            ms_claude, ms_codex, ms_gemini, ms_reason = discover_model_services(workspace, token)
+            if want_claude:
+                claude_models, claude_reason = ms_claude, ms_reason
+                if not claude_models:
+                    claude_models, claude_reason = discover_claude_models(workspace, token)
+            if want_gemini:
+                gemini_models, gemini_reason = ms_gemini, ms_reason
+                if not gemini_models:
+                    gemini_models, gemini_reason = discover_gemini_models(workspace, token)
+            if want_codex:
+                codex_models, codex_reason = ms_codex, ms_reason
+                if not codex_models:
+                    codex_models, codex_reason = discover_codex_models(workspace, token)
     opencode_models: dict[str, list[str]] = {}
     if claude_models:
         opencode_models["anthropic"] = list(claude_models.values())
@@ -299,14 +326,21 @@ def configure_shared_state(
     else:
         state.pop("use_pat", None)
     state["base_urls"] = build_shared_base_urls(workspace)
-    if want_claude:
-        state["claude_models"] = claude_models
-    if want_gemini:
-        state["gemini_models"] = gemini_models
-    if want_codex:
-        state["codex_models"] = codex_models
-    if fetch_all or "opencode" in tools:
-        state["opencode_models"] = opencode_models
+    if skip_model_discovery:
+        # Don't clobber any previously-discovered Databricks model lists; provider
+        # mode just doesn't refresh or use them. Persist the web-search model so
+        # claude's web_search MCP keeps working through the normal gateway.
+        if web_search_model:
+            state["web_search_model"] = web_search_model
+    else:
+        if want_claude:
+            state["claude_models"] = claude_models
+        if want_gemini:
+            state["gemini_models"] = gemini_models
+        if want_codex:
+            state["codex_models"] = codex_models
+        if fetch_all or "opencode" in tools:
+            state["opencode_models"] = opencode_models
     save_state(state)
     # Scrub MCP entries that ucode wrote for the previous workspace so the new
     # workspace's agent configs aren't stale.
@@ -345,6 +379,72 @@ def _configure_shared_workspace_states(
     return states
 
 
+def _provider_summary(tool: str, state: dict) -> str:
+    """Short label for the Configuration Complete box: 'Databricks' when no
+    Model Provider Service is configured, otherwise the external provider type
+    backing this tool (claude routes to Anthropic, codex to OpenAI)."""
+    if not get_provider_service(state, tool):
+        return "Databricks"
+    return {"claude": "Anthropic", "codex": "OpenAI"}.get(tool, "Model Provider Service")
+
+
+def _maybe_select_provider_service(tool: str, state: dict) -> dict:
+    """Interactively let the user route claude/codex through a Model Provider
+    Service instead of Databricks models, and persist (or clear) the choice.
+
+    No-op for tools other than claude/codex. Falls back to Databricks when no
+    matching provider services are found or the listing fails.
+    """
+    if tool not in ("claude", "codex"):
+        return state
+    display = TOOL_SPECS[tool]["display"]
+
+    def _use_databricks() -> dict:
+        new_state = set_provider_service(state, tool, None)
+        save_state(new_state)
+        return new_state
+
+    # Probe first so we only offer the picker when it's actually usable. The
+    # interactive path always reaches here, so explain any fallback rather than
+    # silently dropping back to Databricks.
+    token = get_databricks_token(state["workspace"], state.get("profile"))
+    with spinner("Checking for model provider services..."):
+        names, reason = list_tool_provider_services(tool, state["workspace"], token)
+    if reason is not None:
+        # Most workspaces don't have the feature enabled — that's the common case,
+        # so fall back to Databricks silently. Only surface unexpected failures.
+        if not is_model_provider_feature_unavailable(reason):
+            print_warning(f"Could not list model provider services: {reason}")
+            print_note("Falling back to Databricks models.")
+        return _use_databricks()
+    if not names:
+        # Feature is on but no service matches this tool's provider type.
+        print_note(f"No model provider services available for {display}; using Databricks models.")
+        return _use_databricks()
+
+    choice = prompt_for_selection(
+        f"How should {display} be configured?",
+        [
+            ("databricks", "Databricks Hosted"),
+            ("mps", "External Models"),
+        ],
+    )
+    if choice is None:
+        raise KeyboardInterrupt
+    if choice == "databricks":
+        return _use_databricks()
+
+    selected = prompt_for_selection(
+        "Select a model provider service:", [(name, name) for name in names]
+    )
+    if selected is None:
+        raise KeyboardInterrupt
+    state = set_provider_service(state, tool, selected)
+    save_state(state)
+    print_success(f"{display} will route through {selected}")
+    return state
+
+
 def configure_workspace_command(
     tool: str | None = None,
     selected_tools: list[str] | None = None,
@@ -356,6 +456,11 @@ def configure_workspace_command(
 ) -> int:
     if tool is not None and selected_tools is not None:
         raise RuntimeError("Use either --agent or --agents, not both.")
+
+    # The Databricks-vs-Model-Provider-Service picker is shown only on the fully
+    # interactive path (`ucode configure` with no --agent/--agents). Naming agents
+    # explicitly signals the non-interactive flow, which stays on Databricks.
+    offer_provider = tool is None and selected_tools is None
 
     workspace_entries = workspaces or [_prompt_for_configuration(tool)]
 
@@ -372,7 +477,8 @@ def configure_workspace_command(
         console.print(
             Panel(
                 f"[bold]Workspace:[/bold] [cyan]{state['workspace']}[/cyan]\n"
-                f"[bold]{spec['display']}:[/bold] [green]configured[/green]",
+                f"[bold]{spec['display']}:[/bold] [green]configured[/green] "
+                f"[dim](Provider: {_provider_summary(tool, state)})[/dim]",
                 title="Configuration Complete",
                 style="green",
                 expand=False,
@@ -386,7 +492,7 @@ def configure_workspace_command(
         if ok:
             print_success(f"{spec['display']} is working")
         else:
-            print_err(f"{spec['display']}: {err}")
+            print_err(f"{spec['display']}: {provider_permission_error(tool, state, err)}")
             managed = bool(state.get("managed_configs", {}).get(tool))
             restore_file(spec["config_path"], spec["backup_path"], managed)
             available_tools = [t for t in (state.get("available_tools") or []) if t != tool]
@@ -442,12 +548,21 @@ def configure_workspace_command(
             prompt_optional_updates=prompt_optional_updates,
         )
 
+    # Offer the provider picker for the chosen claude/codex tools only on the
+    # interactive path (no --agents); otherwise stay on the Databricks path.
+    if offer_provider:
+        for tool_name in picked:
+            state = _maybe_select_provider_service(tool_name, state)
+
     state = configure_selected_tools(state, picked)
 
     summary_lines = [f"[bold]Workspace:[/bold] [cyan]{state['workspace']}[/cyan]"]
     for tool_name in picked:
         spec = TOOL_SPECS[tool_name]
-        summary_lines.append(f"[bold]{spec['display']}:[/bold] [green]configured[/green]")
+        summary_lines.append(
+            f"[bold]{spec['display']}:[/bold] [green]configured[/green] "
+            f"[dim](Provider: {_provider_summary(tool_name, state)})[/dim]"
+        )
     console.print(
         Panel(
             "\n".join(summary_lines),
@@ -496,6 +611,9 @@ def status() -> int:
         config_path = spec["config_path"]
         print_kv("Coding Agent", spec["display"])
         print_kv("Configured", "yes" if configured else "no")
+        provider_service = get_provider_service(state, tool)
+        if configured and provider_service:
+            print_kv("Model Provider Service", provider_service)
         print_kv("Base URL", base_url)
         if configured and tool in MCP_CLIENTS:
             tool_mcp_servers = [
@@ -664,7 +782,8 @@ def _auto_configure_tool(tool: str) -> None:
     console.print(
         Panel(
             f"[bold]Workspace:[/bold] [cyan]{state['workspace']}[/cyan]\n"
-            f"[bold]{spec['display']}:[/bold] [green]configured[/green]",
+            f"[bold]{spec['display']}:[/bold] [green]configured[/green] "
+            f"[dim](Provider: {_provider_summary(tool, state)})[/dim]",
             title="Configuration Complete",
             style="green",
             expand=False,
@@ -676,7 +795,7 @@ def _auto_configure_tool(tool: str) -> None:
     if ok:
         print_success(f"{spec['display']} is working")
     else:
-        print_err(f"{spec['display']}: {err}")
+        print_err(f"{spec['display']}: {provider_permission_error(tool, state, err)}")
         managed = bool(state.get("managed_configs", {}).get(tool))
         restore_file(spec["config_path"], spec["backup_path"], managed)
         available_tools = [t for t in (state.get("available_tools") or []) if t != tool]
@@ -685,7 +804,7 @@ def _auto_configure_tool(tool: str) -> None:
         raise RuntimeError(f"{spec['display']} validation failed — config reverted.")
 
 
-def _launch_tool(tool_name: str, ctx: typer.Context) -> None:
+def _launch_tool(tool_name: str, ctx: typer.Context, provider: str | None = None) -> None:
     try:
         tool = normalize_tool(tool_name)
         existing = load_state()
@@ -700,17 +819,45 @@ def _launch_tool(tool_name: str, ctx: typer.Context) -> None:
         if needs_auto_configure:
             _auto_configure_tool(tool)
         state = ensure_provider_state(tool)
+        # An explicit --provider overrides the persisted choice; otherwise fall
+        # back to whatever `ucode configure` saved for this tool.
+        provider = provider or get_provider_service(state, tool)
+        # Validate the provider service before launching — it must exist, be a
+        # provider type this tool can route to (e.g. claude can't use an OpenAI
+        # or Foundry service), and, for Bedrock, expose Claude models to pin.
+        # Surfaces a clear error up front instead of a cryptic gateway failure
+        # mid-session. For a Bedrock service this also returns the model ids.
+        provider_models = None
+        if provider:
+            provider_models, error = resolve_provider_models(tool, state, provider)
+            if error:
+                raise RuntimeError(error)
         # Re-fetch model lists on every launch so newly-added Databricks
         # endpoints show up without a manual `ucode configure` (and so that
         # tools like pi which read multiple model bundles never run on
-        # stale state from before a tool added a new bundle).
+        # stale state from before a tool added a new bundle). Under a provider
+        # this heavy discovery is skipped (only a web-search model is fetched).
         state = configure_shared_state(
-            state["workspace"], profile=state.get("profile"), tools=[tool]
+            state["workspace"],
+            profile=state.get("profile"),
+            tools=[tool],
+            skip_model_discovery=bool(provider),
         )
-        state, resolved_model = resolve_launch_model(tool, state, None)
-        state = configure_tool(tool, state, resolved_model)
+        if provider:
+            # Routing through a Model Provider Service pins no Databricks model;
+            # the agent uses its own canonical model names (header selects the
+            # provider). Skip model resolution, which would otherwise fail when
+            # the workspace has no matching Databricks models.
+            resolved_model = None
+        else:
+            state, resolved_model = resolve_launch_model(tool, state, None)
+        state = configure_tool(
+            tool, state, resolved_model, provider=provider, provider_models=provider_models
+        )
         print_section(f"ucode with {TOOL_SPECS[tool]['display']}")
-        if resolved_model:
+        if provider:
+            print_kv("Provider", provider)
+        elif resolved_model:
             print_kv("Model", resolved_model)
         if tool in ("gemini", "opencode", "copilot", "pi"):
             print_note(
@@ -728,15 +875,37 @@ def _launch_tool(tool_name: str, ctx: typer.Context) -> None:
 
 
 @app.command("codex", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
-def codex_cmd(ctx: typer.Context) -> None:
+def codex_cmd(
+    ctx: typer.Context,
+    provider: Annotated[
+        str | None,
+        typer.Option(
+            "--provider",
+            help="Route through a Unity Catalog Model Provider Service "
+            "(<catalog>.<schema>.<name>). Skips Databricks model pinning; pass "
+            "before any `--` separator.",
+        ),
+    ] = None,
+) -> None:
     """Launch Codex via Databricks."""
-    _launch_tool("codex", ctx)
+    _launch_tool("codex", ctx, provider=provider)
 
 
 @app.command("claude", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
-def claude_cmd(ctx: typer.Context) -> None:
+def claude_cmd(
+    ctx: typer.Context,
+    provider: Annotated[
+        str | None,
+        typer.Option(
+            "--provider",
+            help="Route through a Unity Catalog Model Provider Service "
+            "(<catalog>.<schema>.<name>). Skips Databricks model pinning; pass "
+            "before any `--` separator.",
+        ),
+    ] = None,
+) -> None:
     """Launch Claude Code via Databricks."""
-    _launch_tool("claude", ctx)
+    _launch_tool("claude", ctx, provider=provider)
 
 
 @app.command("gemini", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})

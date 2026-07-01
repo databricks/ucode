@@ -28,6 +28,10 @@ from ucode.databricks import (
     fetch_codex_models,
     fetch_gemini_models,
     has_valid_databricks_auth,
+    is_model_provider_feature_unavailable,
+    list_model_provider_services,
+    list_tool_provider_services,
+    service_usable_for_tool,
     workspace_hostname,
 )
 from ucode.ui import normalize_workspace_url
@@ -144,6 +148,40 @@ class TestModelDiscovery:
     def test_fetch_codex_models_returns_list(self, e2e_workspace, e2e_token):
         models = fetch_codex_models(e2e_workspace, e2e_token)
         assert isinstance(models, list)
+
+
+# ---------------------------------------------------------------------------
+# Model Provider Services discovery
+# ---------------------------------------------------------------------------
+
+
+class TestModelProviderServicesDiscovery:
+    def test_list_returns_services_or_skips_when_feature_off(self, e2e_workspace, e2e_token):
+        services, reason = list_model_provider_services(e2e_workspace, e2e_token)
+        if is_model_provider_feature_unavailable(reason):
+            pytest.skip("Model Provider Service feature not enabled on this workspace")
+        assert reason is None, f"listing failed: {reason}"
+        assert isinstance(services, list)
+        for svc in services:
+            assert set(svc) >= {"name", "provider_type", "targets", "allow_all_targets"}
+            # Names are stripped of the `model-provider-services/` API prefix.
+            assert svc["name"] and "/" not in svc["name"]
+
+    def test_tool_filter_matches_provider_type(self, e2e_workspace, e2e_token):
+        services, reason = list_model_provider_services(e2e_workspace, e2e_token)
+        if is_model_provider_feature_unavailable(reason):
+            pytest.skip("Model Provider Service feature not enabled on this workspace")
+        assert reason is None
+        claude_names, _ = list_tool_provider_services("claude", e2e_workspace, e2e_token)
+        codex_names, _ = list_tool_provider_services("codex", e2e_workspace, e2e_token)
+        # claude routes through Anthropic and Bedrock services (Bedrock only when
+        # it exposes Claude models); codex through OpenAI.
+        assert set(claude_names) == {
+            s["name"] for s in services if service_usable_for_tool("claude", s)
+        }
+        assert set(codex_names) == {
+            s["name"] for s in services if service_usable_for_tool("codex", s)
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -478,6 +516,107 @@ class TestClaudeLaunch:
                 )
 
         assert not failures, "Claude launch failures:\n" + "\n".join(failures)
+
+
+class TestModelProviderLaunch:
+    """Launch claude/codex routed through a real Model Provider Service.
+
+    Picks the first matching service on the workspace, writes a provider config
+    (no Databricks model pinned), and runs the agent so a real request flows
+    through the MPS gateway. Skips when the feature is off, no service exists, or
+    the caller lacks permission on the backing connection.
+    """
+
+    @staticmethod
+    def _first_service(tool: str, workspace: str, token: str) -> str:
+        names, reason = list_tool_provider_services(tool, workspace, token)
+        if is_model_provider_feature_unavailable(reason):
+            pytest.skip("Model Provider Service feature not enabled on this workspace")
+        if reason is not None:
+            pytest.skip(f"could not list provider services: {reason}")
+        if not names:
+            pytest.skip(f"no {tool} model provider services available on this workspace")
+        return names[0]
+
+    @staticmethod
+    def _skip_if_no_permission(combined: str, provider: str) -> None:
+        if "USE CONNECTION" in combined or "EXECUTE" in combined:
+            pytest.skip(f"no permission on provider {provider}: {combined[:200]}")
+
+    def test_launch_claude_through_provider(
+        self, tmp_path, monkeypatch, e2e_state, e2e_workspace, e2e_token
+    ):
+        import ucode.config_io as config_io_mod
+        from ucode.agents import claude
+
+        _require_binary("claude")
+        provider = self._first_service("claude", e2e_workspace, e2e_token)
+
+        config_dir = tmp_path / "claude_config"
+        config_dir.mkdir()
+        monkeypatch.setattr(config_io_mod, "APP_DIR", tmp_path)
+        monkeypatch.setattr(claude, "CLAUDE_SETTINGS_PATH", config_dir / "settings.json")
+        monkeypatch.setattr(claude, "CLAUDE_BACKUP_PATH", tmp_path / "claude-settings.backup.json")
+
+        with pytest.MonkeyPatch().context() as mp:
+            mp.setattr("ucode.state.save_state", lambda s: None)
+            # No model pinned — the provider header (written into the settings
+            # env block) routes the agent's own canonical model name.
+            claude.write_tool_config(
+                {**e2e_state, "workspace": e2e_workspace}, None, provider=provider
+            )
+
+        env = {
+            **os.environ,
+            "CLAUDE_CONFIG_DIR": str(config_dir),
+            "ANTHROPIC_BASE_URL": build_tool_base_url("claude", e2e_workspace),
+            "ANTHROPIC_API_KEY": e2e_token,
+            "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1",
+        }
+        result = _run_agent(claude.validate_cmd("claude"), env=env, timeout=90)
+        combined = (result.stdout + result.stderr).strip()
+        self._skip_if_no_permission(combined, provider)
+        assert result.returncode == 0 and combined, (
+            f"provider={provider} rc={result.returncode} "
+            f"stdout={result.stdout[:300]!r} stderr={result.stderr[:300]!r}"
+        )
+
+    def test_launch_codex_through_provider(
+        self, tmp_path, monkeypatch, e2e_state, e2e_workspace, e2e_token
+    ):
+        import ucode.config_io as config_io_mod
+        from ucode.agents import codex
+
+        _require_binary("codex")
+        provider = self._first_service("codex", e2e_workspace, e2e_token)
+
+        monkeypatch.setattr(config_io_mod, "APP_DIR", tmp_path)
+        config_dir = tmp_path / "codex_home" / ".codex"
+        config_dir.mkdir(parents=True)
+        monkeypatch.setattr(codex, "CODEX_CONFIG_PATH", config_dir / "ucode.config.toml")
+        monkeypatch.setattr(codex, "CODEX_BACKUP_PATH", tmp_path / "codex-config.backup.toml")
+
+        with pytest.MonkeyPatch().context() as mp:
+            mp.setattr("ucode.state.save_state", lambda s: None)
+            codex.write_tool_config(
+                {**e2e_state, "workspace": e2e_workspace}, None, provider=provider
+            )
+
+        timeout_seconds = int(os.environ.get("UCODE_E2E_AGENT_TIMEOUT", "60"))
+        try:
+            result = _run_agent(
+                codex.validate_cmd("codex"),
+                env={**os.environ, "CODEX_HOME": str(config_dir)},
+                timeout=timeout_seconds,
+            )
+        except subprocess.TimeoutExpired:
+            pytest.fail(f"provider={provider} timed out after {timeout_seconds}s")
+        combined = (result.stdout + result.stderr).strip()
+        self._skip_if_no_permission(combined, provider)
+        assert result.returncode == 0 and combined, (
+            f"provider={provider} rc={result.returncode} "
+            f"stdout={result.stdout[:300]!r} stderr={result.stderr[:300]!r}"
+        )
 
 
 class TestGeminiLaunch:

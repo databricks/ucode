@@ -18,9 +18,13 @@ import subprocess
 
 from ucode.config_io import ToolSpec
 from ucode.databricks import (
+    BEDROCK_PROVIDER_TYPES,
+    get_databricks_token,
     install_databricks_cli,
+    map_bedrock_claude_models,
+    resolve_provider_service,
 )
-from ucode.state import load_state, save_state
+from ucode.state import get_provider_service, load_state, save_state
 from ucode.telemetry import agent_version
 from ucode.ui import (
     console,
@@ -254,16 +258,52 @@ def resolve_launch_model(
     return state, model
 
 
-def configure_tool(tool: str, state: dict, model: str | None = None) -> dict:
+def resolve_provider_models(
+    tool: str, state: dict, provider: str | None
+) -> tuple[dict | None, str | None]:
+    """Validate ``provider`` for ``tool`` and return the model ids to pin.
+
+    Returns ``(provider_models, error)``. ``provider_models`` is a
+    ``{family: model_id}`` dict for a Bedrock-backed claude service (whose
+    provider-side ids must be pinned explicitly), or None for an Anthropic/
+    canonical service or when ``provider`` is None. A non-None ``error`` means
+    the provider is invalid for the tool (wrong type, missing, feature off, or a
+    Bedrock service with no Claude models) and the caller should not launch.
+    """
+    if not provider:
+        return None, None
+    token = get_databricks_token(state["workspace"], state.get("profile"))
+    service, error = resolve_provider_service(tool, provider, state["workspace"], token)
+    if error or service is None:
+        return None, error
+    if service["provider_type"] in BEDROCK_PROVIDER_TYPES:
+        return map_bedrock_claude_models(service.get("targets") or []), None
+    return None, None
+
+
+def configure_tool(
+    tool: str,
+    state: dict,
+    model: str | None = None,
+    provider: str | None = None,
+    provider_models: dict[str, str] | None = None,
+) -> dict:
     result: dict | tuple[dict, str]
     if tool == "codex":
-        result = codex.write_tool_config(state, model)
+        result = codex.write_tool_config(state, model, provider=provider)
+    elif tool == "claude":
+        # A Model Provider Service routes by header and pins no Databricks
+        # model, so the usual "model required" guard doesn't apply to claude.
+        if not model and not provider:
+            raise RuntimeError(f"A {tool} model must be selected before configuration.")
+        result = claude.write_tool_config(
+            state, model, provider=provider, provider_models=provider_models
+        )
     else:
+        # provider routing is claude/codex-only; every other tool needs a model.
         if not model:
             raise RuntimeError(f"A {tool} model must be selected before configuration.")
-        if tool == "claude":
-            result = claude.write_tool_config(state, model)
-        elif tool == "gemini":
+        if tool == "gemini":
             result = gemini.write_tool_config(state, model)
         elif tool == "copilot":
             result = copilot.write_tool_config(state, model)
@@ -325,22 +365,35 @@ def _availability_failure_detail(tool: str, state: dict) -> str:
 
 def configure_single_tool(tool: str, state: dict) -> dict:
     """Check availability, configure, and persist state for one tool only."""
-    with spinner(f"Checking {TOOL_SPECS[tool]['display']} availability..."):
-        ok = check_gateway_endpoint(state, tool)
-    if not ok:
-        detail = _availability_failure_detail(tool, state)
-        raise RuntimeError(
-            f"{TOOL_SPECS[tool]['display']} is not available on this workspace.{detail}"
-        )
-    if tool == "codex":
-        state = configure_tool("codex", state)
-    else:
-        state, model = resolve_launch_model(tool, state, None)
-        state = configure_tool(tool, state, model)
+    provider = get_provider_service(state, tool)
+    # A Model Provider Service routes through the same gateway and pins no
+    # Databricks model, so the per-tool model availability check doesn't apply.
+    if not provider:
+        with spinner(f"Checking {TOOL_SPECS[tool]['display']} availability..."):
+            ok = check_gateway_endpoint(state, tool)
+        if not ok:
+            detail = _availability_failure_detail(tool, state)
+            raise RuntimeError(
+                f"{TOOL_SPECS[tool]['display']} is not available on this workspace.{detail}"
+            )
+    state = _configure_one(tool, state, provider)
     available_tools = list(set((state.get("available_tools") or []) + [tool]))
     state["available_tools"] = available_tools
     save_state(state)
     return state
+
+
+def _configure_one(tool: str, state: dict, provider: str | None) -> dict:
+    """Write one tool's config, routing through ``provider`` when set."""
+    if provider:
+        provider_models, error = resolve_provider_models(tool, state, provider)
+        if error:
+            raise RuntimeError(error)
+        return configure_tool(tool, state, None, provider=provider, provider_models=provider_models)
+    if tool == "codex":
+        return configure_tool("codex", state)
+    state, model = resolve_launch_model(tool, state, None)
+    return configure_tool(tool, state, model)
 
 
 def configure_selected_tools(state: dict, tools: list[str]) -> dict:
@@ -352,11 +405,7 @@ def configure_selected_tools(state: dict, tools: list[str]) -> dict:
     run is preserved.
     """
     for tool in tools:
-        if tool == "codex":
-            state = configure_tool("codex", state)
-        else:
-            state, model = resolve_launch_model(tool, state, None)
-            state = configure_tool(tool, state, model)
+        state = _configure_one(tool, state, get_provider_service(state, tool))
 
     existing = state.get("available_tools") or []
     state["available_tools"] = sorted(set(existing) | set(tools))
@@ -440,6 +489,21 @@ def validate_tool(tool: str) -> tuple[bool, str]:
         return False, "timed out"
 
 
+def provider_permission_error(tool: str, state: dict, err: str) -> str:
+    """Rewrite the opaque gateway connection-permission failure into an
+    actionable message naming the Model Provider Service the user must be
+    granted access to. Returns ``err`` unchanged when it doesn't apply.
+    """
+    provider = get_provider_service(state, tool)
+    if provider and "USE CONNECTION on SCHEMA_CONNECTION" in err:
+        return (
+            f"You don't have EXECUTE permission on the model provider service "
+            f"'{provider}'. Ask its owner to grant you access, then re-run "
+            f"`ucode configure`."
+        )
+    return err
+
+
 def validate_all_tools(state: dict) -> None:
     from rich.panel import Panel  # local to avoid bumping module-level deps
 
@@ -470,7 +534,7 @@ def validate_all_tools(state: dict) -> None:
         if ok:
             print_success(f"{spec['display']} is working")
         else:
-            print_err(f"{spec['display']}: {err}")
+            print_err(f"{spec['display']}: {provider_permission_error(tool, state, err)}")
             managed = bool(state.get("managed_configs", {}).get(tool))
             restore_file(spec["config_path"], spec["backup_path"], managed)
             # Rollback settings.json for Pi
