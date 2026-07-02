@@ -107,9 +107,11 @@ def _provider_block(
     databricks_profile: str | None,
     use_pat: bool = False,
     provider: str | None = None,
+    base_url: str | None = None,
 ) -> dict:
     auth_argv = build_auth_token_argv(workspace, databricks_profile, use_pat=use_pat)
-    base_url = build_tool_base_url("codex", workspace)
+    if base_url is None:
+        base_url = build_tool_base_url("codex", workspace)
     http_headers = {
         "User-Agent": f"ucode/{ucode_version()} codex/{agent_version('codex')}",
     }
@@ -139,13 +141,14 @@ def render_overlay(
     databricks_profile: str | None = None,
     use_pat: bool = False,
     provider: str | None = None,
+    base_url: str | None = None,
 ) -> dict:
     overlay: dict = {"model_provider": CODEX_MODEL_PROVIDER_NAME}
     if model:
         overlay["model"] = model
     overlay["model_providers"] = {
         CODEX_MODEL_PROVIDER_NAME: _provider_block(
-            workspace, databricks_profile, use_pat, provider
+            workspace, databricks_profile, use_pat, provider, base_url=base_url
         ),
     }
     return overlay
@@ -157,6 +160,7 @@ def render_legacy_overlay(
     databricks_profile: str | None = None,
     use_pat: bool = False,
     provider: str | None = None,
+    base_url: str | None = None,
 ) -> dict:
     """Overlay for Codex CLI < 0.134.0, which only reads `~/.codex/config.toml`.
 
@@ -171,7 +175,7 @@ def render_legacy_overlay(
         "profiles": {CODEX_PROFILE_NAME: profile_block},
         "model_providers": {
             CODEX_MODEL_PROVIDER_NAME: _provider_block(
-                workspace, databricks_profile, use_pat, provider
+                workspace, databricks_profile, use_pat, provider, base_url=base_url
             ),
         },
     }
@@ -289,6 +293,25 @@ def _codex_model_id(model: str | None) -> str | None:
     return _openai_model_id(model)
 
 
+def _is_oss_model(model: str | None, state: dict) -> bool:
+    """True when ``model`` should route through the MLflow OSS gateway path."""
+    if not model:
+        return False
+    if model.startswith("system.ai.kimi-"):
+        return True
+    return model in (state.get("oss_models") or [])
+
+
+def _codex_base_url(workspace: str, model: str | None, state: dict) -> str:
+    """Pick the right AI Gateway base URL for the resolved Codex model.
+
+    GPT-family and OSS models (e.g. Kimi) both route through
+    ``/ai-gateway/codex/v1``; Codex appends ``/responses`` for the OpenAI
+    Responses wire API.
+    """
+    return build_tool_base_url("codex", workspace)
+
+
 def _parse_gpt(model: str | None) -> tuple[int, int | None, int | None, str] | None:
     if not model:
         return None
@@ -316,6 +339,7 @@ def write_tool_config(state: dict, model: str | None = None, provider: str | Non
     # Databricks endpoint id is pinned.
     chosen_model = None if provider else _codex_model_id(model or default_model(state))
     databricks_profile = state.get("profile")
+    base_url = None if provider else _codex_base_url(workspace, chosen_model, state)
 
     if _use_legacy_layout():
         # Codex < 0.134.0 only reads ~/.codex/config.toml. Write the shared
@@ -329,6 +353,7 @@ def write_tool_config(state: dict, model: str | None = None, provider: str | Non
             databricks_profile,
             use_pat=bool(state.get("use_pat")),
             provider=provider,
+            base_url=base_url,
         )
         doc = read_toml_safe(LEGACY_CODEX_CONFIG_PATH)
         deep_merge_dict(doc, overlay)
@@ -351,6 +376,7 @@ def write_tool_config(state: dict, model: str | None = None, provider: str | Non
         databricks_profile,
         use_pat=bool(state.get("use_pat")),
         provider=provider,
+        base_url=base_url,
     )
     doc = read_toml_safe(CODEX_CONFIG_PATH)
     deep_merge_dict(doc, overlay)
@@ -371,24 +397,30 @@ def default_model(state: dict) -> str | None:
     "databricks-gpt-5" ahead of "databricks-gpt-5-5". Prefer the
     highest semantic version instead.
 
-    Only GPT-parseable ids are considered. Codex routes the chosen ``model``
-    through the gateway as-is, so a non-GPT entry (e.g. ``moonshotai/kimi-k2.5``)
-    would be rejected with a Unity Catalog endpoint-name error. When no
-    candidate parses as GPT we return None rather than pinning an unroutable id.
+    Only GPT-parseable ids are considered for the default. If no GPT model is
+    available but the workspace exposes OSS models (e.g. ``system.ai.kimi-*``),
+    fall back to the first OSS model so users can route Codex through the
+    MLflow gateway path.
     """
     codex_models = state.get("codex_models") or []
     parsed: list[tuple[str, tuple[int, int | None, int | None, str]]] = [
         (mid, gpt) for mid in codex_models if (gpt := _parse_gpt(mid)) is not None
     ]
-    if not parsed:
-        return None
+    if parsed:
 
-    def _gpt_version_key(entry: tuple[str, tuple[int, int | None, int | None, str]]):
-        major, minor, patch, suffix = entry[1]
-        base_bonus = 1 if not suffix else 0
-        return (major, minor or 0, patch or 0, base_bonus)
+        def _gpt_version_key(entry: tuple[str, tuple[int, int | None, int | None, str]]):
+            major, minor, patch, suffix = entry[1]
+            base_bonus = 1 if not suffix else 0
+            return (major, minor or 0, patch or 0, base_bonus)
 
-    return max(parsed, key=_gpt_version_key)[0]
+        return max(parsed, key=_gpt_version_key)[0]
+
+    # If no GPT model is available but codex_models contains OSS entries
+    # (e.g. system.ai.kimi-*), fall back to the first one.
+    for model_id in codex_models:
+        if _is_oss_model(model_id, state):
+            return model_id
+    return None
 
 
 def launch(state: dict, tool_args: list[str]) -> None:

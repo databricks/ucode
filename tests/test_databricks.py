@@ -166,7 +166,9 @@ class TestDiscoverModelServices:
             "opus": "system.ai.claude-opus-4-8",
             "sonnet": "system.ai.claude-sonnet-4-6",
         }
-        assert codex == ["system.ai.gpt-5"]
+        # Codex-routable models include GPT plus OSS models that speak the
+        # OpenAI Responses API (Kimi here; Llama is not assumed to).
+        assert codex == ["system.ai.gpt-5", "system.ai.kimi-k2-7-code"]
         # Gemini ordered newest-first via the shared sort key.
         assert gemini[0] == "system.ai.gemini-3-5-flash"
         assert oss == ["system.ai.kimi-k2-7-code"]

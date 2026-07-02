@@ -95,6 +95,12 @@ class TestCheckGatewayEndpoint:
     def test_codex_available(self):
         assert check_gateway_endpoint({"codex_models": ["model-a"]}, "codex") is True
 
+    def test_codex_available_with_oss_models(self):
+        assert check_gateway_endpoint({"oss_models": ["system.ai.kimi-k2-7-code"]}, "codex") is True
+
+    def test_codex_unavailable_without_models(self):
+        assert check_gateway_endpoint({}, "codex") is False
+
     def test_gemini_available(self):
         assert check_gateway_endpoint({"gemini_models": ["gemini-2"]}, "gemini") is True
 

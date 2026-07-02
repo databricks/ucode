@@ -78,6 +78,19 @@ class TestRenderOverlay:
         headers = overlay["model_providers"]["ucode-databricks"]["http_headers"]
         assert "Databricks-Model-Provider-Service" not in headers
 
+    def test_uses_codex_base_url_for_oss_model(self):
+        overlay = codex.render_overlay(
+            WS, model="system.ai.kimi-k2-7-code", base_url=f"{WS}/ai-gateway/codex/v1"
+        )
+        provider = overlay["model_providers"]["ucode-databricks"]
+        assert provider["base_url"] == f"{WS}/ai-gateway/codex/v1"
+
+    def test_preserves_model_id_for_oss_model(self):
+        overlay = codex.render_overlay(
+            WS, model="system.ai.kimi-k2-7-code", base_url=f"{WS}/ai-gateway/codex/v1"
+        )
+        assert overlay["model"] == "system.ai.kimi-k2-7-code"
+
 
 class TestRenderOverlayUserAgent:
     def test_user_agent_set_on_provider(self, monkeypatch):
@@ -241,6 +254,25 @@ class TestCodexWriteConfig:
         assert doc["profiles"]["other"]["model_provider"] == "keep"
         assert doc["profiles"]["ucode"]["model_provider"] == "ucode-databricks"
 
+    def test_uses_codex_base_url_for_oss_model(self, tmp_path, monkeypatch):
+        config_path = tmp_path / ".codex" / "ucode.config.toml"
+        backup_path = tmp_path / "codex-ucode-config.backup.toml"
+        monkeypatch.setattr(codex, "CODEX_CONFIG_PATH", config_path)
+        monkeypatch.setattr(codex, "CODEX_BACKUP_PATH", backup_path)
+        monkeypatch.setattr(codex, "agent_version", lambda binary: "0.134.0")
+        monkeypatch.setattr(codex, "save_state", lambda state: None)
+
+        state = {
+            "workspace": WS,
+            "codex_models": ["system.ai.kimi-k2-7-code"],
+        }
+        codex.write_tool_config(state)
+
+        doc = read_toml_safe(config_path)
+        assert doc["model"] == "system.ai.kimi-k2-7-code"
+        provider = doc["model_providers"]["ucode-databricks"]
+        assert provider["base_url"] == f"{WS}/ai-gateway/codex/v1"
+
 
 class TestCodexLegacyLayoutDetection:
     def test_new_codex_uses_modern_layout(self, monkeypatch):
@@ -361,6 +393,18 @@ class TestCodexDefaultModel:
         models = ["gpt-5-5-mini", "gpt-5-5", "gpt-5"]
 
         assert codex.default_model({"codex_models": models}) == "gpt-5-5"
+
+    def test_falls_back_to_first_oss_model_in_codex_models(self):
+        state = {"codex_models": ["system.ai.kimi-k2-7-code"]}
+
+        assert codex.default_model(state) == "system.ai.kimi-k2-7-code"
+
+    def test_prefers_gpt_over_oss_when_both_available(self):
+        state = {
+            "codex_models": ["databricks-gpt-5", "system.ai.kimi-k2-7-code"],
+        }
+
+        assert codex.default_model(state) == "databricks-gpt-5"
 
     def test_namespaced_models_use_same_version_parser(self):
         models = ["served-models/databricks-gpt-5", "served-models/databricks-gpt-5-5"]

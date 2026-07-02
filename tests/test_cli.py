@@ -486,6 +486,27 @@ class TestPassthroughArgs:
         assert forwarded == []
 
 
+class TestCodexModelOption:
+    def test_model_option_overrides_default(self):
+        with (
+            patch("ucode.cli.ensure_bootstrap_dependencies"),
+            patch("ucode.cli.load_state", return_value=MINIMAL_STATE),
+            patch("ucode.cli.ensure_provider_state", return_value=MINIMAL_STATE),
+            patch("ucode.cli.configure_shared_state", return_value=MINIMAL_STATE),
+            patch(
+                "ucode.cli.resolve_launch_model",
+                return_value=(MINIMAL_STATE, "system.ai.kimi-k2-7-code"),
+            ) as mock_resolve,
+            patch("ucode.cli.configure_tool", return_value=MINIMAL_STATE),
+            patch("ucode.cli.launch_agent") as mock_launch,
+        ):
+            result = runner.invoke(app, ["codex", "--model", "system.ai.kimi-k2-7-code"])
+        assert result.exit_code == 0, result.output
+        mock_resolve.assert_called_once_with("codex", MINIMAL_STATE, "system.ai.kimi-k2-7-code")
+        forwarded = mock_launch.call_args[0][2]
+        assert forwarded == []
+
+
 class TestConfigureAgentFlag:
     def test_no_flag_calls_configure_all(self):
         with (
