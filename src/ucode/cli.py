@@ -90,7 +90,7 @@ _DISCOVERY_CONSUMERS: dict[str, tuple[str, ...]] = {
     "claude": ("claude", "opencode", "copilot", "pi"),
     "codex": ("codex", "copilot", "pi"),
     "gemini": ("gemini", "opencode", "pi"),
-    "oss": ("opencode",),
+    "oss": ("opencode", "codex"),
 }
 
 
@@ -273,7 +273,7 @@ def configure_shared_state(
     )
     want_gemini = fetch_all or "gemini" in tools or "opencode" in tools or "pi" in tools
     want_codex = fetch_all or "codex" in tools or "copilot" in tools or "pi" in tools
-    want_oss = fetch_all or "opencode" in tools
+    want_oss = fetch_all or "opencode" in tools or "codex" in tools
 
     claude_reason: str | None = None
     gemini_reason: str | None = None
@@ -822,7 +822,9 @@ def _auto_configure_tool(tool: str) -> None:
         raise RuntimeError(f"{spec['display']} validation failed — config reverted.")
 
 
-def _launch_tool(tool_name: str, ctx: typer.Context, provider: str | None = None) -> None:
+def _launch_tool(
+    tool_name: str, ctx: typer.Context, provider: str | None = None, model: str | None = None
+) -> None:
     try:
         tool = normalize_tool(tool_name)
         existing = load_state()
@@ -868,7 +870,7 @@ def _launch_tool(tool_name: str, ctx: typer.Context, provider: str | None = None
             # the workspace has no matching Databricks models.
             resolved_model = None
         else:
-            state, resolved_model = resolve_launch_model(tool, state, None)
+            state, resolved_model = resolve_launch_model(tool, state, model)
         state = configure_tool(
             tool, state, resolved_model, provider=provider, provider_models=provider_models
         )
@@ -904,9 +906,18 @@ def codex_cmd(
             "before any `--` separator.",
         ),
     ] = None,
+    model: Annotated[
+        str | None,
+        typer.Option(
+            "--model",
+            help="Pin a specific Codex model id (e.g. system.ai.kimi-k2-7-code). "
+            "Useful for routing through the MLflow OSS gateway path instead of the "
+            "default GPT model; pass before any `--` separator.",
+        ),
+    ] = None,
 ) -> None:
     """Launch Codex via Databricks."""
-    _launch_tool("codex", ctx, provider=provider)
+    _launch_tool("codex", ctx, provider=provider, model=model)
 
 
 @app.command("claude", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})

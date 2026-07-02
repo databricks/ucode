@@ -1200,7 +1200,8 @@ def discover_model_services(
 
     - ``claude_models`` maps ``opus``/``sonnet``/``haiku`` to the newest
       matching ``system.ai.claude-*`` id (mirrors ``discover_claude_models``).
-    - ``codex_models`` is the list of ``system.ai.*gpt-*`` ids.
+    - ``codex_models`` is the list of Codex-routable ``system.ai.*`` ids
+      (GPT models plus OSS models that speak the OpenAI Responses API).
     - ``gemini_models`` is the list of ``system.ai.*gemini-*`` ids, newest first.
     - ``oss_models`` is the list of OSS-model ``system.ai.*`` ids.
 
@@ -1221,9 +1222,9 @@ def discover_model_services(
         if candidates:
             claude_models[family] = candidates[0]
 
-    codex_models = [m for m in ids if "gpt-" in m]
-    gemini_models = sorted([m for m in ids if "gemini-" in m], key=model_version_sort_key)
     oss_models = [m for m in ids if "kimi-" in m]
+    codex_models = [m for m in ids if "gpt-" in m] + list(oss_models)
+    gemini_models = sorted([m for m in ids if "gemini-" in m], key=model_version_sort_key)
 
     if not (claude_models or codex_models or gemini_models or oss_models):
         sample = ", ".join(ids[:5])
