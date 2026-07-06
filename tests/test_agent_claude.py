@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 
 from ucode.agents import claude
@@ -523,3 +524,84 @@ class TestWriteToolConfigPrunesStaleModelEnv:
         assert "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME" not in env
         assert "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME" not in env
         assert "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME" not in env
+
+
+class TestBuildClaudeArgv:
+    def test_no_caller_settings_uses_ucode_file(self, monkeypatch):
+        monkeypatch.setattr(claude, "read_json_safe", lambda p: {"apiKeyHelper": "u"})
+        argv = claude._build_claude_argv("claude", ["-p", "hi"])
+        assert argv == ["claude", "--settings", str(claude.CLAUDE_SETTINGS_PATH), "-p", "hi"]
+
+    def test_inline_caller_settings_merged_into_single_flag(self, monkeypatch):
+        ucode_settings = {
+            "apiKeyHelper": "ucode-helper",
+            "env": {"ANTHROPIC_BASE_URL": "https://gw"},
+            "hooks": {"Stop": [{"hooks": [{"type": "command", "command": "ucode-stop"}]}]},
+        }
+        monkeypatch.setattr(claude, "read_json_safe", lambda p: ucode_settings)
+        caller = json.dumps(
+            {
+                "hooks": {"Stop": [{"hooks": [{"type": "command", "command": "caller-stop"}]}]},
+                "statusLine": {"type": "command", "command": "sl"},
+            }
+        )
+        argv = claude._build_claude_argv("claude", ["--settings", caller, "-p", "hi"])
+        # Exactly one --settings reaches Claude, and the caller's raw flag is gone.
+        assert argv.count("--settings") == 1
+        assert argv[:2] == ["claude", "--settings"]
+        assert argv[3:] == ["-p", "hi"]
+        merged = json.loads(argv[2])
+        # ucode's gateway config survives.
+        assert merged["apiKeyHelper"] == "ucode-helper"
+        assert merged["env"]["ANTHROPIC_BASE_URL"] == "https://gw"
+        # The caller's own (non-hook) settings pass through.
+        assert merged["statusLine"] == {"type": "command", "command": "sl"}
+        # Hooks from BOTH sides fire (unioned, not clobbered).
+        stop_cmds = [h["command"] for e in merged["hooks"]["Stop"] for h in e["hooks"]]
+        assert "ucode-stop" in stop_cmds
+        assert "caller-stop" in stop_cmds
+
+    def test_equals_form_is_handled(self, monkeypatch):
+        monkeypatch.setattr(claude, "read_json_safe", lambda p: {"apiKeyHelper": "u"})
+        caller = json.dumps({"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "c"}]}]}})
+        argv = claude._build_claude_argv("claude", [f"--settings={caller}"])
+        assert argv.count("--settings") == 1
+        merged = json.loads(argv[2])
+        assert merged["apiKeyHelper"] == "u"
+        assert merged["hooks"]["Stop"][0]["hooks"][0]["command"] == "c"
+
+    def test_ucode_wins_on_conflicting_env(self, monkeypatch):
+        monkeypatch.setattr(
+            claude, "read_json_safe", lambda p: {"env": {"ANTHROPIC_BASE_URL": "https://ucode"}}
+        )
+        caller = json.dumps({"env": {"ANTHROPIC_BASE_URL": "https://caller", "FOO": "bar"}})
+        argv = claude._build_claude_argv("claude", ["--settings", caller])
+        merged = json.loads(argv[2])
+        assert merged["env"]["ANTHROPIC_BASE_URL"] == "https://ucode"  # ucode wins
+        assert merged["env"]["FOO"] == "bar"  # caller's non-conflicting key kept
+
+    def test_file_path_caller_settings(self, tmp_path, monkeypatch):
+        caller_file = tmp_path / "caller.json"
+        caller_file.write_text(
+            json.dumps(
+                {"hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": "cs"}]}]}}
+            )
+        )
+
+        def fake_read(p):
+            if str(p) == str(claude.CLAUDE_SETTINGS_PATH):
+                return {"apiKeyHelper": "u"}
+            return json.loads(p.read_text())
+
+        monkeypatch.setattr(claude, "read_json_safe", fake_read)
+        argv = claude._build_claude_argv("claude", ["--settings", str(caller_file)])
+        assert argv.count("--settings") == 1
+        merged = json.loads(argv[2])
+        assert merged["apiKeyHelper"] == "u"
+        assert merged["hooks"]["SessionStart"][0]["hooks"][0]["command"] == "cs"
+
+    def test_unparseable_value_passed_through(self, monkeypatch):
+        monkeypatch.setattr(claude, "read_json_safe", lambda p: {"apiKeyHelper": "u"})
+        argv = claude._build_claude_argv("claude", ["--settings", "not-json-not-a-file"])
+        # Could not parse → passed through untouched rather than dropped.
+        assert "not-json-not-a-file" in argv
