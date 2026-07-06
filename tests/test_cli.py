@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+from contextlib import ExitStack
 from unittest.mock import patch
 
 import pytest
@@ -60,7 +61,9 @@ MINIMAL_STATE = {
 
 class TestHelp:
     def test_no_args_shows_help(self):
-        result = runner.invoke(app, [])
+        # Clear any policy env inherited from the host shell, else bare `ucode`
+        # takes the budget-policy launch path instead of printing help.
+        result = runner.invoke(app, [], env={"UCODE_BUDGET_POLICY": ""})
         # no_args_is_help=True exits with code 0 or 2 depending on typer version
         assert result.exit_code in (0, 2)
         assert "Usage:" in result.output
@@ -185,12 +188,112 @@ class TestSubcommandRouting:
             )
 
         assert result.exit_code == 0, result.output
-        mock_configure.assert_called_once_with(
-            "claude", MINIMAL_STATE, "system.ai.claude-opus-4-8"
-        )
+        mock_configure.assert_called_once_with("claude", MINIMAL_STATE, "system.ai.claude-opus-4-8")
         mock_launch.assert_called_once()
         assert mock_launch.call_args.args[0] == "claude"
         assert mock_launch.call_args.args[2] == ["--model", "opus"]
+
+    def _enter_launch_patches(self, stack, tool, extra):
+        """Enter the shared launch no-op patches plus test-specific ones under
+        an ExitStack; return the launch_agent mock (the last shared patch)."""
+        mocks = [stack.enter_context(cm) for cm in _patch_launch(tool)]
+        for cm in extra:
+            stack.enter_context(cm)
+        return mocks[-1]
+
+    def test_explicit_launch_blocked_and_redirected_by_policy(self):
+        """`ucode claude` under a policy that requires Codex must not launch
+        Claude — it blocks and boots the recommended tool/model instead."""
+        with ExitStack() as stack:
+            mock_launch = self._enter_launch_patches(
+                stack,
+                "codex",
+                [
+                    patch("ucode.cli.apply_pat_environment"),
+                    patch(
+                        "ucode.cli.resolve_budget_policy_launch",
+                        return_value=("codex", "gpt-5-4-mini"),
+                    ),
+                ],
+            )
+            result = runner.invoke(
+                app,
+                ["claude"],
+                env={"UCODE_BUDGET_POLICY": "/tmp/budget-policy.json"},
+            )
+
+        assert result.exit_code == 0, result.output
+        mock_launch.assert_called_once()
+        assert mock_launch.call_args.args[0] == "codex"
+        flat = _strip_ansi(result.output)
+        assert "not allowed" in flat
+        assert "Codex" in flat
+
+    def test_explicit_launch_allowed_when_policy_matches(self):
+        """When the policy already recommends the requested tool, launch it
+        unchanged with no redirect warning."""
+        with ExitStack() as stack:
+            mock_launch = self._enter_launch_patches(
+                stack,
+                "claude",
+                [
+                    patch("ucode.cli.apply_pat_environment"),
+                    patch(
+                        "ucode.cli.resolve_budget_policy_launch",
+                        return_value=("claude", None),
+                    ),
+                ],
+            )
+            result = runner.invoke(
+                app,
+                ["claude"],
+                env={"UCODE_BUDGET_POLICY": "/tmp/budget-policy.json"},
+            )
+
+        assert result.exit_code == 0, result.output
+        mock_launch.assert_called_once()
+        assert mock_launch.call_args.args[0] == "claude"
+        assert "not allowed" not in _strip_ansi(result.output)
+
+    def test_explicit_launch_not_blocked_when_policy_unresolved(self):
+        """A transient fetch failure (resolve returns None) must not lock the
+        user out — the requested tool still launches."""
+        with ExitStack() as stack:
+            mock_launch = self._enter_launch_patches(
+                stack,
+                "claude",
+                [
+                    patch("ucode.cli.apply_pat_environment"),
+                    patch("ucode.cli.resolve_budget_policy_launch", return_value=None),
+                ],
+            )
+            result = runner.invoke(
+                app,
+                ["claude"],
+                env={"UCODE_BUDGET_POLICY": "/tmp/budget-policy.json"},
+            )
+
+        assert result.exit_code == 0, result.output
+        mock_launch.assert_called_once()
+        assert mock_launch.call_args.args[0] == "claude"
+
+    def test_explicit_launch_ignores_policy_when_none_configured(self):
+        """No policy (env unset and no default file) → resolve is never
+        consulted."""
+        with ExitStack() as stack:
+            mock_launch = self._enter_launch_patches(
+                stack, "claude", [patch("ucode.cli.apply_pat_environment")]
+            )
+            resolve_mock = stack.enter_context(patch("ucode.cli.resolve_budget_policy_launch"))
+            # Force "no policy configured" regardless of the host's env or an
+            # existing ~/.ucode/budget-policy.json file.
+            stack.enter_context(patch("ucode.cli.budget_policy_configured", return_value=False))
+            result = runner.invoke(app, ["claude"])
+
+        assert result.exit_code == 0, result.output
+        resolve_mock.assert_not_called()
+        mock_launch.assert_called_once()
+        assert mock_launch.call_args.args[0] == "claude"
 
 
 class TestMcpSubcommands:

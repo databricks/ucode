@@ -503,6 +503,24 @@ class TestConfigureSelectedTools:
         assert result["available_tools"] == ["codex"]
 
 
+class TestBudgetPolicyConfigured:
+    def test_true_when_env_set(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("UCODE_BUDGET_POLICY", str(tmp_path / "missing.json"))
+        assert agents_mod.budget_policy_configured() is True
+
+    def test_true_when_default_file_exists(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("UCODE_BUDGET_POLICY", raising=False)
+        policy_path = tmp_path / "budget-policy.json"
+        policy_path.write_text("{}", encoding="utf-8")
+        monkeypatch.setattr(agents_mod, "BUDGET_POLICY_PATH", policy_path)
+        assert agents_mod.budget_policy_configured() is True
+
+    def test_false_when_no_env_and_no_file(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("UCODE_BUDGET_POLICY", raising=False)
+        monkeypatch.setattr(agents_mod, "BUDGET_POLICY_PATH", tmp_path / "budget-policy.json")
+        assert agents_mod.budget_policy_configured() is False
+
+
 class TestLaunchBudgetStatus:
     def test_prints_budget_status_for_codex(self, monkeypatch, capsys):
         launched: list[tuple[dict, list[str]]] = []

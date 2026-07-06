@@ -11,6 +11,7 @@ from rich.panel import Panel
 from ucode.agents import (
     TOOL_SPECS,
     budget_hook_status_line,
+    budget_policy_configured,
     budget_policy_env_configured,
     check_gateway_endpoint,
     configure_selected_tools,
@@ -704,11 +705,41 @@ def _auto_configure_tool(tool: str) -> None:
         raise RuntimeError(f"{spec['display']} validation failed — config reverted.")
 
 
+def _enforce_budget_policy(tool: str, state: dict) -> tuple[str, str | None] | None:
+    """Return a (tool, model) redirect when the budget policy disallows `tool`.
+
+    Returns None when the requested tool is allowed, or when the policy target
+    cannot be resolved (a transient auth/spend fetch failure must not lock the
+    user out of every agent — the launch-time status still surfaces a warning).
+    """
+    target = resolve_budget_policy_launch(state)
+    if target is None:
+        return None
+    recommended_tool, recommended_model = target
+    if recommended_tool == tool:
+        return None
+    model_suffix = f" / {recommended_model}" if recommended_model else ""
+    console.print(
+        Panel(
+            f"[bold]{TOOL_SPECS[tool]['display']}[/bold] is [red]not allowed[/red] at the "
+            "current budget spend.\n"
+            f"Budget policy requires "
+            f"[cyan]{TOOL_SPECS[recommended_tool]['display']}{model_suffix}[/cyan] — "
+            "launching that instead.",
+            title="Budget Policy Enforced",
+            style="yellow",
+            expand=False,
+        )
+    )
+    return recommended_tool, recommended_model
+
+
 def _launch_tool(
     tool_name: str,
     ctx: typer.Context,
     *,
     explicit_model: str | None = None,
+    enforce_budget_policy: bool = True,
 ) -> None:
     try:
         tool = normalize_tool(tool_name)
@@ -717,6 +748,14 @@ def _launch_tool(
         # DATABRICKS_BEARER up front so every auth check below (and the
         # launched agent itself) uses the static token instead of OAuth.
         apply_pat_environment(existing)
+        # A configured budget policy is prescriptive, not advisory: block an
+        # explicit launch of a disallowed harness and redirect to the required
+        # tool/model before any auto-configure or validation work happens, so
+        # setup targets the tool that will actually run.
+        if enforce_budget_policy and budget_policy_configured():
+            redirect = _enforce_budget_policy(tool, existing)
+            if redirect is not None:
+                tool, explicit_model = redirect
         needs_auto_configure = not existing.get("workspace") or tool not in (
             existing.get("available_tools") or []
         )
@@ -785,7 +824,9 @@ def _launch_from_budget_policy(ctx: typer.Context) -> None:
                 "and live spend status."
             )
         tool, model = target
-        _launch_tool(tool, ctx, explicit_model=model)
+        # The target is already the policy's resolved tool/model, so skip the
+        # per-launch enforcement redirect (it would just resolve to itself).
+        _launch_tool(tool, ctx, explicit_model=model, enforce_budget_policy=False)
     except RuntimeError as exc:
         print_err(str(exc))
         raise typer.Exit(1) from None

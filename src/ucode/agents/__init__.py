@@ -90,6 +90,16 @@ def budget_policy_env_configured() -> bool:
     return bool(os.environ.get(BUDGET_POLICY_ENV_VAR, "").strip())
 
 
+def budget_policy_configured() -> bool:
+    """True when a budget policy is active via env override or the default file.
+
+    The env var only selects an alternate policy path; an admin who drops a
+    policy at the default location (~/.ucode/budget-policy.json) has configured
+    one just as much, so enforcement must key off either source.
+    """
+    return budget_policy_env_configured() or _budget_policy_path().exists()
+
+
 def _update_installed_tool_binary(tool: str, version: str | None = None) -> bool:
     spec = TOOL_SPECS[tool]
     binary = spec["binary"]

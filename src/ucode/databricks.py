@@ -14,6 +14,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import tempfile
 import time
 from concurrent.futures import (
     ThreadPoolExecutor,
@@ -749,6 +750,38 @@ def apply_pat_environment(state: dict) -> None:
     ensure_pat_bearer(state.get("profile"))
 
 
+def _incognito_login_env(env: dict[str, str]) -> dict[str, str]:
+    """Shim the `open` command so `databricks auth login` launches Chrome in
+    incognito mode, instead of the user's regular (possibly stale-session)
+    default browser.
+
+    macOS only: `databricks auth login` opens the OAuth URL via the `open`
+    binary internally, so we prepend a directory with a fake `open` to PATH
+    that special-cases http(s) URLs and passes everything else through.
+    """
+    if platform.system() != "Darwin":
+        return env
+    chrome = "/Applications/Google Chrome.app"
+    if not os.path.isdir(chrome):
+        return env
+    shim_dir = tempfile.mkdtemp(prefix="ucode-open-shim-")
+    shim_path = os.path.join(shim_dir, "open")
+    with Path(shim_path).open("w") as fh:
+        fh.write(
+            "#!/bin/sh\n"
+            'case "$1" in\n'
+            "  http://*|https://*)\n"
+            '    exec /usr/bin/open -na "Google Chrome" --args --incognito "$1" ;;\n'
+            "  *)\n"
+            '    exec /usr/bin/open "$@" ;;\n'
+            "esac\n"
+        )
+    os.chmod(shim_path, 0o755)
+    env = dict(env)
+    env["PATH"] = shim_dir + os.pathsep + env.get("PATH", "")
+    return env
+
+
 def run_databricks_login(workspace: str, profile: str | None = None) -> None:
     """Run databricks auth login unconditionally.
 
@@ -757,7 +790,7 @@ def run_databricks_login(workspace: str, profile: str | None = None) -> None:
     refreshed in place rather than overwriting another profile's tokens."""
     print_section("Databricks Login")
     print_kv("Workspace", workspace)
-    print_note("A browser may open for `databricks auth login`.")
+    print_note("A browser may open for `databricks auth login` (Chrome incognito, if available).")
     try:
         profile_name = profile or find_profile_name_for_host(workspace)
         cmd = [
@@ -768,7 +801,8 @@ def run_databricks_login(workspace: str, profile: str | None = None) -> None:
             workspace,
             *_profile_args(profile_name),
         ]
-        run(cmd, env=build_databricks_cli_env(workspace, profile_name), timeout=300)
+        env = _incognito_login_env(build_databricks_cli_env(workspace, profile_name))
+        run(cmd, env=env, timeout=300)
     except subprocess.CalledProcessError as exc:
         raise RuntimeError("`databricks auth login` failed.") from exc
     except subprocess.TimeoutExpired as exc:
