@@ -1096,10 +1096,8 @@ _MODEL_SERVICE_NAME_PREFIX = "model-services/"
 # Databricks-managed foundation models under `system.ai`.
 _MODEL_SERVICE_REQUIRED_PREFIX = "system.ai."
 
-# OSS chat families we currently support. Bucketed by name substring; add an
-# entry here to surface a new OSS family in OpenCode. Kept as an allowlist
-# (rather than a catch-all) so untested families aren't offered before we're
-# ready to support them.
+# Supported OSS chat families, matched by name substring. Add an entry to
+# support a new family.
 _OSS_MODEL_FAMILIES = ("kimi-", "glm-")
 
 # Per-family token limits (context window + max output tokens). These are a
@@ -1232,8 +1230,7 @@ def discover_model_services(
       matching ``system.ai.claude-*`` id (mirrors ``discover_claude_models``).
     - ``codex_models`` is the list of ``system.ai.*gpt-*`` ids.
     - ``gemini_models`` is the list of ``system.ai.*gemini-*`` ids, newest first.
-    - ``oss_models`` is the list of supported OSS-model ``system.ai.*`` ids
-      (kimi, glm; see ``_OSS_MODEL_FAMILIES``).
+    - ``oss_models`` is the list of OSS-model ``system.ai.*`` ids.
 
     ``reason`` is None on success, else explains why nothing was found. Family
     bucketing is by name substring because the model-services API does not
@@ -1255,10 +1252,6 @@ def discover_model_services(
     codex_models = [m for m in ids if "gpt-" in m]
     gemini_models = sorted([m for m in ids if "gemini-" in m], key=model_version_sort_key)
 
-    # OSS models (kimi, glm) are served OpenAI-compatibly via the gateway's
-    # mlflow route. Bucketed by an explicit allowlist (_OSS_MODEL_FAMILIES) so
-    # only families we've validated are offered; other OSS families discovered
-    # from model-services are dropped until we add them here.
     oss_models = [m for m in ids if any(family in m for family in _OSS_MODEL_FAMILIES)]
 
     if not (claude_models or codex_models or gemini_models or oss_models):

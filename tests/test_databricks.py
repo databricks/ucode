@@ -187,13 +187,11 @@ class TestDiscoverModelServices:
         assert codex == ["system.ai.gpt-5"]
         # Gemini ordered newest-first via the shared sort key.
         assert gemini[0] == "system.ai.gemini-3-5-flash"
-        # OSS is an allowlist: kimi and glm land here (alphabetized by the
-        # sorted listing); llama (unsupported) does not.
+        # kimi and glm are the allowlisted OSS families; llama is not.
         assert oss == ["system.ai.glm-5-2", "system.ai.kimi-k2-7-code"]
 
     def test_oss_allowlist_drops_unsupported_families(self, monkeypatch):
-        # Only kimi/glm are supported OSS families; other OSS families and
-        # non-chat services (embeddings, rerankers) under system.ai.* are dropped.
+        # Only kimi/glm are allowlisted; other families are dropped.
         payload = {
             "model_services": [
                 _model_service("system.ai.glm-5-2"),
