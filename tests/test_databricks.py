@@ -250,9 +250,7 @@ class TestDiscoverModelServices:
         assert reason == "HTTP 500 Server Error"
 
     def test_no_matching_families_reports_sample(self, monkeypatch):
-        # Only an embedding service is present: no claude/gpt/gemini family
-        # matches, and it isn't in the OSS allowlist, so nothing is picked up.
-        payload = {"model_services": [_model_service("system.ai.bge-large-en-embed")]}
+        payload = {"model_services": [_model_service("system.ai.llama-4-maverick")]}
         monkeypatch.setattr(
             db_mod, "_http_get_json", lambda url, token, timeout=10: (payload, None)
         )
@@ -260,7 +258,7 @@ class TestDiscoverModelServices:
         claude, codex, gemini, oss, reason = db_mod.discover_model_services(WS, "token")
 
         assert (claude, codex, gemini, oss) == ({}, [], [], [])
-        assert reason is not None and "bge-large-en-embed" in reason
+        assert reason is not None and "llama-4-maverick" in reason
 
     def test_ignores_non_system_ai_schemas(self, monkeypatch):
         # The metastore listing returns services from every schema; only
