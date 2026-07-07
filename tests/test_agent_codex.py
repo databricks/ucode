@@ -91,6 +91,16 @@ class TestRenderOverlayUserAgent:
         # Revert must clean up the new key.
         assert ["model_providers", "ucode-databricks", "http_headers"] in codex.MANAGED_KEYS
 
+    def test_traffic_id_adds_header(self):
+        overlay = codex.render_overlay(WS, traffic_id="team-42")
+        headers = overlay["model_providers"]["ucode-databricks"]["http_headers"]
+        assert headers["x-databricks-traffic-id"] == "team-42"
+
+    def test_no_traffic_id_header_without_value(self):
+        overlay = codex.render_overlay(WS)
+        headers = overlay["model_providers"]["ucode-databricks"]["http_headers"]
+        assert "x-databricks-traffic-id" not in headers
+
 
 class TestCodexWriteConfig:
     def test_writes_ucode_profile_config_file(self, tmp_path, monkeypatch):

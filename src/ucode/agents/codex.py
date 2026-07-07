@@ -107,6 +107,7 @@ def _provider_block(
     databricks_profile: str | None,
     use_pat: bool = False,
     provider: str | None = None,
+    traffic_id: str | None = None,
 ) -> dict:
     auth_argv = build_auth_token_argv(workspace, databricks_profile, use_pat=use_pat)
     base_url = build_tool_base_url("codex", workspace)
@@ -117,6 +118,9 @@ def _provider_block(
     # provider from this header on every request.
     if provider:
         http_headers["Databricks-Model-Provider-Service"] = provider
+    # Tag outbound requests so the gateway can attribute this traffic.
+    if traffic_id:
+        http_headers["x-databricks-traffic-id"] = traffic_id
     return {
         "name": "Databricks AI Gateway",
         "base_url": base_url,
@@ -139,13 +143,14 @@ def render_overlay(
     databricks_profile: str | None = None,
     use_pat: bool = False,
     provider: str | None = None,
+    traffic_id: str | None = None,
 ) -> dict:
     overlay: dict = {"model_provider": CODEX_MODEL_PROVIDER_NAME}
     if model:
         overlay["model"] = model
     overlay["model_providers"] = {
         CODEX_MODEL_PROVIDER_NAME: _provider_block(
-            workspace, databricks_profile, use_pat, provider
+            workspace, databricks_profile, use_pat, provider, traffic_id
         ),
     }
     return overlay
