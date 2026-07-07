@@ -140,6 +140,23 @@ def _model_service(model_id: str) -> dict:
     return {"name": f"model-services/{model_id}"}
 
 
+class TestModelTokenLimits:
+    def test_glm_is_capped(self):
+        assert db_mod.model_token_limits("system.ai.glm-5-2") == {
+            "context": 200_000,
+            "output": 25_000,
+        }
+
+    def test_glm_matches_any_version(self):
+        assert db_mod.model_token_limits("system.ai.glm-4-6-flash") == {
+            "context": 200_000,
+            "output": 25_000,
+        }
+
+    def test_uncapped_model_returns_none(self):
+        assert db_mod.model_token_limits("system.ai.kimi-k2-7-code") is None
+
+
 class TestDiscoverModelServices:
     def test_buckets_families_by_name(self, monkeypatch):
         payload = {
