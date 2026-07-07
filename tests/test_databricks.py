@@ -168,6 +168,7 @@ class TestDiscoverModelServices:
                 _model_service("system.ai.gemini-2-5-flash"),
                 _model_service("system.ai.gemini-3-5-flash"),
                 _model_service("system.ai.kimi-k2-7-code"),
+                _model_service("system.ai.glm-5-2"),
                 _model_service("system.ai.llama-4-maverick"),
             ]
         }
@@ -186,16 +187,17 @@ class TestDiscoverModelServices:
         assert codex == ["system.ai.gpt-5"]
         # Gemini ordered newest-first via the shared sort key.
         assert gemini[0] == "system.ai.gemini-3-5-flash"
-        # OSS is the catch-all: kimi and llama (and any non-claude/gpt/gemini
-        # chat model) land here, sorted by their `system.ai.*` id.
-        assert oss == ["system.ai.kimi-k2-7-code", "system.ai.llama-4-maverick"]
+        # OSS is an allowlist: kimi and glm land here (alphabetized by the
+        # sorted listing); llama (unsupported) does not.
+        assert oss == ["system.ai.glm-5-2", "system.ai.kimi-k2-7-code"]
 
-    def test_oss_catch_all_excludes_non_chat_models(self, monkeypatch):
-        # glm/qwen/deepseek are unknown chat families -> OSS; embedding and
-        # reranker services under system.ai.* must be filtered out.
+    def test_oss_allowlist_drops_unsupported_families(self, monkeypatch):
+        # Only kimi/glm are supported OSS families; other OSS families and
+        # non-chat services (embeddings, rerankers) under system.ai.* are dropped.
         payload = {
             "model_services": [
                 _model_service("system.ai.glm-5-2"),
+                _model_service("system.ai.kimi-k2-7-code"),
                 _model_service("system.ai.qwen-3-coder"),
                 _model_service("system.ai.deepseek-v3"),
                 _model_service("system.ai.gte-large-embed"),
@@ -210,11 +212,7 @@ class TestDiscoverModelServices:
 
         assert reason is None
         assert (claude, codex, gemini) == ({}, [], [])
-        assert oss == [
-            "system.ai.deepseek-v3",
-            "system.ai.glm-5-2",
-            "system.ai.qwen-3-coder",
-        ]
+        assert oss == ["system.ai.glm-5-2", "system.ai.kimi-k2-7-code"]
 
     def test_paginates_via_next_page_token(self, monkeypatch):
         pages = {
@@ -252,8 +250,8 @@ class TestDiscoverModelServices:
         assert reason == "HTTP 500 Server Error"
 
     def test_no_matching_families_reports_sample(self, monkeypatch):
-        # Only non-chat model services (embeddings) are present, so no family —
-        # including the OSS catch-all — picks anything up.
+        # Only an embedding service is present: no claude/gpt/gemini family
+        # matches, and it isn't in the OSS allowlist, so nothing is picked up.
         payload = {"model_services": [_model_service("system.ai.bge-large-en-embed")]}
         monkeypatch.setattr(
             db_mod, "_http_get_json", lambda url, token, timeout=10: (payload, None)

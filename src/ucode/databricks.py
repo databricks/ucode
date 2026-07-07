@@ -1096,10 +1096,11 @@ _MODEL_SERVICE_NAME_PREFIX = "model-services/"
 # Databricks-managed foundation models under `system.ai`.
 _MODEL_SERVICE_REQUIRED_PREFIX = "system.ai."
 
-# Substrings identifying non-chat model services under `system.ai.` (embeddings,
-# rerankers, etc.). These are excluded from the OSS catch-all bucket because they
-# can't back a chat agent.
-_NON_CHAT_MODEL_MARKERS = ("embed", "rerank", "bge", "gte")
+# OSS chat families we currently support. Bucketed by name substring; add an
+# entry here to surface a new OSS family in OpenCode. Kept as an allowlist
+# (rather than a catch-all) so untested families aren't offered before we're
+# ready to support them.
+_OSS_MODEL_FAMILIES = ("kimi-", "glm-")
 
 # Per-family token limits (context window + max output tokens). These are a
 # property of the model + its `/ai-gateway/mlflow/v1` route (the gateway rejects
@@ -1231,7 +1232,8 @@ def discover_model_services(
       matching ``system.ai.claude-*`` id (mirrors ``discover_claude_models``).
     - ``codex_models`` is the list of ``system.ai.*gpt-*`` ids.
     - ``gemini_models`` is the list of ``system.ai.*gemini-*`` ids, newest first.
-    - ``oss_models`` is the list of OSS-model ``system.ai.*`` ids.
+    - ``oss_models`` is the list of supported OSS-model ``system.ai.*`` ids
+      (kimi, glm; see ``_OSS_MODEL_FAMILIES``).
 
     ``reason`` is None on success, else explains why nothing was found. Family
     bucketing is by name substring because the model-services API does not
@@ -1253,21 +1255,11 @@ def discover_model_services(
     codex_models = [m for m in ids if "gpt-" in m]
     gemini_models = sorted([m for m in ids if "gemini-" in m], key=model_version_sort_key)
 
-    # OSS is the catch-all for chat models that aren't claude/gpt/gemini (kimi,
-    # glm, llama, qwen, deepseek, ...), all served OpenAI-compatibly via the
-    # gateway's mlflow route. Bucket by exclusion rather than an allowlist so new
-    # families show up without a code change. `claude-` matches any claude id
-    # (not just the deduped picks in `claude_models`) so no claude model leaks
-    # into OSS. Non-chat model services (embeddings, rerankers) are also listed
-    # under `system.ai.` but can't back a chat agent, so they're filtered out.
-    def _is_non_chat(model_id: str) -> bool:
-        return any(marker in model_id for marker in _NON_CHAT_MODEL_MARKERS)
-
-    oss_models = [
-        m
-        for m in ids
-        if "claude-" not in m and "gpt-" not in m and "gemini-" not in m and not _is_non_chat(m)
-    ]
+    # OSS models (kimi, glm) are served OpenAI-compatibly via the gateway's
+    # mlflow route. Bucketed by an explicit allowlist (_OSS_MODEL_FAMILIES) so
+    # only families we've validated are offered; other OSS families discovered
+    # from model-services are dropped until we add them here.
+    oss_models = [m for m in ids if any(family in m for family in _OSS_MODEL_FAMILIES)]
 
     if not (claude_models or codex_models or gemini_models or oss_models):
         sample = ", ".join(ids[:5])
