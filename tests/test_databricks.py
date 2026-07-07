@@ -140,6 +140,23 @@ def _model_service(model_id: str) -> dict:
     return {"name": f"model-services/{model_id}"}
 
 
+class TestModelTokenLimits:
+    def test_glm_is_capped(self):
+        assert db_mod.model_token_limits("system.ai.glm-5-2") == {
+            "context": 200_000,
+            "output": 25_000,
+        }
+
+    def test_glm_matches_any_version(self):
+        assert db_mod.model_token_limits("system.ai.glm-4-6-flash") == {
+            "context": 200_000,
+            "output": 25_000,
+        }
+
+    def test_uncapped_model_returns_none(self):
+        assert db_mod.model_token_limits("system.ai.kimi-k2-7-code") is None
+
+
 class TestDiscoverModelServices:
     def test_buckets_families_by_name(self, monkeypatch):
         payload = {
@@ -151,6 +168,7 @@ class TestDiscoverModelServices:
                 _model_service("system.ai.gemini-2-5-flash"),
                 _model_service("system.ai.gemini-3-5-flash"),
                 _model_service("system.ai.kimi-k2-7-code"),
+                _model_service("system.ai.glm-5-2"),
                 _model_service("system.ai.llama-4-maverick"),
             ]
         }
@@ -169,9 +187,30 @@ class TestDiscoverModelServices:
         assert codex == ["system.ai.gpt-5"]
         # Gemini ordered newest-first via the shared sort key.
         assert gemini[0] == "system.ai.gemini-3-5-flash"
-        assert oss == ["system.ai.kimi-k2-7-code"]
-        # llama is not bucketed into any of the four families.
-        assert "system.ai.llama-4-maverick" not in codex + gemini + oss
+        # kimi and glm are the allowlisted OSS families; llama is not.
+        assert oss == ["system.ai.glm-5-2", "system.ai.kimi-k2-7-code"]
+
+    def test_oss_allowlist_drops_unsupported_families(self, monkeypatch):
+        # Only kimi/glm are allowlisted; other families are dropped.
+        payload = {
+            "model_services": [
+                _model_service("system.ai.glm-5-2"),
+                _model_service("system.ai.kimi-k2-7-code"),
+                _model_service("system.ai.qwen-3-coder"),
+                _model_service("system.ai.deepseek-v3"),
+                _model_service("system.ai.gte-large-embed"),
+                _model_service("system.ai.bge-reranker-v2"),
+            ]
+        }
+        monkeypatch.setattr(
+            db_mod, "_http_get_json", lambda url, token, timeout=10: (payload, None)
+        )
+
+        claude, codex, gemini, oss, reason = db_mod.discover_model_services(WS, "token")
+
+        assert reason is None
+        assert (claude, codex, gemini) == ({}, [], [])
+        assert oss == ["system.ai.glm-5-2", "system.ai.kimi-k2-7-code"]
 
     def test_paginates_via_next_page_token(self, monkeypatch):
         pages = {

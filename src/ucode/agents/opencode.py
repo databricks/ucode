@@ -20,6 +20,7 @@ from ucode.databricks import (
     TOKEN_REFRESH_INTERVAL_SECONDS,
     build_opencode_base_urls,
     get_databricks_token,
+    model_token_limits,
 )
 from ucode.state import mark_tool_managed, save_state
 from ucode.telemetry import agent_version, ucode_version
@@ -67,6 +68,20 @@ def _resolve_model_selector(model: str, opencode_models: dict[str, list[str]]) -
         return f"databricks-oss/{model}"
 
     return model
+
+
+def _oss_model_overlay(model: str, ua_header: dict[str, str]) -> dict:
+    """Per-model overlay for an OSS model entry.
+
+    All OSS models carry the User-Agent header; models with known token limits
+    also pin `limit` (context + output) so OpenCode clamps `max_tokens` to a
+    value the gateway accepts. OpenCode's schema requires both fields together,
+    so the limits table always supplies both."""
+    overlay: dict = {"headers": ua_header}
+    limits = model_token_limits(model)
+    if limits is not None:
+        overlay["limit"] = limits
+    return overlay
 
 
 def render_overlay(
@@ -130,7 +145,7 @@ def render_overlay(
                 "apiKey": token,
                 "headers": auth_headers,
             },
-            "models": {m: {"headers": ua_header} for m in oss_models},
+            "models": {m: _oss_model_overlay(m, ua_header) for m in oss_models},
         }
         keys.append(["provider", "databricks-oss"])
 

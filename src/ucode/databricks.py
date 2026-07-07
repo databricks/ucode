@@ -1096,6 +1096,34 @@ _MODEL_SERVICE_NAME_PREFIX = "model-services/"
 # Databricks-managed foundation models under `system.ai`.
 _MODEL_SERVICE_REQUIRED_PREFIX = "system.ai."
 
+# Supported OSS chat families, matched by name substring. Add an entry to
+# support a new family.
+_OSS_MODEL_FAMILIES = ("kimi-", "glm-")
+
+# Per-family token limits (context window + max output tokens). These are a
+# property of the model + its `/ai-gateway/mlflow/v1` route (the gateway rejects
+# requests whose output exceeds the cap), not of any one agent — so every agent
+# that serves OSS models reads this single table and translates it into its own
+# config dialect. Both fields are provided because agents like OpenCode require
+# context and output together. Keyed by family substring; add an entry to bound
+# a new model.
+_MODEL_TOKEN_LIMITS: dict[str, dict[str, int]] = {
+    # GLM-4.6: 200k context, but the gateway caps output well below the model's
+    # native 128k — pin 25k so requests aren't rejected.
+    "glm": {"context": 200_000, "output": 25_000},
+}
+
+
+def model_token_limits(model_id: str) -> dict[str, int] | None:
+    """Return ``{"context": ..., "output": ...}`` limits for ``model_id``, or None.
+
+    Matches by family substring (e.g. any ``*glm*`` id). None means the model
+    has no known limits and the agent should not pin any."""
+    for family, limits in _MODEL_TOKEN_LIMITS.items():
+        if family in model_id:
+            return dict(limits)
+    return None
+
 
 def _model_service_id(service: dict) -> str | None:
     """Extract the `system.ai.<model-name>` id from one model-service entry.
@@ -1223,7 +1251,8 @@ def discover_model_services(
 
     codex_models = [m for m in ids if "gpt-" in m]
     gemini_models = sorted([m for m in ids if "gemini-" in m], key=model_version_sort_key)
-    oss_models = [m for m in ids if "kimi-" in m]
+
+    oss_models = [m for m in ids if any(family in m for family in _OSS_MODEL_FAMILIES)]
 
     if not (claude_models or codex_models or gemini_models or oss_models):
         sample = ", ".join(ids[:5])
