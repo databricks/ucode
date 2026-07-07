@@ -1096,6 +1096,11 @@ _MODEL_SERVICE_NAME_PREFIX = "model-services/"
 # Databricks-managed foundation models under `system.ai`.
 _MODEL_SERVICE_REQUIRED_PREFIX = "system.ai."
 
+# Substrings identifying non-chat model services under `system.ai.` (embeddings,
+# rerankers, etc.). These are excluded from the OSS catch-all bucket because they
+# can't back a chat agent.
+_NON_CHAT_MODEL_MARKERS = ("embed", "rerank", "bge", "gte")
+
 
 def _model_service_id(service: dict) -> str | None:
     """Extract the `system.ai.<model-name>` id from one model-service entry.
@@ -1223,7 +1228,22 @@ def discover_model_services(
 
     codex_models = [m for m in ids if "gpt-" in m]
     gemini_models = sorted([m for m in ids if "gemini-" in m], key=model_version_sort_key)
-    oss_models = [m for m in ids if "kimi-" in m]
+
+    # OSS is the catch-all for chat models that aren't claude/gpt/gemini (kimi,
+    # glm, llama, qwen, deepseek, ...), all served OpenAI-compatibly via the
+    # gateway's mlflow route. Bucket by exclusion rather than an allowlist so new
+    # families show up without a code change. `claude-` matches any claude id
+    # (not just the deduped picks in `claude_models`) so no claude model leaks
+    # into OSS. Non-chat model services (embeddings, rerankers) are also listed
+    # under `system.ai.` but can't back a chat agent, so they're filtered out.
+    def _is_non_chat(model_id: str) -> bool:
+        return any(marker in model_id for marker in _NON_CHAT_MODEL_MARKERS)
+
+    oss_models = [
+        m
+        for m in ids
+        if "claude-" not in m and "gpt-" not in m and "gemini-" not in m and not _is_non_chat(m)
+    ]
 
     if not (claude_models or codex_models or gemini_models or oss_models):
         sample = ", ".join(ids[:5])

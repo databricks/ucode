@@ -169,9 +169,35 @@ class TestDiscoverModelServices:
         assert codex == ["system.ai.gpt-5"]
         # Gemini ordered newest-first via the shared sort key.
         assert gemini[0] == "system.ai.gemini-3-5-flash"
-        assert oss == ["system.ai.kimi-k2-7-code"]
-        # llama is not bucketed into any of the four families.
-        assert "system.ai.llama-4-maverick" not in codex + gemini + oss
+        # OSS is the catch-all: kimi and llama (and any non-claude/gpt/gemini
+        # chat model) land here, sorted by their `system.ai.*` id.
+        assert oss == ["system.ai.kimi-k2-7-code", "system.ai.llama-4-maverick"]
+
+    def test_oss_catch_all_excludes_non_chat_models(self, monkeypatch):
+        # glm/qwen/deepseek are unknown chat families -> OSS; embedding and
+        # reranker services under system.ai.* must be filtered out.
+        payload = {
+            "model_services": [
+                _model_service("system.ai.glm-5-2"),
+                _model_service("system.ai.qwen-3-coder"),
+                _model_service("system.ai.deepseek-v3"),
+                _model_service("system.ai.gte-large-embed"),
+                _model_service("system.ai.bge-reranker-v2"),
+            ]
+        }
+        monkeypatch.setattr(
+            db_mod, "_http_get_json", lambda url, token, timeout=10: (payload, None)
+        )
+
+        claude, codex, gemini, oss, reason = db_mod.discover_model_services(WS, "token")
+
+        assert reason is None
+        assert (claude, codex, gemini) == ({}, [], [])
+        assert oss == [
+            "system.ai.deepseek-v3",
+            "system.ai.glm-5-2",
+            "system.ai.qwen-3-coder",
+        ]
 
     def test_paginates_via_next_page_token(self, monkeypatch):
         pages = {
@@ -209,7 +235,9 @@ class TestDiscoverModelServices:
         assert reason == "HTTP 500 Server Error"
 
     def test_no_matching_families_reports_sample(self, monkeypatch):
-        payload = {"model_services": [_model_service("system.ai.llama-4-maverick")]}
+        # Only non-chat model services (embeddings) are present, so no family —
+        # including the OSS catch-all — picks anything up.
+        payload = {"model_services": [_model_service("system.ai.bge-large-en-embed")]}
         monkeypatch.setattr(
             db_mod, "_http_get_json", lambda url, token, timeout=10: (payload, None)
         )
@@ -217,7 +245,7 @@ class TestDiscoverModelServices:
         claude, codex, gemini, oss, reason = db_mod.discover_model_services(WS, "token")
 
         assert (claude, codex, gemini, oss) == ({}, [], [], [])
-        assert reason is not None and "llama-4-maverick" in reason
+        assert reason is not None and "bge-large-en-embed" in reason
 
     def test_ignores_non_system_ai_schemas(self, monkeypatch):
         # The metastore listing returns services from every schema; only
