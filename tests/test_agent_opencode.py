@@ -93,6 +93,21 @@ class TestRenderOverlay:
         options = overlay["provider"]["databricks-oss"]["options"]
         assert options["baseURL"] == f"{WS}/ai-gateway/mlflow/v1"
 
+    def test_glm_gets_token_limits(self):
+        models = {"oss": ["system.ai.glm-5-2"]}
+        overlay, _ = opencode.render_overlay("system.ai.glm-5-2", "tok", _base_urls(), models)
+        glm = overlay["provider"]["databricks-oss"]["models"]["system.ai.glm-5-2"]
+        # OpenCode's schema requires both context and output on `limit`.
+        assert glm["limit"] == {"context": 200000, "output": 25000}
+
+    def test_non_glm_oss_model_has_no_output_cap(self):
+        models = {"oss": ["system.ai.kimi-k2-7-code"]}
+        overlay, _ = opencode.render_overlay(
+            "system.ai.kimi-k2-7-code", "tok", _base_urls(), models
+        )
+        kimi = overlay["provider"]["databricks-oss"]["models"]["system.ai.kimi-k2-7-code"]
+        assert "limit" not in kimi
+
     def test_token_in_api_key(self):
         models = {"anthropic": ["claude-sonnet"]}
         overlay, _ = opencode.render_overlay("claude-sonnet", "mytoken", _base_urls(), models)
