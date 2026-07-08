@@ -1055,7 +1055,12 @@ class TestGetDatabricksToken:
         fake = tmp_path / "databricks"
         fake.write_text(f"#!/bin/sh\n{script}\n")
         fake.chmod(0o755)
-        return {**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}"}
+        env = {**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}"}
+        # Drop any ambient DATABRICKS_BEARER: get_databricks_token short-circuits
+        # on it and would never invoke the fake CLI, so these tests must exercise
+        # the shim, not a leaked CI/developer bearer.
+        env.pop("DATABRICKS_BEARER", None)
+        return env
 
     def test_returns_token_on_success(self, tmp_path, monkeypatch):
         env = self._fake_databricks(
@@ -1131,7 +1136,7 @@ class TestGetDatabricksToken:
         argv_log = tmp_path / "argv"
         env = self._fake_databricks(
             tmp_path,
-            f'printf "%s\\n" "$@" >> {argv_log}\n'
+            f'printf "%s\\n" "$@" >> "{argv_log}"\n'
             'echo \'{"access_token": "good-token", "token_type": "Bearer"}\'',
         )
         monkeypatch.setattr("os.environ", env)
