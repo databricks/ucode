@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from typer.testing import CliRunner
@@ -1313,3 +1314,105 @@ class TestConfigureSharedStateSkipDiscovery:
         assert state["web_search_model"] == "databricks-gpt-5"
         # Existing model list preserved, not overwritten to {}.
         assert state["claude_models"] == {"opus": "databricks-claude-opus-4-8"}
+
+
+class TestConfigureSharedStateSkipPreflight:
+    """With skip_preflight (--skip-preflight), a prior configure is trusted:
+    no auth login, token fetch, gateway probe, or model discovery runs — but the
+    profile and base URLs are still resolved and state is persisted."""
+
+    WS = "https://cfg.databricks.com"
+
+    @staticmethod
+    def _stub(monkeypatch):
+        import ucode.cli as cli_mod
+
+        def _boom(name):
+            def _f(*a, **k):
+                raise AssertionError(f"{name} must not run under skip_preflight")
+
+            return _f
+
+        monkeypatch.setattr(cli_mod, "normalize_workspace_url", lambda w: w)
+        # Any network round-trip is a hard failure in this mode.
+        monkeypatch.setattr(cli_mod, "ensure_databricks_auth", _boom("ensure_databricks_auth"))
+        monkeypatch.setattr(cli_mod, "run_databricks_login", _boom("run_databricks_login"))
+        monkeypatch.setattr(cli_mod, "ensure_pat_bearer", _boom("ensure_pat_bearer"))
+        monkeypatch.setattr(cli_mod, "get_databricks_token", _boom("get_databricks_token"))
+        monkeypatch.setattr(cli_mod, "ensure_ai_gateway_v2", _boom("ensure_ai_gateway_v2"))
+        monkeypatch.setattr(cli_mod, "discover_model_services", _boom("discover_model_services"))
+        monkeypatch.setattr(cli_mod, "discover_codex_models", _boom("discover_codex_models"))
+        monkeypatch.setattr(cli_mod, "find_profile_name_for_host", lambda w: "resolved")
+        monkeypatch.setattr(cli_mod, "build_shared_base_urls", lambda w: {"codex": "u/codex"})
+        saved: list[dict] = []
+        monkeypatch.setattr(cli_mod, "save_state", lambda s: saved.append(dict(s)))
+        return cli_mod, saved
+
+    def test_skips_auth_gateway_and_discovery_but_persists(self, monkeypatch):
+        cli_mod, saved = self._stub(monkeypatch)
+        monkeypatch.setattr(
+            cli_mod,
+            "load_state",
+            lambda: {"workspace": self.WS, "codex_models": ["databricks-gpt-5"]},
+        )
+
+        state = cli_mod.configure_shared_state(
+            self.WS, profile="DEFAULT", tools=["codex"], skip_preflight=True
+        )
+
+        # base_urls rebuilt and state saved, but the prior model list is left intact.
+        assert state["base_urls"] == {"codex": "u/codex"}
+        assert state["codex_models"] == ["databricks-gpt-5"]
+        assert saved and saved[-1]["base_urls"] == {"codex": "u/codex"}
+
+    def test_resolves_profile_locally_when_missing(self, monkeypatch):
+        cli_mod, _ = self._stub(monkeypatch)
+        monkeypatch.setattr(cli_mod, "load_state", lambda: {"workspace": self.WS})
+
+        state = cli_mod.configure_shared_state(self.WS, profile=None, skip_preflight=True)
+
+        # find_profile_name_for_host is a local ~/.databrickscfg lookup (no network).
+        assert state["profile"] == "resolved"
+
+
+class TestSkipPreflightFlag:
+    """`--skip-preflight` on a launch command threads through _launch_tool to
+    configure_shared_state as skip_preflight."""
+
+    LAUNCH_TOOLS = ["codex", "claude", "gemini", "opencode", "copilot", "pi"]
+
+    @staticmethod
+    def _patches(cfg):
+        return [
+            patch("ucode.cli.ensure_bootstrap_dependencies"),
+            patch("ucode.cli._auto_configure_tool"),
+            patch("ucode.cli.load_state", return_value=MINIMAL_STATE),
+            patch("ucode.cli.ensure_provider_state", return_value=MINIMAL_STATE),
+            patch("ucode.cli.configure_shared_state", cfg),
+            patch(
+                "ucode.cli.resolve_launch_model",
+                return_value=(MINIMAL_STATE, "databricks-claude-sonnet-4"),
+            ),
+            patch("ucode.cli.configure_tool", return_value=MINIMAL_STATE),
+            patch("ucode.cli.launch_agent"),
+        ]
+
+    @pytest.mark.parametrize("tool", LAUNCH_TOOLS)
+    def test_flag_sets_skip_preflight_true(self, tool):
+        cfg = MagicMock(return_value=MINIMAL_STATE)
+        with contextlib.ExitStack() as stack:
+            for p in self._patches(cfg):
+                stack.enter_context(p)
+            result = runner.invoke(app, [tool, "--skip-preflight"])
+        assert result.exit_code == 0, result.output
+        assert cfg.call_args.kwargs["skip_preflight"] is True
+
+    @pytest.mark.parametrize("tool", ["codex", "gemini"])
+    def test_absent_flag_defaults_false(self, tool):
+        cfg = MagicMock(return_value=MINIMAL_STATE)
+        with contextlib.ExitStack() as stack:
+            for p in self._patches(cfg):
+                stack.enter_context(p)
+            result = runner.invoke(app, [tool])
+        assert result.exit_code == 0, result.output
+        assert cfg.call_args.kwargs["skip_preflight"] is False

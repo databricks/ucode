@@ -216,6 +216,7 @@ def configure_shared_state(
     force_login: bool = False,
     use_pat: bool | None = None,
     skip_model_discovery: bool = False,
+    skip_preflight: bool = False,
 ) -> dict:
     """Log into Databricks, enforce AI Gateway v2, fetch model lists, persist state.
 
@@ -229,6 +230,12 @@ def configure_shared_state(
     ``--profile`` to every CLI invocation so ambiguous `~/.databrickscfg`
     entries (e.g. DEFAULT and a named profile both pointing at the same host)
     don't error out. If ``None``, we resolve it from the host after login.
+    If skip_preflight is True, skip the entire preflight block below — auth
+    validation, the AI Gateway probe, and model discovery — trusting a prior
+    ``ucode configure``. The PAT/bearer is already exported (``apply_pat_environment``
+    in ``_launch_tool``) and the gateway was verified by that earlier configure.
+    Only the local profile resolution and the shared state assembly still run;
+    the saved model lists are preserved.
     """
     workspace = normalize_workspace_url(workspace)
     prior_state = load_state()
@@ -236,6 +243,48 @@ def configure_shared_state(
     if use_pat is None:
         use_pat = bool(prior_state.get("use_pat")) and previous_workspace == workspace
     fetch_all = tools is None
+
+    # Assemble the shared workspace state that doesn't depend on model discovery:
+    # workspace, profile, auth mode, base URLs. `profile` may still be None here;
+    # each path below resolves it once, where a host->profile lookup is reliable
+    # (the skip branch trusts the prior configure; the preflight resolves after
+    # login). --skip-preflight persists exactly this and returns, trusting a prior
+    # `ucode configure` — it already validated auth + the AI Gateway and saved the
+    # model lists (carried over by load_state, left untouched).
+    state = load_state()
+    state["workspace"] = workspace
+    if profile:
+        state["profile"] = profile
+    else:
+        state.pop("profile", None)
+    # UC discovery is now always-on; drop any flag persisted by older versions.
+    state.pop("uc_enabled", None)
+    # Persist the auth mode so launches rebuild the same (PAT-based) agent
+    # auth command; an explicit re-configure without --use-pat clears it.
+    if use_pat:
+        state["use_pat"] = True
+    else:
+        state.pop("use_pat", None)
+    state["base_urls"] = build_shared_base_urls(workspace)
+
+    if skip_preflight:
+        # A prior `ucode configure` created the profile; resolve it locally (no
+        # login needed) and persist it so launches disambiguate.
+        if profile is None:
+            profile = find_profile_name_for_host(workspace)
+            if profile:
+                state["profile"] = profile
+        save_state(state)
+        # Scrub MCP entries ucode wrote for a previous workspace.
+        if previous_workspace and previous_workspace != workspace:
+            purge_cross_workspace_mcp_residue(state, workspace)
+        # Diagnostic reasons are transient (attached after save_state so they
+        # don't land on disk). No discovery ran, so there is nothing to report.
+        state["_discovery_reasons"] = {"claude": None, "gemini": None, "codex": None, "oss": None}
+        return state
+
+    # ── Preflight (bypassed above under --skip-preflight): validate Databricks
+    #    auth + the AI Gateway, then discover the available models. ──
     if use_pat:
         if not profile:
             raise RuntimeError(
@@ -260,9 +309,11 @@ def configure_shared_state(
     else:
         ensure_databricks_auth(workspace, profile)
     # After login the profile exists in ~/.databrickscfg, so a host->profile
-    # lookup is reliable. Persist it so subsequent CLI calls disambiguate.
+    # lookup is reliable even when it returned nothing above.
     if profile is None:
         profile = find_profile_name_for_host(workspace)
+        if profile:
+            state["profile"] = profile
     with spinner("Verifying Unity AI Gateway..."):
         token = get_databricks_token(workspace, profile)
         ensure_ai_gateway_v2(workspace, token)
@@ -283,6 +334,7 @@ def configure_shared_state(
     gemini_models = []
     codex_models = []
     oss_models = []
+    opencode_models: dict[str, list[str]] = {}
     web_search_model: str | None = None
     if skip_model_discovery:
         # Provider mode: the agent routes through a Model Provider Service and
@@ -295,10 +347,11 @@ def configure_shared_state(
             if ws_models:
                 web_search_model = ws_models[0]
     else:
-        # UC-first, best-effort: one UC model-services call yields all families as
-        # `system.ai.<model-name>` ids, bucketed by name. If a family comes back
-        # empty (workspace without UC model-services, or the listing failed), fall
-        # back to the per-family AI Gateway listing for that family only.
+        # UC-first, best-effort: one UC model-services call yields all families
+        # as `system.ai.<model-name>` ids, bucketed by name. If a family comes
+        # back empty (workspace without UC model-services, or the listing
+        # failed), fall back to the per-family AI Gateway listing for that
+        # family only.
         with spinner("Fetching available models..."):
             ms_claude, ms_codex, ms_gemini, ms_oss, ms_reason = discover_model_services(
                 workspace, token
@@ -317,30 +370,13 @@ def configure_shared_state(
                     codex_models, codex_reason = discover_codex_models(workspace, token)
             if want_oss:
                 oss_models, oss_reason = ms_oss, ms_reason
-    opencode_models: dict[str, list[str]] = {}
-    if claude_models:
-        opencode_models["anthropic"] = list(claude_models.values())
-    if gemini_models:
-        opencode_models["gemini"] = gemini_models
-    if oss_models:
-        opencode_models["oss"] = oss_models
+        if claude_models:
+            opencode_models["anthropic"] = list(claude_models.values())
+        if gemini_models:
+            opencode_models["gemini"] = gemini_models
+        if oss_models:
+            opencode_models["oss"] = oss_models
 
-    # Merge into existing workspace state so prior tool configs are preserved.
-    state = load_state()
-    state["workspace"] = workspace
-    if profile:
-        state["profile"] = profile
-    else:
-        state.pop("profile", None)
-    # UC discovery is now always-on; drop any flag persisted by older versions.
-    state.pop("uc_enabled", None)
-    # Persist the auth mode so launches rebuild the same (PAT-based) agent
-    # auth command; an explicit re-configure without --use-pat clears it.
-    if use_pat:
-        state["use_pat"] = True
-    else:
-        state.pop("use_pat", None)
-    state["base_urls"] = build_shared_base_urls(workspace)
     if skip_model_discovery:
         # Don't clobber any previously-discovered Databricks model lists; provider
         # mode just doesn't refresh or use them. Persist the web-search model so
@@ -822,7 +858,12 @@ def _auto_configure_tool(tool: str) -> None:
         raise RuntimeError(f"{spec['display']} validation failed — config reverted.")
 
 
-def _launch_tool(tool_name: str, ctx: typer.Context, provider: str | None = None) -> None:
+def _launch_tool(
+    tool_name: str,
+    ctx: typer.Context,
+    provider: str | None = None,
+    skip_preflight: bool = False,
+) -> None:
     try:
         tool = normalize_tool(tool_name)
         existing = load_state()
@@ -860,6 +901,7 @@ def _launch_tool(tool_name: str, ctx: typer.Context, provider: str | None = None
             profile=state.get("profile"),
             tools=[tool],
             skip_model_discovery=bool(provider),
+            skip_preflight=skip_preflight,
         )
         if provider:
             # Routing through a Model Provider Service pins no Databricks model;
@@ -892,6 +934,20 @@ def _launch_tool(tool_name: str, ctx: typer.Context, provider: str | None = None
         raise typer.Exit(130) from None
 
 
+# Launch-only escape hatch for managed/headless launchers (e.g. omnigent) that
+# have already run `ucode configure`: skip the ~5-10s per-launch auth + AI
+# Gateway re-validation. Distinct from the configure-only `--skip-validate`,
+# which skips the model smoke test.
+SkipPreflightOption = Annotated[
+    bool,
+    typer.Option(
+        "--skip-preflight",
+        help="Skip the per-launch Databricks auth + AI Gateway re-validation, trusting a "
+        "prior `ucode configure`.",
+    ),
+]
+
+
 @app.command("codex", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
 def codex_cmd(
     ctx: typer.Context,
@@ -904,9 +960,10 @@ def codex_cmd(
             "before any `--` separator.",
         ),
     ] = None,
+    skip_preflight: SkipPreflightOption = False,
 ) -> None:
     """Launch Codex via Databricks."""
-    _launch_tool("codex", ctx, provider=provider)
+    _launch_tool("codex", ctx, provider=provider, skip_preflight=skip_preflight)
 
 
 @app.command("claude", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
@@ -921,35 +978,36 @@ def claude_cmd(
             "before any `--` separator.",
         ),
     ] = None,
+    skip_preflight: SkipPreflightOption = False,
 ) -> None:
     """Launch Claude Code via Databricks."""
-    _launch_tool("claude", ctx, provider=provider)
+    _launch_tool("claude", ctx, provider=provider, skip_preflight=skip_preflight)
 
 
 @app.command("gemini", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
-def gemini_cmd(ctx: typer.Context) -> None:
+def gemini_cmd(ctx: typer.Context, skip_preflight: SkipPreflightOption = False) -> None:
     """Launch Gemini CLI via Databricks."""
-    _launch_tool("gemini", ctx)
+    _launch_tool("gemini", ctx, skip_preflight=skip_preflight)
 
 
 @app.command(
     "opencode", context_settings={"allow_extra_args": True, "ignore_unknown_options": True}
 )
-def opencode_cmd(ctx: typer.Context) -> None:
+def opencode_cmd(ctx: typer.Context, skip_preflight: SkipPreflightOption = False) -> None:
     """Launch OpenCode via Databricks."""
-    _launch_tool("opencode", ctx)
+    _launch_tool("opencode", ctx, skip_preflight=skip_preflight)
 
 
 @app.command("copilot", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
-def copilot_cmd(ctx: typer.Context) -> None:
+def copilot_cmd(ctx: typer.Context, skip_preflight: SkipPreflightOption = False) -> None:
     """Launch GitHub Copilot CLI via Databricks."""
-    _launch_tool("copilot", ctx)
+    _launch_tool("copilot", ctx, skip_preflight=skip_preflight)
 
 
 @app.command("pi", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
-def pi_cmd(ctx: typer.Context) -> None:
+def pi_cmd(ctx: typer.Context, skip_preflight: SkipPreflightOption = False) -> None:
     """Launch Pi coding agent via Databricks."""
-    _launch_tool("pi", ctx)
+    _launch_tool("pi", ctx, skip_preflight=skip_preflight)
 
 
 @configure_app.callback(invoke_without_command=True)
