@@ -1141,6 +1141,32 @@ class TestGetDatabricksToken:
         assert "--profile" in argv
         assert argv[argv.index("--profile") + 1] == "stablebox"
 
+    def test_force_refresh_appends_flag(self, tmp_path, monkeypatch):
+        # The apiKeyHelper (`ucode auth-token`) passes force_refresh=True so each
+        # refresh cycle bypasses `databricks auth token`'s "close to expiry"
+        # heuristic and hands back a token with a full fresh lifetime.
+        argv_log = tmp_path / "argv"
+        env = self._fake_databricks(
+            tmp_path,
+            f'printf "%s\\n" "$@" >> {argv_log}\n'
+            'echo \'{"access_token": "good-token", "token_type": "Bearer"}\'',
+        )
+        monkeypatch.setattr("os.environ", env)
+        token = get_databricks_token(WS, force_refresh=True)
+        assert token == "good-token"
+        assert "--force-refresh" in argv_log.read_text().splitlines()
+
+    def test_omits_force_refresh_flag_by_default(self, tmp_path, monkeypatch):
+        argv_log = tmp_path / "argv"
+        env = self._fake_databricks(
+            tmp_path,
+            f'printf "%s\\n" "$@" >> {argv_log}\n'
+            'echo \'{"access_token": "good-token", "token_type": "Bearer"}\'',
+        )
+        monkeypatch.setattr("os.environ", env)
+        get_databricks_token(WS)
+        assert "--force-refresh" not in argv_log.read_text().splitlines()
+
     def test_error_suggests_logout_when_matching_profile_exists(self, tmp_path, monkeypatch):
         env = self._fake_databricks(
             tmp_path,
