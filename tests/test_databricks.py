@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import time
 
 import pytest
 
@@ -1161,6 +1162,116 @@ class TestGetDatabricksToken:
         assert "stale or invalid" in message
         assert "databricks auth logout --profile example-profile" in message
         assert f"databricks auth login --host {WS} --profile example-profile" in message
+
+
+class TestForceRefreshLockAndCoalescing:
+    """Axis A of #190: serialize `--force-refresh` across processes and
+    coalesce redundant refreshes within TOKEN_REFRESH_COALESCE_SECONDS."""
+
+    def _fake_databricks(self, tmp_path, script: str) -> dict:
+        fake = tmp_path / "databricks"
+        fake.write_text(f"#!/bin/sh\n{script}\n")
+        fake.chmod(0o755)
+        return {**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}"}
+
+    def _argv_recording_env(self, tmp_path, argv_log) -> dict:
+        return self._fake_databricks(
+            tmp_path,
+            f'printf "%s\\n" "$@" >> {argv_log}\n'
+            'echo \'{"access_token": "good-token", "token_type": "Bearer"}\'',
+        )
+
+    def test_coalesces_force_refresh_when_sentinel_is_fresh(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(db_mod, "APP_DIR", tmp_path)
+        argv_log = tmp_path / "argv"
+        env = self._argv_recording_env(tmp_path, argv_log)
+        monkeypatch.setattr("os.environ", env)
+
+        _, sentinel_path = db_mod._refresh_lock_paths(WS, None)
+        sentinel_path.touch()  # fresh mtime == a peer just force-refreshed
+
+        token = get_databricks_token(WS, force_refresh=True)
+
+        assert token == "good-token"
+        argv = argv_log.read_text().splitlines()
+        assert "--force-refresh" not in argv
+
+    def test_performs_force_refresh_and_touches_sentinel_when_stale(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(db_mod, "APP_DIR", tmp_path)
+        argv_log = tmp_path / "argv"
+        env = self._argv_recording_env(tmp_path, argv_log)
+        monkeypatch.setattr("os.environ", env)
+
+        _, sentinel_path = db_mod._refresh_lock_paths(WS, None)
+        assert not sentinel_path.exists()
+
+        token = get_databricks_token(WS, force_refresh=True)
+
+        assert token == "good-token"
+        argv = argv_log.read_text().splitlines()
+        assert "--force-refresh" in argv
+        assert sentinel_path.exists()
+
+    def test_performs_force_refresh_when_sentinel_is_stale(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(db_mod, "APP_DIR", tmp_path)
+        argv_log = tmp_path / "argv"
+        env = self._argv_recording_env(tmp_path, argv_log)
+        monkeypatch.setattr("os.environ", env)
+
+        _, sentinel_path = db_mod._refresh_lock_paths(WS, None)
+        sentinel_path.touch()
+        old = time.time() - db_mod.TOKEN_REFRESH_COALESCE_SECONDS - 5
+        os.utime(sentinel_path, (old, old))
+
+        token = get_databricks_token(WS, force_refresh=True)
+
+        assert token == "good-token"
+        argv = argv_log.read_text().splitlines()
+        assert "--force-refresh" in argv
+
+    def test_degrades_to_no_lock_when_fcntl_missing(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(db_mod, "APP_DIR", tmp_path)
+        monkeypatch.setattr(db_mod, "fcntl", None)
+        env = self._fake_databricks(
+            tmp_path,
+            'echo \'{"access_token": "good-token", "token_type": "Bearer"}\'',
+        )
+        monkeypatch.setattr("os.environ", env)
+
+        token = get_databricks_token(WS, force_refresh=True)
+
+        assert token == "good-token"
+
+    def test_lock_file_path_differs_for_different_workspace_or_profile(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(db_mod, "APP_DIR", tmp_path)
+
+        lock_a, sentinel_a = db_mod._refresh_lock_paths(WS, None)
+        lock_b, sentinel_b = db_mod._refresh_lock_paths("https://other.databricks.com", None)
+        lock_c, sentinel_c = db_mod._refresh_lock_paths(WS, "some-profile")
+
+        assert lock_a != lock_b
+        assert lock_a != lock_c
+        assert lock_b != lock_c
+        assert sentinel_a != sentinel_b
+        assert sentinel_a != sentinel_c
+        assert lock_a.parent == tmp_path
+
+    def test_non_force_refresh_path_ignores_lock_and_sentinel(self, tmp_path, monkeypatch):
+        # force_refresh=False must stay cheap/unlocked: no lock file should
+        # even be created.
+        monkeypatch.setattr(db_mod, "APP_DIR", tmp_path)
+        env = self._fake_databricks(
+            tmp_path,
+            'echo \'{"access_token": "good-token", "token_type": "Bearer"}\'',
+        )
+        monkeypatch.setattr("os.environ", env)
+
+        token = get_databricks_token(WS)
+
+        assert token == "good-token"
+        lock_path, sentinel_path = db_mod._refresh_lock_paths(WS, None)
+        assert not lock_path.exists()
+        assert not sentinel_path.exists()
 
 
 class TestListDatabricksConnections:
