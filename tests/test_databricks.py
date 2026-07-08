@@ -1148,7 +1148,7 @@ class TestGetDatabricksToken:
         argv_log = tmp_path / "argv"
         env = self._fake_databricks(
             tmp_path,
-            f'printf "%s\\n" "$@" >> {argv_log}\n'
+            f'printf "%s\\n" "$@" >> "{argv_log}"\n'
             'echo \'{"access_token": "good-token", "token_type": "Bearer"}\'',
         )
         monkeypatch.setattr("os.environ", env)
@@ -1160,7 +1160,7 @@ class TestGetDatabricksToken:
         argv_log = tmp_path / "argv"
         env = self._fake_databricks(
             tmp_path,
-            f'printf "%s\\n" "$@" >> {argv_log}\n'
+            f'printf "%s\\n" "$@" >> "{argv_log}"\n'
             'echo \'{"access_token": "good-token", "token_type": "Bearer"}\'',
         )
         monkeypatch.setattr("os.environ", env)
