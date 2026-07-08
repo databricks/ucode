@@ -8,6 +8,7 @@ import pytest
 
 from ucode.databricks import (
     build_shared_base_urls,
+    discover_model_services,
     fetch_ai_gateway_claude_models,
     fetch_codex_models,
     fetch_gemini_models,
@@ -71,4 +72,17 @@ def e2e_state(e2e_workspace, e2e_token):
         "opencode_models": opencode_models,
         "base_urls": build_shared_base_urls(e2e_workspace),
         "managed_configs": {},
+    }
+
+
+@pytest.fixture(scope="session")
+def e2e_uc_models(e2e_workspace, e2e_token):
+    """Models served through Unity Catalog (system.ai.*)."""
+    claude_models, codex_models, gemini_models, _oss, _ = discover_model_services(
+        e2e_workspace, e2e_token
+    )
+    return {
+        "claude_models": claude_models,
+        "codex_models": codex_models,
+        "gemini_models": gemini_models,
     }
