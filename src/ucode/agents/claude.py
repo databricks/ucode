@@ -522,23 +522,42 @@ def _extract_caller_settings(tool_args: list[str]) -> tuple[list[str], list[str]
     return values, remaining
 
 
-def _load_caller_settings(value: str) -> dict | None:
+def _load_caller_settings(value: str) -> dict:
     """Resolve a ``--settings`` value (inline JSON or file path) to a dict.
 
-    Returns ``None`` when it is neither parseable JSON nor an existing file, so
-    the caller can pass such a value through untouched instead of dropping it.
+    Claude Code accepts either inline JSON or a path to a JSON file. Raises
+    ``RuntimeError`` (surfaced by the CLI as an actionable error) when the value
+    is neither, rather than silently dropping it: a dropped value would also be
+    passed through as a second ``--settings`` flag, and Claude Code honors only
+    one — so either the caller's settings or ucode's gateway config would be
+    silently ignored. Failing loudly lets the caller fix their input.
     """
     text = value.strip()
     if text.startswith("{"):
+        source, malformed = text, "value is not valid JSON"
+    else:
+        path = Path(text)
+        if not path.exists():
+            raise RuntimeError(
+                f"--settings file not found: {value!r}. "
+                "Pass inline JSON or a path to an existing JSON file."
+            )
         try:
-            parsed = json.loads(text)
-        except json.JSONDecodeError:
-            return None
-        return parsed if isinstance(parsed, dict) else None
-    path = Path(text)
-    if path.exists():
-        return read_json_safe(path)
-    return None
+            source = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise RuntimeError(f"--settings file could not be read: {value!r} ({exc}).") from exc
+        malformed = "file is not valid JSON"
+    try:
+        parsed = json.loads(source)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            f"--settings {malformed} ({exc}): {value!r}. Pass inline JSON or a path to a JSON file."
+        ) from exc
+    if not isinstance(parsed, dict):
+        raise RuntimeError(
+            f"--settings must be a JSON object, got {type(parsed).__name__}: {value!r}."
+        )
+    return parsed
 
 
 def _union_claude_hooks(base: dict, overlay: dict) -> dict:
@@ -589,7 +608,9 @@ def _build_claude_argv(binary: str, tool_args: list[str]) -> list[str]:
     keys win, hooks from both are unioned — and hand Claude a single merged
     ``--settings`` (inline JSON). The merge is per-launch and is never written
     back to the shared ucode settings file, so concurrent launches cannot
-    accumulate one another's hooks.
+    accumulate one another's hooks. A caller ``--settings`` value ucode cannot
+    resolve raises (see :func:`_load_caller_settings`) rather than being passed
+    through as a second, colliding flag.
     """
     caller_values, remaining = _extract_caller_settings(tool_args)
     if not caller_values:
@@ -597,22 +618,12 @@ def _build_claude_argv(binary: str, tool_args: list[str]) -> list[str]:
         # common path; behavior unchanged).
         return [binary, "--settings", str(CLAUDE_SETTINGS_PATH), *tool_args]
     caller_settings: dict = {}
-    unparsed: list[str] = []
     for value in caller_values:
-        parsed = _load_caller_settings(value)
-        if parsed is None:
-            unparsed.append(value)
-            continue
-        caller_settings = _merge_claude_settings(caller_settings, parsed)
+        caller_settings = _merge_claude_settings(caller_settings, _load_caller_settings(value))
     # ucode wins over the caller for conflicting keys (protects gateway auth);
     # hooks from both sides survive.
     merged = _merge_claude_settings(caller_settings, read_json_safe(CLAUDE_SETTINGS_PATH))
-    argv = [binary, "--settings", json.dumps(merged, separators=(",", ":")), *remaining]
-    # Anything we could not parse (not JSON, not an existing file) is passed
-    # through untouched rather than silently dropped.
-    for value in unparsed:
-        argv.extend(["--settings", value])
-    return argv
+    return [binary, "--settings", json.dumps(merged, separators=(",", ":")), *remaining]
 
 
 def launch(state: dict, tool_args: list[str]) -> None:

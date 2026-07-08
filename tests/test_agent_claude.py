@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import os
 
+import pytest
+
 from ucode.agents import claude
 
 WS = "https://example.databricks.com"
@@ -587,21 +589,40 @@ class TestBuildClaudeArgv:
                 {"hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": "cs"}]}]}}
             )
         )
-
-        def fake_read(p):
-            if str(p) == str(claude.CLAUDE_SETTINGS_PATH):
-                return {"apiKeyHelper": "u"}
-            return json.loads(p.read_text())
-
-        monkeypatch.setattr(claude, "read_json_safe", fake_read)
+        # The caller file is read directly; read_json_safe is only used for
+        # ucode's own settings file.
+        monkeypatch.setattr(claude, "read_json_safe", lambda p: {"apiKeyHelper": "u"})
         argv = claude._build_claude_argv("claude", ["--settings", str(caller_file)])
         assert argv.count("--settings") == 1
         merged = json.loads(argv[2])
         assert merged["apiKeyHelper"] == "u"
         assert merged["hooks"]["SessionStart"][0]["hooks"][0]["command"] == "cs"
 
-    def test_unparseable_value_passed_through(self, monkeypatch):
+    def test_malformed_inline_json_raises(self, monkeypatch):
         monkeypatch.setattr(claude, "read_json_safe", lambda p: {"apiKeyHelper": "u"})
-        argv = claude._build_claude_argv("claude", ["--settings", "not-json-not-a-file"])
-        # Could not parse → passed through untouched rather than dropped.
-        assert "not-json-not-a-file" in argv
+        # Clearly-intended-as-JSON but broken: fail loudly rather than pass it
+        # through as a second, colliding --settings flag.
+        with pytest.raises(RuntimeError, match="not valid JSON"):
+            claude._build_claude_argv("claude", ["--settings", '{"hooks": '])
+
+    def test_nonexistent_file_raises(self, monkeypatch):
+        monkeypatch.setattr(claude, "read_json_safe", lambda p: {"apiKeyHelper": "u"})
+        with pytest.raises(RuntimeError, match="file not found"):
+            claude._build_claude_argv("claude", ["--settings", "/no/such/settings.json"])
+
+    def test_non_object_file_json_raises(self, tmp_path, monkeypatch):
+        # A --settings file whose JSON is not an object (e.g. an array) can't be
+        # merged; fail loudly. (An inline value only enters the JSON branch when
+        # it starts with "{", so the non-object case is reachable via a file.)
+        bad_file = tmp_path / "bad.json"
+        bad_file.write_text("[1, 2, 3]")
+        monkeypatch.setattr(claude, "read_json_safe", lambda p: {"apiKeyHelper": "u"})
+        with pytest.raises(RuntimeError, match="must be a JSON object"):
+            claude._build_claude_argv("claude", ["--settings", str(bad_file)])
+
+    def test_malformed_file_json_raises(self, tmp_path, monkeypatch):
+        bad_file = tmp_path / "bad.json"
+        bad_file.write_text('{"hooks": ')
+        monkeypatch.setattr(claude, "read_json_safe", lambda p: {"apiKeyHelper": "u"})
+        with pytest.raises(RuntimeError, match="not valid JSON"):
+            claude._build_claude_argv("claude", ["--settings", str(bad_file)])
