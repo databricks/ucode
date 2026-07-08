@@ -73,7 +73,7 @@ def _run_gemini_gateway_smoke(workspace: str, model: str, token: str) -> str:
     url = f"{build_tool_base_url('gemini', workspace)}/v1beta/models/{model}:generateContent"
     payload = {
         "contents": [
-            {"role": "user", "parts": [{"text": "say hi in 5 words or less"}]},
+            {"role": "user", "parts": [{"text": "Respond with a greeting in five words or fewer."}]},
         ],
     }
     req = urllib_request.Request(

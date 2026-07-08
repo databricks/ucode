@@ -70,6 +70,7 @@ from ucode.tracing import configure_tracing_command
 from ucode.ui import (
     console,
     heading,
+    is_debug_verbosity,
     print_err,
     print_heading,
     print_kv,
@@ -463,6 +464,16 @@ def _maybe_select_provider_service(tool: str, state: dict) -> dict:
     return state
 
 
+def _validate_single_tool(tool: str, display: str) -> tuple[bool, str]:
+    """Run validation for one tool, skipping the spinner at debug verbosity so
+    its per-step diagnostics aren't clobbered by the animation."""
+    if is_debug_verbosity():
+        console.print(f"[bold blue]Validating {display}...[/bold blue]")
+        return validate_tool(tool)
+    with spinner(f"Validating {display}..."):
+        return validate_tool(tool)
+
+
 def configure_workspace_command(
     tool: str | None = None,
     selected_tools: list[str] | None = None,
@@ -505,8 +516,7 @@ def configure_workspace_command(
         if skip_validate:
             print_note(f"Skipping {spec['display']} validation (--skip-validate).")
             return 0
-        with spinner(f"Validating {spec['display']}..."):
-            ok, err = validate_tool(tool)
+        ok, err = _validate_single_tool(tool, spec["display"])
         if ok:
             print_success(f"{spec['display']} is working")
         else:
@@ -808,8 +818,7 @@ def _auto_configure_tool(tool: str) -> None:
         )
     )
 
-    with spinner(f"Validating {spec['display']}..."):
-        ok, err = validate_tool(tool)
+    ok, err = _validate_single_tool(tool, spec["display"])
     if ok:
         print_success(f"{spec['display']} is working")
     else:
@@ -822,7 +831,20 @@ def _auto_configure_tool(tool: str) -> None:
         raise RuntimeError(f"{spec['display']} validation failed — config reverted.")
 
 
-def _launch_tool(tool_name: str, ctx: typer.Context, provider: str | None = None) -> None:
+def _validate_verbose(verbose: str) -> None:
+    """Validate a --verbose value, exiting with code 2 on an unknown level."""
+    if verbose not in ("normal", "low", "debug"):
+        print_err("--verbose must be one of: normal, low, debug.")
+        raise typer.Exit(2)
+
+
+def _launch_tool(
+    tool_name: str, ctx: typer.Context, provider: str | None = None, verbose: str = "normal"
+) -> None:
+    _validate_verbose(verbose)
+    # Set verbosity before auto-configure/validation runs so `--verbose debug`
+    # surfaces the launch-time validation diagnostics.
+    set_verbosity(verbose)
     try:
         tool = normalize_tool(tool_name)
         existing = load_state()
@@ -892,6 +914,18 @@ def _launch_tool(tool_name: str, ctx: typer.Context, provider: str | None = None
         raise typer.Exit(130) from None
 
 
+# Shared --verbose option for the launch commands. Consumed by ucode before any
+# agent passthrough (like --provider), so to forward --verbose to the agent
+# itself use the `--` separator, e.g. `ucode codex -- --verbose`.
+_LAUNCH_VERBOSE_OPTION = typer.Option(
+    "--verbose",
+    help="Output verbosity: 'normal' (default) renders decorative panels; "
+    "'low' prints terse single-line status; 'debug' additionally prints "
+    "step-level validation diagnostics (command run, env vars injected, "
+    "elapsed time, and raw output on failure). Pass agent flags after `--`.",
+)
+
+
 @app.command("codex", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
 def codex_cmd(
     ctx: typer.Context,
@@ -904,9 +938,10 @@ def codex_cmd(
             "before any `--` separator.",
         ),
     ] = None,
+    verbose: Annotated[str, _LAUNCH_VERBOSE_OPTION] = "normal",
 ) -> None:
     """Launch Codex via Databricks."""
-    _launch_tool("codex", ctx, provider=provider)
+    _launch_tool("codex", ctx, provider=provider, verbose=verbose)
 
 
 @app.command("claude", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
@@ -921,35 +956,48 @@ def claude_cmd(
             "before any `--` separator.",
         ),
     ] = None,
+    verbose: Annotated[str, _LAUNCH_VERBOSE_OPTION] = "normal",
 ) -> None:
     """Launch Claude Code via Databricks."""
-    _launch_tool("claude", ctx, provider=provider)
+    _launch_tool("claude", ctx, provider=provider, verbose=verbose)
 
 
 @app.command("gemini", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
-def gemini_cmd(ctx: typer.Context) -> None:
+def gemini_cmd(
+    ctx: typer.Context,
+    verbose: Annotated[str, _LAUNCH_VERBOSE_OPTION] = "normal",
+) -> None:
     """Launch Gemini CLI via Databricks."""
-    _launch_tool("gemini", ctx)
+    _launch_tool("gemini", ctx, verbose=verbose)
 
 
 @app.command(
     "opencode", context_settings={"allow_extra_args": True, "ignore_unknown_options": True}
 )
-def opencode_cmd(ctx: typer.Context) -> None:
+def opencode_cmd(
+    ctx: typer.Context,
+    verbose: Annotated[str, _LAUNCH_VERBOSE_OPTION] = "normal",
+) -> None:
     """Launch OpenCode via Databricks."""
-    _launch_tool("opencode", ctx)
+    _launch_tool("opencode", ctx, verbose=verbose)
 
 
 @app.command("copilot", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
-def copilot_cmd(ctx: typer.Context) -> None:
+def copilot_cmd(
+    ctx: typer.Context,
+    verbose: Annotated[str, _LAUNCH_VERBOSE_OPTION] = "normal",
+) -> None:
     """Launch GitHub Copilot CLI via Databricks."""
-    _launch_tool("copilot", ctx)
+    _launch_tool("copilot", ctx, verbose=verbose)
 
 
 @app.command("pi", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
-def pi_cmd(ctx: typer.Context) -> None:
+def pi_cmd(
+    ctx: typer.Context,
+    verbose: Annotated[str, _LAUNCH_VERBOSE_OPTION] = "normal",
+) -> None:
     """Launch Pi coding agent via Databricks."""
-    _launch_tool("pi", ctx)
+    _launch_tool("pi", ctx, verbose=verbose)
 
 
 @configure_app.callback(invoke_without_command=True)
@@ -1029,16 +1077,16 @@ def configure(
         typer.Option(
             "--verbose",
             help="Output verbosity: 'normal' (default) renders decorative panels; "
-            "'low' prints terse single-line status instead.",
+            "'low' prints terse single-line status instead; 'debug' additionally "
+            "prints step-level diagnostics during validation (command run, env "
+            "vars injected, elapsed time, and raw output on failure).",
         ),
     ] = "normal",
 ) -> None:
     """Configure workspace URL and AI Gateway."""
     if ctx.invoked_subcommand is not None:
         return
-    if verbose not in ("normal", "low"):
-        print_err("--verbose must be one of: normal, low.")
-        raise typer.Exit(2)
+    _validate_verbose(verbose)
     set_dry_run(dry_run)
     set_verbosity(verbose)
     prompt_optional_updates = not skip_upgrade

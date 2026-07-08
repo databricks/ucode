@@ -567,3 +567,56 @@ class TestValidateAllToolsVerbosity:
         assert "Ready" not in out
         # Per-tool success line is still printed.
         assert "Codex is working" in out
+
+    def test_debug_verbosity_prints_per_tool_header_without_spinner(self, monkeypatch, capsys):
+        import ucode.ui as ui_mod
+
+        monkeypatch.setattr(ui_mod, "_verbosity", "debug")
+        out = self._run(monkeypatch, capsys)
+        # Debug mode prints a plain per-tool header (the spinner is skipped so
+        # per-step diagnostics aren't clobbered).
+        assert "Validating Codex..." in out
+        assert "Codex is working" in out
+
+
+class TestValidateToolDiagnostics:
+    """`validate_tool` surfaces step-level diagnostics at debug verbosity."""
+
+    def _stub_subprocess(self, monkeypatch, *, returncode: int, stderr: str = "", stdout: str = ""):
+        def fake_run(cmd, **kwargs):
+            return subprocess.CompletedProcess(cmd, returncode, stdout=stdout, stderr=stderr)
+
+        monkeypatch.setattr(agents_mod.subprocess, "run", fake_run)
+
+    def test_debug_prints_command_and_timing_on_success(self, monkeypatch, capsys):
+        import ucode.ui as ui_mod
+
+        monkeypatch.setattr(ui_mod, "_verbosity", "debug")
+        self._stub_subprocess(monkeypatch, returncode=0)
+        ok, err = agents_mod.validate_tool("codex")
+        out = capsys.readouterr().out
+        assert ok and err == ""
+        assert "running:" in out
+        assert "exited with code 0" in out
+
+    def test_debug_prints_raw_output_on_failure(self, monkeypatch, capsys):
+        import ucode.ui as ui_mod
+
+        monkeypatch.setattr(ui_mod, "_verbosity", "debug")
+        self._stub_subprocess(monkeypatch, returncode=1, stderr="boom: something broke")
+        ok, err = agents_mod.validate_tool("codex")
+        out = capsys.readouterr().out
+        assert not ok
+        assert "raw output:" in out
+        assert "boom: something broke" in out
+
+    def test_normal_verbosity_stays_quiet(self, monkeypatch, capsys):
+        import ucode.ui as ui_mod
+
+        monkeypatch.setattr(ui_mod, "_verbosity", "normal")
+        self._stub_subprocess(monkeypatch, returncode=1, stderr="boom: something broke")
+        ok, _ = agents_mod.validate_tool("codex")
+        out = capsys.readouterr().out
+        assert not ok
+        assert "running:" not in out
+        assert "raw output:" not in out

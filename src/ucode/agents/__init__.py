@@ -13,8 +13,10 @@ below and to `TOOL_ALIASES` if needed.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
+import time
 
 from ucode.config_io import ToolSpec
 from ucode.databricks import (
@@ -28,7 +30,9 @@ from ucode.state import get_provider_service, load_state, save_state
 from ucode.telemetry import agent_version
 from ucode.ui import (
     console,
+    is_debug_verbosity,
     is_low_verbosity,
+    print_debug,
     print_err,
     print_note,
     print_section,
@@ -453,7 +457,13 @@ def ensure_provider_state(tool: str) -> dict:
 
 
 def validate_tool(tool: str) -> tuple[bool, str]:
-    """Invoke a tool with a simple prompt to verify it works. Returns (ok, error_msg)."""
+    """Invoke a tool with a simple prompt to verify it works. Returns (ok, error_msg).
+
+    At debug verbosity (``--verbose debug``) prints the command being run, any
+    validation env vars supplied, elapsed time, and — on failure — the raw
+    subprocess output, so the user can see what validation is doing, why it is
+    slow, and why it failed.
+    """
     spec = TOOL_SPECS[tool]
     binary = spec["binary"]
     module = _MODULES[tool]
@@ -462,31 +472,55 @@ def validate_tool(tool: str) -> tuple[bool, str]:
     if hasattr(module, "validate_env"):
         try:
             env = module.validate_env(load_state())
-        except RuntimeError:
+        except RuntimeError as exc:
             env = None
+            print_debug(f"validate_env unavailable, running without extra env: {exc}")
+
+    if is_debug_verbosity():
+        print_debug(f"running: {' '.join(cmd)}")
+        if env is not None:
+            # Only surface the env keys ucode injects, not the caller's full
+            # environment, and never the token values themselves.
+            injected = sorted(k for k in env if k not in os.environ or os.environ.get(k) != env[k])
+            if injected:
+                print_debug(f"env: {', '.join(injected)}")
+        print_debug("timeout: 60s")
+
+    start = time.monotonic()
     try:
         result = subprocess.run(
             cmd, check=False, capture_output=True, text=True, timeout=60, env=env
         )
-        if result.returncode == 0:
-            return True, ""
-        output = (result.stderr or result.stdout or "").strip()
-        for line in output.splitlines():
-            if "error" in line.lower() and ("message" in line.lower() or ":" in line):
-                msg = line.strip()
-                if "error_code" in msg:
-                    try:
-                        payload = json.loads(msg[msg.index("{") : msg.rindex("}") + 1])
-                        return False, payload.get("message", msg)
-                    except (json.JSONDecodeError, ValueError):
-                        pass
-                return False, msg
-        last_line = output.splitlines()[-1] if output else "unknown error"
-        return False, last_line
     except OSError as exc:
+        print_debug(f"failed to launch after {time.monotonic() - start:.1f}s: {exc}")
         return False, str(exc)
     except subprocess.TimeoutExpired:
+        print_debug(f"timed out after {time.monotonic() - start:.1f}s (limit 60s)")
         return False, "timed out"
+
+    elapsed = time.monotonic() - start
+    print_debug(f"exited with code {result.returncode} in {elapsed:.1f}s")
+
+    if result.returncode == 0:
+        return True, ""
+
+    output = (result.stderr or result.stdout or "").strip()
+    if is_debug_verbosity() and output:
+        print_debug("raw output:")
+        for line in output.splitlines():
+            print_debug(f"  {line}")
+    for line in output.splitlines():
+        if "error" in line.lower() and ("message" in line.lower() or ":" in line):
+            msg = line.strip()
+            if "error_code" in msg:
+                try:
+                    payload = json.loads(msg[msg.index("{") : msg.rindex("}") + 1])
+                    return False, payload.get("message", msg)
+                except (json.JSONDecodeError, ValueError):
+                    pass
+            return False, msg
+    last_line = output.splitlines()[-1] if output else "unknown error"
+    return False, last_line
 
 
 def provider_permission_error(tool: str, state: dict, err: str) -> str:
@@ -511,6 +545,7 @@ def validate_all_tools(state: dict) -> None:
     from ucode.config_io import restore_file
 
     low_verbosity = is_low_verbosity()
+    debug_verbosity = is_debug_verbosity()
     console.print()
     if low_verbosity:
         console.print("[bold blue]Validating...[/bold blue]")
@@ -528,8 +563,14 @@ def validate_all_tools(state: dict) -> None:
     for tool, spec in TOOL_SPECS.items():
         if tool not in available_tools:
             continue
-        with spinner(f"Validating {spec['display']}..."):
+        # At debug verbosity the spinner would clobber the per-step debug lines,
+        # so print a plain status header and skip the animation instead.
+        if debug_verbosity:
+            console.print(f"[bold blue]Validating {spec['display']}...[/bold blue]")
             ok, err = validate_tool(tool)
+        else:
+            with spinner(f"Validating {spec['display']}..."):
+                ok, err = validate_tool(tool)
         results.append((tool, ok))
         if ok:
             print_success(f"{spec['display']} is working")

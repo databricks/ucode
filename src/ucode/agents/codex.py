@@ -406,5 +406,5 @@ def validate_cmd(binary: str) -> list[str]:
         CODEX_PROFILE_NAME,
         "exec",
         "--skip-git-repo-check",
-        "say hi in 5 words or less",
+        "Respond with a greeting in five words or fewer.",
     ]
