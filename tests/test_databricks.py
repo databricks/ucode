@@ -134,6 +134,21 @@ class TestDiscoverClaudeModels:
         assert reason is None
         assert models["opus"] == "databricks-claude-opus-4-8"
 
+    def test_preferred_prefix_promotes_matching_model(self, monkeypatch):
+        payload = {
+            "data": [
+                {"id": "databricks-claude-haiku-4-5"},
+                {"id": "companyname-claude-haiku-4-5"},
+            ]
+        }
+        monkeypatch.setattr(db_mod, "_http_get_json", lambda url, token: (payload, None))
+        monkeypatch.setenv("UCODE_MODEL_PREFERRED_PREFIX", "companyname-")
+
+        models, reason = db_mod.discover_claude_models(WS, "token")
+
+        assert reason is None
+        assert models["haiku"] == "companyname-claude-haiku-4-5"
+
 
 def _model_service(model_id: str) -> dict:
     """A model-services entry whose `name` strips to `model_id`."""
@@ -281,6 +296,23 @@ class TestDiscoverModelServices:
         assert claude == {}  # temp.erni.claude-* must not be bucketed
         assert gemini == []
         assert oss == []
+
+    def test_preferred_prefix_promotes_matching_claude_model(self, monkeypatch):
+        payload = {
+            "model_services": [
+                _model_service("system.ai.databricks-claude-haiku-4-5"),
+                _model_service("system.ai.companyname-claude-haiku-4-5"),
+            ]
+        }
+        monkeypatch.setattr(
+            db_mod, "_http_get_json", lambda url, token, timeout=10: (payload, None)
+        )
+        monkeypatch.setenv("UCODE_MODEL_PREFERRED_PREFIX", "companyname-")
+
+        claude, _, _, reason = db_mod.discover_model_services(WS, "token")
+
+        assert reason is None
+        assert claude["haiku"] == "system.ai.companyname-claude-haiku-4-5"
 
     def test_requests_bounded_page_size(self, monkeypatch):
         # The endpoint 499s without a bounded page_size, so every request must
@@ -727,9 +759,7 @@ class TestDiscoverGeminiModels:
         assert reason is None
         assert models[0] == "databricks-gemini-3-5-flash"
 
-    def test_codex_discovery_keeps_alphabetical_order(self, monkeypatch):
-        # Codex passes no sort_key, so ordering must stay the plain alphabetical
-        # default — guarding against the gemini change leaking across tools.
+    def test_codex_discovery_orders_newest_first(self, monkeypatch):
         payload = {
             "endpoints": [
                 {
@@ -753,7 +783,46 @@ class TestDiscoverGeminiModels:
         models, reason = db_mod.discover_codex_models(WS, "token")
 
         assert reason is None
-        assert models == ["databricks-gpt-4-1", "databricks-gpt-5-2-codex"]
+        assert models == ["databricks-gpt-5-2-codex", "databricks-gpt-4-1"]
+
+    def test_preferred_prefix_promotes_matching_gemini_model(self, monkeypatch):
+        payload = _foundation_models_payload(
+            ["databricks-gemini-3-5-flash", "companyname-gemini-3-5-flash"]
+        )
+        monkeypatch.setattr(db_mod, "_http_get_json", lambda url, token: (payload, None))
+        monkeypatch.setenv("UCODE_MODEL_PREFERRED_PREFIX", "companyname-")
+
+        models, reason = db_mod.discover_gemini_models(WS, "token")
+
+        assert reason is None
+        assert models[0] == "companyname-gemini-3-5-flash"
+
+    def test_preferred_prefix_promotes_matching_codex_model(self, monkeypatch):
+        payload = {
+            "endpoints": [
+                {
+                    "name": name,
+                    "config": {
+                        "served_entities": [
+                            {
+                                "foundation_model": {
+                                    "ai_gateway_v2_supported": True,
+                                    "api_types": ["openai/v1/responses"],
+                                }
+                            }
+                        ]
+                    },
+                }
+                for name in ["databricks-gpt-5", "companyname-gpt-5"]
+            ]
+        }
+        monkeypatch.setattr(db_mod, "_http_get_json", lambda url, token: (payload, None))
+        monkeypatch.setenv("UCODE_MODEL_PREFERRED_PREFIX", "companyname-")
+
+        models, reason = db_mod.discover_codex_models(WS, "token")
+
+        assert reason is None
+        assert models[0] == "companyname-gpt-5"
 
 
 class TestResolvePatToken:
