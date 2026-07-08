@@ -70,6 +70,7 @@ from ucode.tracing import configure_tracing_command
 from ucode.ui import (
     console,
     heading,
+    is_debug_verbosity,
     print_err,
     print_heading,
     print_kv,
@@ -463,6 +464,16 @@ def _maybe_select_provider_service(tool: str, state: dict) -> dict:
     return state
 
 
+def _validate_single_tool(tool: str, display: str) -> tuple[bool, str]:
+    """Run validation for one tool, skipping the spinner at debug verbosity so
+    its per-step diagnostics aren't clobbered by the animation."""
+    if is_debug_verbosity():
+        console.print(f"[bold blue]Validating {display}...[/bold blue]")
+        return validate_tool(tool)
+    with spinner(f"Validating {display}..."):
+        return validate_tool(tool)
+
+
 def configure_workspace_command(
     tool: str | None = None,
     selected_tools: list[str] | None = None,
@@ -505,8 +516,7 @@ def configure_workspace_command(
         if skip_validate:
             print_note(f"Skipping {spec['display']} validation (--skip-validate).")
             return 0
-        with spinner(f"Validating {spec['display']}..."):
-            ok, err = validate_tool(tool)
+        ok, err = _validate_single_tool(tool, spec["display"])
         if ok:
             print_success(f"{spec['display']} is working")
         else:
@@ -808,8 +818,7 @@ def _auto_configure_tool(tool: str) -> None:
         )
     )
 
-    with spinner(f"Validating {spec['display']}..."):
-        ok, err = validate_tool(tool)
+    ok, err = _validate_single_tool(tool, spec["display"])
     if ok:
         print_success(f"{spec['display']} is working")
     else:
@@ -1029,15 +1038,17 @@ def configure(
         typer.Option(
             "--verbose",
             help="Output verbosity: 'normal' (default) renders decorative panels; "
-            "'low' prints terse single-line status instead.",
+            "'low' prints terse single-line status instead; 'debug' additionally "
+            "prints step-level diagnostics during validation (command run, env "
+            "vars injected, elapsed time, and raw output on failure).",
         ),
     ] = "normal",
 ) -> None:
     """Configure workspace URL and AI Gateway."""
     if ctx.invoked_subcommand is not None:
         return
-    if verbose not in ("normal", "low"):
-        print_err("--verbose must be one of: normal, low.")
+    if verbose not in ("normal", "low", "debug"):
+        print_err("--verbose must be one of: normal, low, debug.")
         raise typer.Exit(2)
     set_dry_run(dry_run)
     set_verbosity(verbose)

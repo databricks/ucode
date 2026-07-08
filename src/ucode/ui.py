@@ -18,7 +18,9 @@ console = Console(highlight=False)
 err_console = Console(stderr=True, highlight=False)
 
 # Output verbosity. "normal" (default) renders decorative panels; "low" trades
-# them for terse single-line output. Set once at CLI entry via set_verbosity.
+# them for terse single-line output; "debug" additionally surfaces step-level
+# diagnostics (e.g. per-tool validation commands, timing, and raw output on
+# failure). Set once at CLI entry via set_verbosity.
 _verbosity = "normal"
 
 
@@ -33,6 +35,10 @@ def get_verbosity() -> str:
 
 def is_low_verbosity() -> bool:
     return _verbosity == "low"
+
+
+def is_debug_verbosity() -> bool:
+    return _verbosity == "debug"
 
 
 def print_section(title: str) -> None:
@@ -51,6 +57,12 @@ def print_kv(key: str, val: str) -> None:
 
 def print_note(text: str) -> None:
     console.print(f"[dim]•[/dim] {text}")
+
+
+def print_debug(text: str) -> None:
+    """Step-level diagnostic, only emitted when verbosity is 'debug'."""
+    if is_debug_verbosity():
+        console.print(f"[dim]  ↳ {text}[/dim]")
 
 
 def print_success(message: str) -> None:
