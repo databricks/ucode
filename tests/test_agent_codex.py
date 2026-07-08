@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import os
 
+import pytest
+
 from ucode.agents import codex
 from ucode.config_io import read_toml_safe
 
@@ -416,23 +418,74 @@ class TestCodexValidateCmd:
 
 
 class TestCodexLaunch:
-    def test_sets_oauth_token_and_ucode_profile_before_exec(self, monkeypatch):
-        exec_calls: list[tuple[str, list[str]]] = []
+    """launch() runs codex with --profile first and relaunches without it only
+    when that attempt fails *fast* — codex's --profile rejection is a parse-time
+    error, so a fast nonzero exit means the subcommand didn't accept --profile.
+    A slow failure is a real session error and is propagated unchanged."""
 
-        def fake_execvp(binary: str, args: list[str]) -> None:
-            exec_calls.append((binary, args))
-            raise RuntimeError("stop")
+    @staticmethod
+    def _patch(monkeypatch, *, returncode: int, elapsed: float):
+        """Stub subprocess.run to return `returncode` and make launch() perceive
+        `elapsed` seconds between its two time.monotonic() reads."""
+        runs: list[list[str]] = []
+        fallbacks: list[list[str]] = []
 
+        def fake_run(argv, **kwargs):
+            runs.append(argv)
+            return codex.subprocess.CompletedProcess(argv, returncode)
+
+        # launch() reads time.monotonic() once before run and once after.
+        clock = iter([100.0, 100.0 + elapsed])
+        monkeypatch.setattr(codex.subprocess, "run", fake_run)
+        monkeypatch.setattr(codex.time, "monotonic", lambda: next(clock))
+        monkeypatch.setattr(codex, "exec_or_spawn", lambda argv: fallbacks.append(argv))
+        monkeypatch.setattr(codex, "get_databricks_token", lambda workspace, profile=None: "tok")
+        return runs, fallbacks
+
+    def test_sets_oauth_token_and_runs_with_profile(self, monkeypatch):
         monkeypatch.delenv("OAUTH_TOKEN", raising=False)
+        runs, fallbacks = self._patch(monkeypatch, returncode=0, elapsed=0.5)
         monkeypatch.setattr(
             codex, "get_databricks_token", lambda workspace, profile=None: "fresh-token"
         )
-        monkeypatch.setattr(os, "execvp", fake_execvp)
-
-        try:
+        with pytest.raises(SystemExit) as exc:
             codex.launch({"workspace": WS}, ["--search"])
-        except RuntimeError as exc:
-            assert str(exc) == "stop"
-
+        assert exc.value.code == 0
         assert os.environ["OAUTH_TOKEN"] == "fresh-token"
-        assert exec_calls == [("codex", ["codex", "--profile", "ucode", "--search"])]
+        assert runs == [["codex", "--profile", "ucode", "--search"]]
+        assert fallbacks == []
+
+    def test_success_propagates_exit_without_retry(self, monkeypatch):
+        runs, fallbacks = self._patch(monkeypatch, returncode=0, elapsed=0.2)
+        with pytest.raises(SystemExit) as exc:
+            codex.launch({"workspace": WS}, ["exec", "hi"])
+        assert exc.value.code == 0
+        assert runs == [["codex", "--profile", "ucode", "exec", "hi"]]
+        assert fallbacks == []
+
+    def test_fast_failure_relaunches_without_profile(self, monkeypatch):
+        # codex rejects --profile on server-family subcommands at parse time —
+        # a fast nonzero exit → relaunch without --profile.
+        for args in (["app-server", "--listen", "u"], ["mcp-server"]):
+            runs, fallbacks = self._patch(monkeypatch, returncode=1, elapsed=0.15)
+            codex.launch({"workspace": WS}, args)
+            assert runs == [["codex", "--profile", "ucode", *args]]
+            assert fallbacks == [["codex", *args]]
+
+    def test_slow_failure_does_not_retry(self, monkeypatch):
+        # A session that started and then failed (seconds) must NOT be re-run
+        # without --profile — that would silently drop ucode's Databricks routing
+        # (relaunching the user's prompt on their own OpenAI login).
+        runs, fallbacks = self._patch(monkeypatch, returncode=1, elapsed=8.0)
+        with pytest.raises(SystemExit) as exc:
+            codex.launch({"workspace": WS}, ["exec", "hi"])
+        assert exc.value.code == 1
+        assert fallbacks == []
+
+    def test_fast_success_does_not_retry(self, monkeypatch):
+        # The retry is gated on a *nonzero* exit; a fast clean exit just returns.
+        runs, fallbacks = self._patch(monkeypatch, returncode=0, elapsed=0.15)
+        with pytest.raises(SystemExit) as exc:
+            codex.launch({"workspace": WS}, [])
+        assert exc.value.code == 0
+        assert fallbacks == []
