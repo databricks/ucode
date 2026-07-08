@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from unittest.mock import patch
 
+import pytest
+
 from ucode.agents import opencode
 
 WS = "https://example.databricks.com"
@@ -474,9 +476,23 @@ class TestRenderAuthPlugin:
         js = opencode.render_auth_plugin(WS, None, ALL_PROVIDER_IDS)
         assert "export const UcodeDatabricksAuth" in js
 
-    def test_provider_scoping_guard_checks_provider_info_id(self):
+    def test_provider_scoping_guard_reads_provider_id_directly(self):
+        # `chat.headers`'s `input.provider` is opencode's runtime Provider
+        # record (id/name/env/options/source/models) -- NOT a nested
+        # `{source, info, options}` wrapper. `id` lives directly on
+        # `input.provider`, never `input.provider.info.id`. This was
+        # confirmed empirically against a real opencode 1.17.10 hook
+        # invocation (see #190 follow-up) after a version of this plugin
+        # that read `input.provider?.info?.id` silently no-opped on every
+        # request -- the guard's `!providerId` was always true, so the
+        # hook returned immediately and never refreshed the Authorization
+        # header. See TestRenderAuthPluginRuntimeBehavior below for a live
+        # Node execution of the generated JS against the real hook shape,
+        # which is what actually catches a regression here -- a
+        # string-content assertion alone would not.
         js = opencode.render_auth_plugin(WS, None, ALL_PROVIDER_IDS)
-        assert "input.provider?.info?.id" in js
+        assert "input.provider?.id" in js
+        assert "input.provider?.info?.id" not in js
 
     def test_fails_open_on_error(self):
         js = opencode.render_auth_plugin(WS, None, ALL_PROVIDER_IDS)
@@ -487,6 +503,91 @@ class TestRenderAuthPlugin:
         js = opencode.render_auth_plugin(WS, None, ALL_PROVIDER_IDS)
         assert "execFile" in js
         assert "node:child_process" in js
+
+
+class TestRenderAuthPluginRuntimeBehavior:
+    """Executes the generated plugin under real Node against the actual
+    opencode `chat.headers` hook input shape, rather than asserting on the
+    generated JS's string content. A version of this plugin that read
+    `input.provider?.info?.id` (instead of `input.provider?.id`) passed
+    every prior test in this file -- because those tests only checked what
+    string literals appear in the generated source -- while silently
+    no-opping on every real request (the guard's `!providerId` was always
+    true). This class exists specifically to catch that class of bug:
+    a mismatch between our assumed hook-input shape and opencode's real
+    runtime shape, confirmed via `opencode`'s own `@opencode-ai/plugin`
+    type surface and an isolated end-to-end run against opencode 1.17.10
+    (#190 follow-up). Skips if `node` isn't on PATH."""
+
+    def _run_plugin(self, tmp_path, provider_id: str | None, fake_token: str = "fresh-token-xyz"):
+        import shutil
+        import subprocess
+
+        node = shutil.which("node")
+        if not node:
+            pytest.skip("`node` is not installed")
+
+        fake_ucode = tmp_path / "fake_ucode.py"
+        fake_ucode.write_text(
+            "#!/usr/bin/env python3\nimport sys\nprint(sys.argv[-1] if False else "
+            f"{fake_token!r})\n"
+        )
+        fake_ucode.chmod(0o755)
+
+        with patch(
+            "ucode.agents.opencode.build_auth_token_argv",
+            return_value=["python3", str(fake_ucode)],
+        ):
+            js = opencode.render_auth_plugin(WS, None, ["databricks-anthropic"])
+
+        plugin_path = tmp_path / "plugin.mjs"
+        plugin_path.write_text(js)
+
+        provider_literal = f"{{ id: {provider_id!r} }}" if provider_id else "undefined"
+        harness = tmp_path / "harness.mjs"
+        harness.write_text(f"""
+import {{ UcodeDatabricksAuth }} from {str(plugin_path.as_posix())!r};
+
+const hooks = await UcodeDatabricksAuth({{}});
+const output = {{ headers: {{ Authorization: "Bearer STALE-BOOTSTRAP-TOKEN" }} }};
+const input = {{
+  sessionID: "ses_test",
+  agent: "build",
+  model: {{}},
+  provider: {provider_literal},
+  message: {{}},
+}};
+await hooks["chat.headers"](input, output);
+console.log(JSON.stringify(output.headers));
+""")
+
+        result = subprocess.run(
+            [node, str(harness)],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        return result
+
+    def test_managed_provider_id_directly_on_input_provider_refreshes_header(self, tmp_path):
+        # This is the real opencode runtime shape: `input.provider` IS the
+        # Provider record, `id` is a direct property.
+        result = self._run_plugin(tmp_path, provider_id="databricks-anthropic")
+        assert result.returncode == 0, result.stderr
+        headers = json.loads(result.stdout.strip().splitlines()[-1])
+        assert headers["Authorization"] == "Bearer fresh-token-xyz"
+
+    def test_unmanaged_provider_id_leaves_static_header_untouched(self, tmp_path):
+        result = self._run_plugin(tmp_path, provider_id="some-other-provider")
+        assert result.returncode == 0, result.stderr
+        headers = json.loads(result.stdout.strip().splitlines()[-1])
+        assert headers["Authorization"] == "Bearer STALE-BOOTSTRAP-TOKEN"
+
+    def test_missing_provider_leaves_static_header_untouched(self, tmp_path):
+        result = self._run_plugin(tmp_path, provider_id=None)
+        assert result.returncode == 0, result.stderr
+        headers = json.loads(result.stdout.strip().splitlines()[-1])
+        assert headers["Authorization"] == "Bearer STALE-BOOTSTRAP-TOKEN"
 
 
 class TestWriteAuthPlugin:

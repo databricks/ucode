@@ -247,7 +247,13 @@ async function getToken() {{
 
 export const UcodeDatabricksAuth = async (_ctx) => ({{
   "chat.headers": async (input, output) => {{
-    const providerId = input.provider?.info?.id;
+    // NOTE: the hook's `input.provider` is the runtime Provider record
+    // itself (id/name/env/options/source/models), not the ProviderContext
+    // shape ({{source, info, options}}) some type surfaces suggest -- `id`
+    // lives directly on `input.provider`, not `input.provider.info.id`.
+    // Confirmed empirically against opencode 1.17.10; verify against a real
+    // hook invocation before changing this path again (#190 follow-up).
+    const providerId = input.provider?.id;
     if (!providerId || !MANAGED_PROVIDER_IDS.has(providerId)) {{
       return;
     }}
