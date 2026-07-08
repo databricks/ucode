@@ -204,12 +204,20 @@ def render_overlay(
     }
     keys: list[list[str]] = [["apiKeyHelper"]] + [["env", k] for k in env]
 
-    # Disable Claude Code's built-in WebSearch (it routes through Anthropic's
-    # hosted infra and fails through the Databricks gateway). The replacement
-    # `web_search` MCP server is registered separately via the claude CLI.
+    # Disable Claude Code's built-in WebSearch: it declares Anthropic's hosted
+    # `web_search_20250305` server tool, which the Databricks gateway rejects
+    # (HTTP 400: "Input tag 'web_search_20250305' ... does not match"), so the
+    # model wastes a turn on it before falling back. A *bare* `permissions.deny`
+    # entry removes the tool from Claude's context entirely, so it is never
+    # advertised to the model nor sent to the gateway. (Claude Code has no
+    # `disabledTools` setting — the `permissions` block is the only settings.json
+    # mechanism for built-in tools; a bare tool name in `deny` drops it, whereas
+    # a scoped rule like `WebSearch(*)` would leave it advertised.) The
+    # replacement `web_search` MCP server is registered separately via the
+    # claude CLI.
     if disable_web_search:
-        overlay["disabledTools"] = ["WebSearch"]
-        keys.append(["disabledTools"])
+        overlay["permissions"] = {"deny": ["WebSearch"]}
+        keys.append(["permissions", "deny"])
 
     return overlay, keys
 
