@@ -517,7 +517,7 @@ def validate_cmd(binary: str) -> list[str]:
         "--settings",
         str(CLAUDE_SETTINGS_PATH),
         "-p",
-        "say hi in 5 words or less",
+        "Respond with a greeting in five words or fewer.",
         "--max-turns",
         "1",
     ]

@@ -267,7 +267,7 @@ def launch(state: dict, tool_args: list[str]) -> None:
 
 
 def validate_cmd(binary: str) -> list[str]:
-    return [binary, "--print", "say hi in 5 words or less"]
+    return [binary, "--print", "Respond with a greeting in five words or fewer."]
 
 
 def validate_env(state: dict) -> dict[str, str]:

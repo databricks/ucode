@@ -203,7 +203,7 @@ def validate_cmd(binary: str) -> list[str]:
         binary,
         *mcp_config_args(),
         "--prompt",
-        "say hi in 5 words or less",
+        "Respond with a greeting in five words or fewer.",
         "--allow-all-tools",
     ]
 
