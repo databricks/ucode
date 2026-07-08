@@ -28,6 +28,7 @@ from ucode.agents import (
     launch as launch_agent,
 )
 from ucode.agents.codex import revert_legacy_shared_config
+from ucode.agents.opencode import OPENCODE_PLUGIN_PATH
 from ucode.agents.pi import PI_SETTINGS_BACKUP_PATH, PI_SETTINGS_PATH
 from ucode.config_io import restore_file, set_dry_run
 from ucode.databricks import (
@@ -676,6 +677,21 @@ def status() -> int:
     return 0
 
 
+def _remove_opencode_auth_plugin() -> bool:
+    """Delete the ucode-managed opencode auth plugin file (see agents/opencode.py).
+
+    Unlike opencode.json, this file has no pre-ucode content to restore --
+    it's entirely ucode-generated -- so revert just deletes it rather than
+    going through the backup/restore_file machinery (#190)."""
+    try:
+        if OPENCODE_PLUGIN_PATH.exists():
+            OPENCODE_PLUGIN_PATH.unlink()
+            return True
+    except OSError:
+        pass
+    return False
+
+
 def revert() -> int:
     state = load_state()
     managed_configs = state.get("managed_configs") or {}
@@ -690,6 +706,7 @@ def revert() -> int:
     pi_settings_restored = restore_file(
         PI_SETTINGS_PATH, PI_SETTINGS_BACKUP_PATH, bool(managed_configs.get("pi"))
     )
+    opencode_plugin_removed = _remove_opencode_auth_plugin()
     # Older Codex (< 0.134.0) had ucode edit the shared ~/.codex/config.toml in
     # place; restoring the per-profile file above does not undo that.
     legacy_codex_stripped = revert_legacy_shared_config()
@@ -702,6 +719,7 @@ def revert() -> int:
     if legacy_codex_stripped:
         print_kv("Codex shared config", "ucode entries removed")
     print_kv("Pi settings", "restored" if pi_settings_restored else "unchanged")
+    print_kv("OpenCode auth plugin", "removed" if opencode_plugin_removed else "unchanged")
     for client, spec in MCP_CLIENTS.items():
         print_kv(
             f"{spec['display']} MCP config",

@@ -412,3 +412,151 @@ class TestWriteToolConfigStaleProviderCleanup:
 
         written = json.loads(config_file.read_text())
         assert written["model"] == "databricks-anthropic/claude-sonnet"
+
+
+ALL_PROVIDER_IDS = ["databricks-anthropic", "databricks-google", "databricks-oss"]
+
+
+class TestManagedProviderIds:
+    def test_picks_out_provider_keys_only(self):
+        managed_keys = [
+            ["model"],
+            ["provider", "databricks-anthropic"],
+            ["provider", "databricks-oss"],
+        ]
+        assert opencode._managed_provider_ids(managed_keys) == [
+            "databricks-anthropic",
+            "databricks-oss",
+        ]
+
+    def test_empty_when_no_provider_keys(self):
+        assert opencode._managed_provider_ids([["model"]]) == []
+
+
+class TestRenderAuthPlugin:
+    def test_contains_chat_headers_hook(self):
+        js = opencode.render_auth_plugin(WS, None, ALL_PROVIDER_IDS)
+        assert '"chat.headers"' in js
+
+    def test_embeds_workspace_in_auth_token_argv(self):
+        js = opencode.render_auth_plugin(WS, None, ALL_PROVIDER_IDS)
+        assert "auth-token" in js
+        assert "--host" in js
+        assert WS in js
+
+    def test_embeds_profile_flag_when_provided(self):
+        js = opencode.render_auth_plugin(WS, "my-profile", ALL_PROVIDER_IDS)
+        assert "--profile" in js
+        assert "my-profile" in js
+
+    def test_omits_profile_flag_when_not_provided(self):
+        js = opencode.render_auth_plugin(WS, None, ALL_PROVIDER_IDS)
+        assert "--profile" not in js
+
+    def test_embeds_provider_id_guard_set_with_all_providers(self):
+        js = opencode.render_auth_plugin(WS, None, ALL_PROVIDER_IDS)
+        for provider_id in ALL_PROVIDER_IDS:
+            assert provider_id in js
+        assert "MANAGED_PROVIDER_IDS" in js
+
+    def test_embeds_only_configured_subset_of_provider_ids(self):
+        js = opencode.render_auth_plugin(WS, None, ["databricks-anthropic"])
+        assert "databricks-anthropic" in js
+        assert "databricks-google" not in js
+        assert "databricks-oss" not in js
+
+    def test_embeds_ttl_constant(self):
+        js = opencode.render_auth_plugin(WS, None, ALL_PROVIDER_IDS)
+        assert "TTL_MS" in js
+        assert str(opencode.AUTH_PLUGIN_TOKEN_TTL_SECONDS * 1000) in js
+
+    def test_exports_plugin_function(self):
+        js = opencode.render_auth_plugin(WS, None, ALL_PROVIDER_IDS)
+        assert "export const UcodeDatabricksAuth" in js
+
+    def test_provider_scoping_guard_checks_provider_info_id(self):
+        js = opencode.render_auth_plugin(WS, None, ALL_PROVIDER_IDS)
+        assert "input.provider?.info?.id" in js
+
+    def test_fails_open_on_error(self):
+        js = opencode.render_auth_plugin(WS, None, ALL_PROVIDER_IDS)
+        assert "catch" in js
+        assert "console.error" in js
+
+    def test_uses_execfile_not_shell(self):
+        js = opencode.render_auth_plugin(WS, None, ALL_PROVIDER_IDS)
+        assert "execFile" in js
+        assert "node:child_process" in js
+
+
+class TestWriteAuthPlugin:
+    def test_writes_plugin_file_containing_hook(self, tmp_path, monkeypatch):
+        import ucode.agents.opencode as oc_mod
+
+        plugin_path = tmp_path / "ucode-databricks-auth.js"
+        monkeypatch.setattr(oc_mod, "OPENCODE_PLUGIN_PATH", plugin_path)
+
+        state = {"workspace": WS, "profile": None}
+        oc_mod.write_auth_plugin(state, ["databricks-anthropic"])
+
+        assert plugin_path.exists()
+        content = plugin_path.read_text()
+        assert '"chat.headers"' in content
+        assert "databricks-anthropic" in content
+
+
+class TestWriteToolConfigAuthPlugin:
+    def _write_and_return(self, tmp_path, monkeypatch, opencode_models):
+        import ucode.agents.opencode as oc_mod
+        import ucode.config_io as config_io_mod
+
+        monkeypatch.setattr(config_io_mod, "APP_DIR", tmp_path)
+        config_file = tmp_path / "opencode.json"
+        backup_file = tmp_path / "opencode-backup.json"
+        plugin_file = tmp_path / "ucode-databricks-auth.js"
+        monkeypatch.setattr(oc_mod, "OPENCODE_CONFIG_PATH", config_file)
+        monkeypatch.setattr(oc_mod, "OPENCODE_BACKUP_PATH", backup_file)
+        monkeypatch.setattr(oc_mod, "OPENCODE_PLUGIN_PATH", plugin_file)
+
+        state = {
+            "workspace": WS,
+            "base_urls": {"opencode": _base_urls()},
+            "opencode_models": opencode_models,
+            "managed_configs": {},
+        }
+
+        with (
+            patch("ucode.agents.opencode.get_databricks_token", return_value="tok"),
+            patch("ucode.agents.opencode.save_state"),
+        ):
+            oc_mod.write_tool_config(state, "claude-sonnet", token="tok")
+
+        return config_file, plugin_file
+
+    def test_writes_plugin_file_to_configured_path(self, tmp_path, monkeypatch):
+        _config_file, plugin_file = self._write_and_return(
+            tmp_path, monkeypatch, {"anthropic": ["claude-sonnet"]}
+        )
+
+        assert plugin_file.exists()
+        assert '"chat.headers"' in plugin_file.read_text()
+
+    def test_plugin_scoped_to_configured_providers_only(self, tmp_path, monkeypatch):
+        _config_file, plugin_file = self._write_and_return(
+            tmp_path, monkeypatch, {"anthropic": ["claude-sonnet"]}
+        )
+
+        content = plugin_file.read_text()
+        assert "databricks-anthropic" in content
+        assert "databricks-google" not in content
+        assert "databricks-oss" not in content
+
+    def test_static_bootstrap_config_still_present_in_opencode_json(self, tmp_path, monkeypatch):
+        config_file, _plugin_file = self._write_and_return(
+            tmp_path, monkeypatch, {"anthropic": ["claude-sonnet"]}
+        )
+
+        written = json.loads(config_file.read_text())
+        anthropic_options = written["provider"]["databricks-anthropic"]["options"]
+        assert anthropic_options["apiKey"] == "tok"
+        assert anthropic_options["headers"]["Authorization"] == "Bearer tok"
