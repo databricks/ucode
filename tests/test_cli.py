@@ -486,6 +486,58 @@ class TestPassthroughArgs:
         assert forwarded == []
 
 
+class TestLaunchVerbose:
+    """`--verbose` on the launch commands is consumed by ucode (sets verbosity
+    before launch-time validation) rather than forwarded to the agent."""
+
+    @pytest.mark.parametrize("tool", TOOLS)
+    def test_verbose_debug_sets_verbosity_and_is_not_forwarded(self, tool):
+        import ucode.ui as ui_mod
+
+        patches = _patch_launch(tool)
+        with (
+            patches[0],
+            patches[1],
+            patches[2],
+            patches[3],
+            patches[4],
+            patches[5],
+            patches[6] as mock_launch,
+            patch("ucode.cli.set_verbosity") as mock_set,
+        ):
+            result = runner.invoke(app, [tool, "--verbose", "debug"])
+        assert result.exit_code == 0, result.output
+        # ucode consumed --verbose: nothing extra is forwarded to the agent.
+        assert mock_launch.call_args[0][2] == []
+        mock_set.assert_called_once_with("debug")
+        # Guard against leaking verbosity into unrelated tests.
+        ui_mod.set_verbosity("normal")
+
+    def test_verbose_after_separator_is_forwarded_to_agent(self):
+        """`ucode codex -- --verbose debug` forwards --verbose to the agent and
+        leaves ucode at the default verbosity."""
+        patches = _patch_launch("codex")
+        with (
+            patches[0],
+            patches[1],
+            patches[2],
+            patches[3],
+            patches[4],
+            patches[5],
+            patches[6] as mock_launch,
+            patch("ucode.cli.set_verbosity") as mock_set,
+        ):
+            result = runner.invoke(app, ["codex", "--", "--verbose", "debug"])
+        assert result.exit_code == 0, result.output
+        assert mock_launch.call_args[0][2] == ["--verbose", "debug"]
+        mock_set.assert_called_once_with("normal")
+
+    def test_invalid_verbose_rejected(self):
+        result = runner.invoke(app, ["codex", "--verbose", "bogus"])
+        assert result.exit_code == 2
+        assert "--verbose must be one of" in _strip_ansi(result.output)
+
+
 class TestConfigureAgentFlag:
     def test_no_flag_calls_configure_all(self):
         with (
