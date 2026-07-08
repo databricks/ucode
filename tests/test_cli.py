@@ -215,7 +215,7 @@ class TestAuthTokenCommand:
             patch("ucode.cli.load_state", return_value={"workspace": "https://ws"}),
             patch(
                 "ucode.cli.get_databricks_token",
-                side_effect=lambda w, p, force_refresh=False: os.environ.get(
+                side_effect=lambda w, p, *, force_refresh=False: os.environ.get(
                     "DATABRICKS_BEARER", ""
                 ),
             ),
@@ -233,7 +233,7 @@ class TestAuthTokenCommand:
             patch("ucode.cli.load_state", return_value={"workspace": "https://ws"}),
             patch(
                 "ucode.cli.get_databricks_token",
-                side_effect=lambda w, p, force_refresh=False: os.environ.get(
+                side_effect=lambda w, p, *, force_refresh=False: os.environ.get(
                     "DATABRICKS_BEARER", ""
                 ),
             ),
@@ -265,7 +265,7 @@ class TestAuthTokenCommand:
             patch("ucode.cli.load_state", return_value={"workspace": "https://ws"}),
             patch(
                 "ucode.cli.get_databricks_token",
-                side_effect=lambda w, p, force_refresh=False: os.environ.get(
+                side_effect=lambda w, p, *, force_refresh=False: os.environ.get(
                     "DATABRICKS_BEARER", ""
                 ),
             ),
