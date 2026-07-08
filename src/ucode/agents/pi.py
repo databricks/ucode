@@ -77,6 +77,93 @@ PROVIDER_KEYS: list[list[str]] = [["providers", name] for name in PROVIDER_NAMES
 LEGACY_PROVIDER_NAMES = ("databricks-anthropic", "databricks-codex", "databricks-oss")
 
 
+# pi's full thinking-level ladder, in order.
+PI_THINKING_LEVELS = ("off", "minimal", "low", "medium", "high", "xhigh")
+
+# Levels each Databricks-hosted model accepts, in pi's vocabulary.
+# "off" == reasoning disabled (OpenAI effort "none").  () == no thinking at all.
+# Keyed by model id with any "<catalog>.<schema>." prefix stripped.
+MODEL_THINKING_LEVELS: dict[str, tuple[str, ...]] = {
+    # ---- databricks-claude (anthropic-messages) ----
+    "claude-opus-4-8": ("low", "medium", "high", "xhigh"),
+    "claude-sonnet-5": ("low", "medium", "high", "xhigh"),
+    "claude-haiku-4-5": (),
+    # ---- databricks-openai (openai-responses) ----
+    "gpt-5": ("minimal", "low", "medium", "high"),
+    "gpt-5-mini": ("minimal", "low", "medium", "high"),
+    "gpt-5-nano": ("minimal", "low", "medium", "high"),
+    "gpt-5-1": ("off", "low", "medium", "high"),
+    "gpt-5-1-codex-max": ("off", "low", "medium", "high", "xhigh"),
+    "gpt-5-1-codex-mini": ("off", "low", "medium", "high"),
+    "gpt-5-2": ("off", "low", "medium", "high", "xhigh"),
+    "gpt-5-2-codex": ("low", "medium", "high", "xhigh"),
+    "gpt-5-3-codex": ("low", "medium", "high", "xhigh"),
+    "gpt-5-4": ("off", "low", "medium", "high", "xhigh"),
+    "gpt-5-4-mini": ("off", "low", "medium", "high", "xhigh"),
+    "gpt-5-4-nano": ("off", "low", "medium", "high", "xhigh"),
+    "gpt-5-5": ("off", "low", "medium", "high", "xhigh"),
+    "gpt-5-5-pro": ("medium", "high", "xhigh"),
+    "gpt-oss-120b": ("low", "medium", "high"),
+    "gpt-oss-20b": ("low", "medium", "high"),
+    # ---- databricks-gemini (google-generative-ai) ----
+    # Only gemini-3-pro and gemini-3-flash get levels. Pi's google handler picks
+    # thinkingLevel (Gemini 3) vs thinkingBudget (2.5) by regex-matching model.id
+    # (isGemini3{Pro,Flash}Model / getGoogleBudget in pi's
+    # packages/ai/src/api/google-generative-ai.ts), and those regexes expect
+    # DOTTED minor versions (gemini-3.1-pro, 2.5-flash). Databricks serves DASHED
+    # ids (gemini-3-1-pro, gemini-2-5-flash), so only the unversioned
+    # gemini-3-pro/-flash match; every other id falls through to a dynamic budget
+    # (-1) that ignores the requested effort. () (reasoning: False) hides the
+    # effort selector — these models still think, at their native default
+    # (Gemini 3 can't disable it, 2.5 is on by default), since pi then sends no
+    # thinkingConfig at all.
+    "gemini-3-5-flash": (),
+    "gemini-3-1-flash-lite": (),
+    "gemini-3-1-pro": (),
+    "gemini-3-flash": ("minimal", "low", "medium", "high"),
+    "gemini-3-pro": ("low", "high"),
+    "gemini-2-5-flash": (),
+    "gemini-2-5-pro": (),
+}
+
+
+def _thinking_level_map(supported: tuple[str, ...], family: str) -> dict[str, str | None]:
+    m: dict[str, str | None] = {}
+    for lvl in PI_THINKING_LEVELS:
+        if lvl in supported:
+            if lvl == "off":
+                m["off"] = "none" if family == "openai" else None  # openai disables via "none"
+            elif lvl == "xhigh":
+                m["xhigh"] = "xhigh"  # must be explicit or pi hides it
+            # minimal/low/medium/high: leave unset -> pi sends the level verbatim
+        else:
+            m[lvl] = None  # hide a level the model rejects
+    return m
+
+
+def _pi_model_entry(model_id: str, family: str) -> dict:
+    # The legacy AI-Gateway route doesn't support these thinking parameters and
+    # will be deprecated, so skip those models.
+    if not model_id.startswith("system.ai."):
+        return {"id": model_id, "reasoning": False}
+
+    norm = model_id.removeprefix("system.ai.").lower()
+
+    if "image" in norm:  # safety net for image-gen models
+        return {"id": model_id, "reasoning": False}
+
+    # Don't set thinking levels for unknown/new models.
+    supported = MODEL_THINKING_LEVELS.get(norm, ())
+    if not supported:
+        return {"id": model_id, "reasoning": False}
+
+    return {
+        "id": model_id,
+        "reasoning": True,
+        "thinkingLevelMap": _thinking_level_map(supported, family),
+    }
+
+
 def is_update_available() -> tuple[str, str] | None:
     return available_npm_package_update(SPEC["package"])
 
@@ -125,9 +212,9 @@ def render_overlay(
             # Gateway's Anthropic translator rejects per-tool
             # `eager_input_streaming` on the streaming + tools path. Pi sends
             # the legacy beta header instead when this is false.
-            "compat": {"supportsEagerToolInputStreaming": False},
+            "compat": {"supportsEagerToolInputStreaming": False, "forceAdaptiveThinking": True},
             "headers": ua_headers,
-            "models": [{"id": m} for m in claude_ids],
+            "models": [_pi_model_entry(m, "claude") for m in claude_ids],
         }
         keys.append(["providers", "databricks-claude"])
     if codex_models:
@@ -137,7 +224,7 @@ def render_overlay(
             "apiKey": token,
             "authHeader": True,
             "headers": ua_headers,
-            "models": [{"id": m} for m in codex_models],
+            "models": [_pi_model_entry(m, "openai") for m in codex_models],
         }
         keys.append(["providers", "databricks-openai"])
     if gemini_models:
@@ -147,7 +234,7 @@ def render_overlay(
             "apiKey": token,
             "authHeader": True,
             "headers": ua_headers,
-            "models": [{"id": m} for m in gemini_models],
+            "models": [_pi_model_entry(m, "gemini") for m in gemini_models],
         }
         keys.append(["providers", "databricks-gemini"])
     overlay: dict = {

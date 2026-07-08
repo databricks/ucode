@@ -882,23 +882,33 @@ class TestPiLaunch:
     test exercises each one end-to-end through the validation path.
     """
 
-    def _all_models(self, e2e_state: dict) -> list[tuple[str, str]]:
-        out: list[tuple[str, str]] = []
+    def _all_models(self, e2e_state: dict, e2e_uc_models: dict) -> list[tuple[str, str, str]]:
+        out: list[tuple[str, str, str]] = []
+        # AI-Gateway route (databricks-*).
         claude_models: dict = e2e_state.get("claude_models") or {}
         for family, model_id in _launchable_model_items(claude_models):
-            out.append((f"claude-{family}", model_id))
+            out.append(("aig", f"claude-{family}", model_id))
         for model in e2e_state.get("codex_models") or []:
-            out.append(("codex", model))
+            out.append(("aig", "codex", model))
         for model in e2e_state.get("gemini_models") or []:
-            out.append(("gemini", model))
+            out.append(("aig", "gemini", model))
+        # UC model route (system.ai.*)
+        for family, model_id in _launchable_model_items(e2e_uc_models["claude_models"]):
+            out.append(("uc", f"claude-{family}", model_id))
+        for model in e2e_uc_models.get("codex_models") or []:
+            out.append(("uc", "codex", model))
+        for model in e2e_uc_models.get("gemini_models") or []:
+            out.append(("uc", "gemini", model))
         return out
 
-    def test_launch_pi_per_model(self, tmp_path, monkeypatch, e2e_state, e2e_workspace, e2e_token):
+    def test_launch_pi_per_model(
+        self, tmp_path, monkeypatch, e2e_state, e2e_uc_models, e2e_workspace, e2e_token
+    ):
         import ucode.config_io as config_io_mod
         from ucode.agents import pi
 
         _require_binary("pi")
-        models = self._all_models(e2e_state)
+        models = self._all_models(e2e_state, e2e_uc_models)
         if not models:
             pytest.skip("No Pi-compatible models available on this workspace")
 
@@ -913,8 +923,13 @@ class TestPiLaunch:
         monkeypatch.setattr(pi, "PI_CONFIG_PATH", config_path)
         monkeypatch.setattr(pi, "PI_BACKUP_PATH", backup_path)
 
+        state_by_route = {
+            "aig": {**e2e_state, "workspace": e2e_workspace},
+            "uc": {**e2e_state, "workspace": e2e_workspace, **e2e_uc_models},
+        }
+
         failures = []
-        for family, model in models:
+        for route, family, model in models:
             if config_path.exists():
                 config_path.unlink()
 
@@ -925,7 +940,7 @@ class TestPiLaunch:
                     lambda ws, profile=None, **kwargs: e2e_token,
                 )
                 pi.write_tool_config(
-                    {**e2e_state, "workspace": e2e_workspace},
+                    state_by_route[route],
                     model,
                     token=e2e_token,
                 )
@@ -936,7 +951,7 @@ class TestPiLaunch:
             combined = (result.stdout + result.stderr).strip()
             if result.returncode != 0 or not combined:
                 failures.append(
-                    f"family={family} model={model} rc={result.returncode} "
+                    f"route={route} family={family} model={model} rc={result.returncode} "
                     f"stdout={result.stdout[:300]!r} stderr={result.stderr[:300]!r}"
                 )
 
