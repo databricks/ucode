@@ -70,7 +70,13 @@ TOKEN_REFRESH_INTERVAL_SECONDS = 1800
 # refresh token is rotating, so redeeming it twice in quick succession from
 # concurrent `ucode opencode` sessions can revoke the token family (#190).
 TOKEN_REFRESH_COALESCE_SECONDS = 60
-_LOCK_ACQUIRE_TIMEOUT_SECONDS = 15
+# Must exceed the `databricks auth token` subprocess timeout (`timeout=15` at
+# the `run(...)` call in the `_fetch` closure below), so a live peer that is
+# still inside its own (up to 15s) --force-refresh subprocess is guaranteed
+# to finish and touch the sentinel before any waiter gives up on the lock and
+# proceeds unlocked (#190: an unlocked waiter racing a still-refreshing peer
+# can redeem the rotating refresh token twice).
+_LOCK_ACQUIRE_TIMEOUT_SECONDS = 30
 _LOCK_POLL_INTERVAL_SECONDS = 0.2
 
 
@@ -859,6 +865,8 @@ def _refresh_lock(lock_path: Path):
                 break
             except OSError:
                 time.sleep(_LOCK_POLL_INTERVAL_SECONDS)
+        if not acquired:
+            _debug("refresh_lock", "acquire timeout, proceeding without lock")
         _debug("refresh_lock", f"acquired={acquired} path={lock_path}")
         yield acquired
     finally:
@@ -883,7 +891,23 @@ def _perform_force_refresh(
     refresh token concurrently. If a peer already force-refreshed within
     `TOKEN_REFRESH_COALESCE_SECONDS`, drops `--force-refresh` from `cmd` (in
     place, so retries via the same `fetch` closure stay coalesced too) and
-    just fetches the now-current cached token instead."""
+    just fetches the now-current cached token instead.
+
+    The sentinel is touched on ATTEMPT, not on success: Databricks rotates
+    the OAuth refresh token when the `--force-refresh` redemption reaches the
+    server, not when we successfully parse a token out of our subprocess's
+    stdout. If the redemption subprocess actually rotated the token
+    server-side but returned a non-zero exit code or unparseable stdout
+    (both of which `_fetch` swallows into `""`), failing to touch the
+    sentinel would let a concurrent peer redeem the same (now-stale)
+    refresh token again and revoke the whole token family (#190). Marking on
+    attempt instead means we only risk occasionally serving a slightly-stale
+    cached token to a coalesced peer — strictly safer than a double
+    redemption — and any transient failure that gets coalesced away here
+    will simply be retried after the `TOKEN_REFRESH_COALESCE_SECONDS` window
+    elapses. Only touch it here, in the branch that actually sent
+    `--force-refresh`; the coalesced branch above reads the cached token and
+    performs no redemption, so it must never touch the sentinel."""
     lock_path, sentinel_path = _refresh_lock_paths(workspace, profile)
     with _refresh_lock(lock_path) as locked:
         _debug(
@@ -902,8 +926,7 @@ def _perform_force_refresh(
 
         _debug("get_databricks_token", "performing --force-refresh")
         token = fetch()
-        if token:
-            _touch_sentinel(sentinel_path)
+        _touch_sentinel(sentinel_path)
         return token
 
 

@@ -1189,12 +1189,16 @@ class TestForceRefreshLockAndCoalescing:
 
         _, sentinel_path = db_mod._refresh_lock_paths(WS, None)
         sentinel_path.touch()  # fresh mtime == a peer just force-refreshed
+        mtime_before = sentinel_path.stat().st_mtime_ns
 
         token = get_databricks_token(WS, force_refresh=True)
 
         assert token == "good-token"
         argv = argv_log.read_text().splitlines()
         assert "--force-refresh" not in argv
+        # M2: the coalesced branch performs no redemption, so it must never
+        # re-touch the sentinel.
+        assert sentinel_path.stat().st_mtime_ns == mtime_before
 
     def test_performs_force_refresh_and_touches_sentinel_when_stale(self, tmp_path, monkeypatch):
         monkeypatch.setattr(db_mod, "APP_DIR", tmp_path)
@@ -1210,6 +1214,27 @@ class TestForceRefreshLockAndCoalescing:
         assert token == "good-token"
         argv = argv_log.read_text().splitlines()
         assert "--force-refresh" in argv
+        assert sentinel_path.exists()
+
+    def test_force_refresh_attempt_touches_sentinel_even_when_fetch_returns_empty(
+        self, tmp_path, monkeypatch
+    ):
+        """M2: mark-on-attempt, not mark-on-success. The OAuth server rotates
+        the refresh token when a `--force-refresh` redemption reaches it, not
+        when we successfully parse a token out of the subprocess's stdout. If
+        the subprocess exits non-zero or returns unparseable stdout, `_fetch`
+        swallows that into "" — but the sentinel must still be touched so a
+        concurrent peer doesn't redeem the same now-rotated refresh token
+        again. `_perform_force_refresh` must also still return "" so the
+        caller's outer empty-token re-auth + retry path keeps firing."""
+        monkeypatch.setattr(db_mod, "APP_DIR", tmp_path)
+        _, sentinel_path = db_mod._refresh_lock_paths(WS, None)
+        assert not sentinel_path.exists()
+
+        cmd = ["databricks", "auth", "token", "--host", WS, "--output", "json", "--force-refresh"]
+        token = db_mod._perform_force_refresh(WS, None, cmd, fetch=lambda: "")
+
+        assert token == ""
         assert sentinel_path.exists()
 
     def test_performs_force_refresh_when_sentinel_is_stale(self, tmp_path, monkeypatch):
