@@ -211,20 +211,22 @@ class TestRenderOverlayWebSearchDisable:
         assert "mcpServers" not in overlay
 
     def test_disables_builtin_websearch_when_requested(self):
+        # A bare `permissions.deny` entry removes the built-in WebSearch tool
+        # from Claude's context (Claude Code has no `disabledTools` setting).
         overlay, _ = claude.render_overlay(WS, "s4", disable_web_search=True)
-        assert overlay["disabledTools"] == ["WebSearch"]
+        assert overlay["permissions"] == {"deny": ["WebSearch"]}
 
     def test_no_disable_when_not_requested(self):
         overlay, _ = claude.render_overlay(WS, "s4", disable_web_search=False)
-        assert "disabledTools" not in overlay
+        assert "permissions" not in overlay
 
     def test_managed_keys_include_disabled_tools_when_set(self):
         _, keys = claude.render_overlay(WS, "s4", disable_web_search=True)
-        assert ["disabledTools"] in keys
+        assert ["permissions", "deny"] in keys
 
     def test_managed_keys_omit_disabled_tools_when_not_set(self):
         _, keys = claude.render_overlay(WS, "s4", disable_web_search=False)
-        assert ["disabledTools"] not in keys
+        assert ["permissions", "deny"] not in keys
 
 
 class TestWebSearchMcpEntry:
