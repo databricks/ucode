@@ -827,6 +827,14 @@ def _sentinel_is_fresh(sentinel_path: Path) -> bool:
 
 def _touch_sentinel(sentinel_path: Path) -> None:
     try:
+        # The sentinel's parent (APP_DIR) is normally created by
+        # `_refresh_lock` before this runs, but that only happens on the
+        # `fcntl`-available branch -- on Windows (no `fcntl`) `_refresh_lock`
+        # yields immediately without ever creating it, which would make
+        # `.touch()` raise `FileNotFoundError` and silently disable
+        # coalescing on every such platform. Ensuring the directory here
+        # keeps best-effort coalescing working even without file locking.
+        sentinel_path.parent.mkdir(parents=True, exist_ok=True)
         sentinel_path.touch()
     except OSError as exc:
         _debug("refresh_lock", f"failed to touch sentinel {sentinel_path}: {exc}")
@@ -856,6 +864,7 @@ def _refresh_lock(lock_path: Path):
         return
 
     acquired = False
+    unexpected_error = False
     try:
         deadline = time.monotonic() + _LOCK_ACQUIRE_TIMEOUT_SECONDS
         while time.monotonic() < deadline:
@@ -863,9 +872,22 @@ def _refresh_lock(lock_path: Path):
                 fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
                 acquired = True
                 break
-            except OSError:
+            except BlockingIOError:
+                # Expected contention (a peer holds the lock) -- keep
+                # polling until acquired or the deadline passes.
                 time.sleep(_LOCK_POLL_INTERVAL_SECONDS)
-        if not acquired:
+            except OSError as exc:
+                # Anything else (e.g. EBADF, or a filesystem that doesn't
+                # support flock at all) is not going to resolve by waiting
+                # -- fall back to unlocked immediately instead of spinning
+                # for the full timeout.
+                unexpected_error = True
+                _debug(
+                    "refresh_lock",
+                    f"unexpected flock error on {lock_path}, proceeding without lock: {exc}",
+                )
+                break
+        if not acquired and not unexpected_error:
             _debug("refresh_lock", "acquire timeout, proceeding without lock")
         _debug("refresh_lock", f"acquired={acquired} path={lock_path}")
         yield acquired

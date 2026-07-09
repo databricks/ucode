@@ -682,14 +682,22 @@ def _remove_opencode_auth_plugin() -> bool:
 
     Unlike opencode.json, this file has no pre-ucode content to restore --
     it's entirely ucode-generated -- so revert just deletes it rather than
-    going through the backup/restore_file machinery (#190)."""
+    going through the backup/restore_file machinery (#190).
+
+    Raises ``RuntimeError`` if the file exists but can't be removed (e.g.
+    permissions), matching ``restore_file``'s convention elsewhere in
+    revert -- silently swallowing that would leave `ucode revert` reporting
+    "unchanged" and continuing as if nothing were wrong, with no actionable
+    error for a state that's actually only partially reverted."""
     try:
         if OPENCODE_PLUGIN_PATH.exists():
             OPENCODE_PLUGIN_PATH.unlink()
             return True
-    except OSError:
-        pass
-    return False
+        return False
+    except OSError as exc:
+        raise RuntimeError(
+            f"Failed to remove OpenCode auth plugin at {OPENCODE_PLUGIN_PATH}"
+        ) from exc
 
 
 def revert() -> int:

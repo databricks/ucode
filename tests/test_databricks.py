@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import subprocess
@@ -1297,6 +1298,71 @@ class TestForceRefreshLockAndCoalescing:
         lock_path, sentinel_path = db_mod._refresh_lock_paths(WS, None)
         assert not lock_path.exists()
         assert not sentinel_path.exists()
+
+    def test_touch_sentinel_creates_missing_parent_directory(self, tmp_path, monkeypatch):
+        # Review comment on #197: on the fcntl-unavailable branch,
+        # _refresh_lock returns without ever creating APP_DIR, so
+        # _touch_sentinel used to raise (swallowed) FileNotFoundError and
+        # silently disable coalescing on every such platform. It must create
+        # its own parent directory rather than depending on the caller.
+        missing_dir = tmp_path / "does-not-exist-yet"
+        assert not missing_dir.exists()
+        _, sentinel_path = db_mod._refresh_lock_paths(WS, None)
+        sentinel_path = missing_dir / sentinel_path.name
+
+        db_mod._touch_sentinel(sentinel_path)
+
+        assert sentinel_path.exists()
+
+    def test_falls_back_immediately_on_unexpected_flock_error(self, tmp_path, monkeypatch):
+        # Review comment on #197: only lock *contention* (BlockingIOError)
+        # should be retried in the acquisition loop. Any other OSError
+        # (e.g. EBADF, or a filesystem that doesn't support flock at all)
+        # is not going to resolve by waiting, and used to spin for the full
+        # _LOCK_ACQUIRE_TIMEOUT_SECONDS before falling back.
+        monkeypatch.setattr(db_mod, "APP_DIR", tmp_path)
+        monkeypatch.setattr(db_mod, "_LOCK_ACQUIRE_TIMEOUT_SECONDS", 30)
+
+        def raise_unexpected(fd, op):
+            raise OSError(errno.EBADF, "Bad file descriptor")
+
+        monkeypatch.setattr(db_mod.fcntl, "flock", raise_unexpected)
+        lock_path, _ = db_mod._refresh_lock_paths(WS, None)
+
+        start = time.monotonic()
+        with db_mod._refresh_lock(lock_path) as locked:
+            elapsed = time.monotonic() - start
+            assert locked is False
+
+        # Bailed out almost immediately, not after spinning for anywhere
+        # near the 30s acquisition timeout.
+        assert elapsed < 2.0
+
+    def test_retries_through_contention_then_acquires(self, tmp_path, monkeypatch):
+        # BlockingIOError (lock contention) must still be retried, not
+        # treated as the "give up immediately" unexpected-error case.
+        monkeypatch.setattr(db_mod, "APP_DIR", tmp_path)
+        attempts: list[int] = []
+        real_flock = db_mod.fcntl.flock
+        acquire_op = db_mod.fcntl.LOCK_EX | db_mod.fcntl.LOCK_NB
+
+        def flaky_flock(fd, op):
+            if op != acquire_op:
+                # Pass unlock calls straight through -- only the acquire
+                # attempts are what's under test here.
+                return real_flock(fd, op)
+            attempts.append(1)
+            if len(attempts) < 3:
+                raise BlockingIOError(errno.EAGAIN, "Resource temporarily unavailable")
+            return real_flock(fd, op)
+
+        monkeypatch.setattr(db_mod, "_LOCK_POLL_INTERVAL_SECONDS", 0.01)
+        monkeypatch.setattr(db_mod.fcntl, "flock", flaky_flock)
+        lock_path, _ = db_mod._refresh_lock_paths(WS, None)
+
+        with db_mod._refresh_lock(lock_path) as locked:
+            assert locked is True
+        assert len(attempts) == 3
 
 
 class TestListDatabricksConnections:
