@@ -528,6 +528,7 @@ class TestRenderAuthPluginRuntimeBehavior:
     ):
         import shutil
         import subprocess
+        import sys
 
         node = shutil.which("node")
         if not node:
@@ -538,12 +539,16 @@ class TestRenderAuthPluginRuntimeBehavior:
         # printing nothing (or only whitespace) -- a successful subprocess
         # with unusable output.
         print_stmt = f"print({fake_token!r})" if fake_token is not None else 'print("   ")'
-        fake_ucode.write_text(f"#!/usr/bin/env python3\n{print_stmt}\n")
-        fake_ucode.chmod(0o755)
+        # No shebang needed -- invoked directly via `sys.executable` below,
+        # not executed as a standalone script.
+        fake_ucode.write_text(f"{print_stmt}\n")
 
         with patch(
             "ucode.agents.opencode.build_auth_token_argv",
-            return_value=["python3", str(fake_ucode)],
+            # Use the same interpreter running this test rather than a bare
+            # `python3`, which isn't guaranteed to be on PATH in every
+            # environment (even one running Python tests).
+            return_value=[sys.executable, str(fake_ucode)],
         ):
             js = opencode.render_auth_plugin(WS, None, ["databricks-anthropic"])
 
@@ -557,8 +562,11 @@ class TestRenderAuthPluginRuntimeBehavior:
             else "{}"
         )
         harness = tmp_path / "harness.mjs"
+        # A `file://` URL is a portable ESM import specifier on every OS;
+        # `.as_posix()` produces a bare path, which isn't a valid ESM
+        # specifier on Windows (`C:\\...`).
         harness.write_text(f"""
-import {{ UcodeDatabricksAuth }} from {str(plugin_path.as_posix())!r};
+import {{ UcodeDatabricksAuth }} from {plugin_path.as_uri()!r};
 
 const hooks = await UcodeDatabricksAuth({{}});
 const output = {output_literal};
