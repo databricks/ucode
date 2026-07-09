@@ -28,6 +28,7 @@ from ucode.agents import copilot, gemini, opencode
 from ucode.config_io import restore_file
 from ucode.databricks import (
     apply_pat_environment,
+    build_mcp_proxy_argv,
     build_mcp_service_url,
     ensure_databricks_auth,
     get_databricks_token,
@@ -48,7 +49,6 @@ from ucode.ui import (
     spinner,
 )
 
-MCP_AUTH_TOKEN_ENV_VAR = "OAUTH_TOKEN"
 MCP_USER_SCOPE = "user"
 MCP_CLEANUP_SCOPES = ("local", "project", MCP_USER_SCOPE)
 MCP_PICKER_VISIBLE_ROWS = 10
@@ -96,20 +96,19 @@ MCP_CONNECTION_MARKERS = (
 )
 
 
-def build_mcp_http_entry(url: str) -> dict:
-    return {
-        "type": "http",
-        "url": url,
-        "headers": {
-            "Authorization": f"Bearer ${{{MCP_AUTH_TOKEN_ENV_VAR}}}",
-        },
-    }
-
-
-def add_claude_mcp_server(name: str, entry: dict, scope: str = MCP_USER_SCOPE) -> None:
+def add_claude_mcp_server(name: str, server: list[str] | dict, scope: str = MCP_USER_SCOPE) -> None:
+    # Two registration shapes share this helper. The proxy path passes an argv
+    # list (`ucode mcp-proxy ...`), registered via `claude mcp add ... -- <argv>`
+    # where `--` fences the proxy's own flags off from claude's parser. The
+    # web_search server (agents/claude.py) passes a full stdio entry dict with
+    # its own env, which only `add-json` can express — so a dict routes there.
+    if isinstance(server, dict):
+        cmd = ["claude", "mcp", "add-json", name, json.dumps(server), "-s", scope]
+    else:
+        cmd = ["claude", "mcp", "add", name, "-s", scope, "--", *server]
     try:
         subprocess.run(
-            ["claude", "mcp", "add-json", name, json.dumps(entry), "-s", scope],
+            cmd,
             check=True,
             capture_output=True,
             text=True,
@@ -146,19 +145,12 @@ def remove_claude_mcp_server(name: str, scope: str) -> bool:
         raise RuntimeError(f"Failed to remove MCP server '{name}' via claude CLI.") from exc
 
 
-def add_codex_mcp_server(name: str, url: str) -> None:
+def add_codex_mcp_server(name: str, argv: list[str]) -> None:
+    # `--` fences the proxy argv off from codex's own flag parser, registering
+    # it as a stdio server (codex spawns the command and speaks MCP over it).
     try:
         subprocess.run(
-            [
-                "codex",
-                "mcp",
-                "add",
-                name,
-                "--url",
-                url,
-                "--bearer-token-env-var",
-                MCP_AUTH_TOKEN_ENV_VAR,
-            ],
+            ["codex", "mcp", "add", name, "--", *argv],
             check=True,
             capture_output=True,
             text=True,
@@ -195,7 +187,9 @@ def _gemini_cli_env() -> dict[str, str]:
     return env
 
 
-def add_gemini_mcp_server(name: str, url: str) -> None:
+def add_gemini_mcp_server(name: str, argv: list[str]) -> None:
+    # Register the proxy as a stdio server: `gemini mcp add <name> <cmd> <args…>
+    # --type stdio`. The scope/type flags trail the captured command + args.
     try:
         subprocess.run(
             [
@@ -203,13 +197,11 @@ def add_gemini_mcp_server(name: str, url: str) -> None:
                 "mcp",
                 "add",
                 name,
-                url,
+                *argv,
                 "--type",
-                "http",
+                "stdio",
                 "--scope",
                 MCP_USER_SCOPE,
-                "--header",
-                f"Authorization: Bearer ${{{MCP_AUTH_TOKEN_ENV_VAR}}}",
             ],
             check=True,
             capture_output=True,
@@ -256,26 +248,38 @@ def configured_mcp_clients(state: dict, installed_clients: list[str]) -> list[st
     ]
 
 
-def configure_client_mcp_server(client: str, name: str, url: str, entry: dict) -> list[str]:
+def configure_client_mcp_server(
+    client: str,
+    name: str,
+    url: str,
+    workspace: str,
+    profile: str | None = None,
+    *,
+    use_pat: bool = False,
+) -> list[str]:
+    # Every client registers the same `ucode mcp-proxy ...` stdio command; the
+    # proxy forwards to `url` and refreshes the Databricks token itself. Only the
+    # per-client registration syntax differs.
+    argv = build_mcp_proxy_argv(url, workspace, profile, use_pat=use_pat)
     if client == "claude":
         removed_scopes = [
             scope for scope in MCP_CLEANUP_SCOPES if remove_claude_mcp_server(name, scope)
         ]
-        add_claude_mcp_server(name, entry, MCP_USER_SCOPE)
+        add_claude_mcp_server(name, argv, MCP_USER_SCOPE)
         return removed_scopes
     if client == "codex":
         removed = remove_codex_mcp_server(name)
-        add_codex_mcp_server(name, url)
+        add_codex_mcp_server(name, argv)
         return [MCP_USER_SCOPE] if removed else []
     if client == "gemini":
         removed = remove_gemini_mcp_server(name)
-        add_gemini_mcp_server(name, url)
+        add_gemini_mcp_server(name, argv)
         return [MCP_USER_SCOPE] if removed else []
     if client == "opencode":
-        removed = opencode.write_mcp_server_config(name, url)
+        removed = opencode.write_mcp_server_config(name, argv)
         return [MCP_USER_SCOPE] if removed else []
     if client == "copilot":
-        removed = copilot.write_mcp_server_config(name, url)
+        removed = copilot.write_mcp_server_config(name, argv)
         return [MCP_USER_SCOPE] if removed else []
     raise RuntimeError(f"Unsupported MCP client '{client}'.")
 
@@ -1019,6 +1023,10 @@ def apply_mcp_server_changes(
     original_servers: list[dict],
     working_servers: list[dict],
     clients: list[str],
+    workspace: str,
+    profile: str | None = None,
+    *,
+    use_pat: bool = False,
 ) -> bool:
     original_by_name = _servers_by_name(original_servers)
     working_by_name = _servers_by_name(working_servers)
@@ -1037,9 +1045,8 @@ def apply_mcp_server_changes(
         url = server.get("url")
         if not isinstance(url, str) or not url:
             continue
-        entry = build_mcp_http_entry(url)
         for client in clients:
-            configure_client_mcp_server(client, name, url, entry)
+            configure_client_mcp_server(client, name, url, workspace, profile, use_pat=use_pat)
         changed = True
 
     return changed
@@ -1167,7 +1174,7 @@ def _resolve_location_mcp_servers(
         candidate = {
             "name": entry_name,
             "url": build_mcp_service_url(workspace, full_name),
-            "auth": f"env:{MCP_AUTH_TOKEN_ENV_VAR}",
+            "auth": "proxy",
             "clients": merged_clients,
         }
         if original is not None and original == candidate:
@@ -1238,7 +1245,12 @@ def configure_mcp_command(location: str | None = None, services: set[str] | None
             workspace, profile, clients, location, original_mcp_servers_for_location, services
         )
         changed = apply_mcp_server_changes(
-            original_mcp_servers_for_location, working_mcp_servers, clients
+            original_mcp_servers_for_location,
+            working_mcp_servers,
+            clients,
+            workspace,
+            profile,
+            use_pat=bool(state.get("use_pat")),
         )
         if changed or original_mcp_servers_for_location != working_mcp_servers:
             state["mcp_servers"] = working_mcp_servers
@@ -1320,13 +1332,20 @@ def configure_mcp_command(location: str | None = None, services: set[str] | None
             {
                 "name": entry_name,
                 "url": url,
-                "auth": f"env:{MCP_AUTH_TOKEN_ENV_VAR}",
+                "auth": "proxy",
                 "clients": clients,
             }
         )
         working_names.add(entry_name)
 
-    changed = apply_mcp_server_changes(original_mcp_servers, working_mcp_servers, clients)
+    changed = apply_mcp_server_changes(
+        original_mcp_servers,
+        working_mcp_servers,
+        clients,
+        workspace,
+        profile,
+        use_pat=bool(state.get("use_pat")),
+    )
     if changed or original_mcp_servers != working_mcp_servers:
         state["mcp_servers"] = working_mcp_servers
         save_state(state)
