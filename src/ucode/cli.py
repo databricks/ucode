@@ -1137,6 +1137,17 @@ def configure(
             "--disable-databricks-ai-tools to opt out.",
         ),
     ] = None,
+    mcp: Annotated[
+        str | None,
+        typer.Option(
+            "--mcp",
+            help="Also register the given Databricks MCP service(s) for the configured "
+            "coding agents, in one command. Pass a comma-separated list of fully-qualified "
+            "names like `system.ai.slack`. Combine with --agents to set up an agent and its "
+            "MCP servers together (e.g. `--agents claude --mcp system.ai.slack`); use without "
+            "--agents for MCP-only clients such as Cursor.",
+        ),
+    ] = None,
     tracing: Annotated[
         bool,
         typer.Option(
@@ -1235,6 +1246,19 @@ def configure(
                     prompt_optional_updates=prompt_optional_updates,
                     **skip_kwargs,
                 )
+        elif mcp is not None:
+            # MCP-only: `--mcp` without --agent(s) (e.g. Cursor, which isn't a
+            # model agent, or adding MCP servers to an already-configured setup).
+            # Configure just the workspace — no interactive agent picker — so the
+            # `--mcp` registration below has a current workspace to target.
+            if workspace_entries is None:
+                workspace_entries = [_prompt_for_configuration(None)]
+            _configure_shared_workspace_states(
+                workspace_entries,
+                tools=[],
+                force_login=not use_pat,
+                use_pat=use_pat,
+            )
         else:
             # Tool binaries are installed after the user picks which agents
             # they want, in configure_workspace_command.
@@ -1259,6 +1283,26 @@ def configure(
                 tracing_workspaces = [(current, None)] if current else None
             if tracing_workspaces:
                 configure_tracing_command(workspaces=tracing_workspaces)
+        if mcp is not None:
+            # The workspace + agents were just configured above, so the current
+            # workspace state now lists the agents whose MCP configs we should
+            # write. `--mcp` takes fully-qualified service names, which
+            # `configure_mcp_command` locates and registers without a picker
+            # (bare short names would need --location, which we don't accept here).
+            services = {name.strip() for name in mcp.split(",") if name.strip()}
+            if not services:
+                raise RuntimeError(
+                    "--mcp needs at least one fully-qualified MCP service name, e.g. "
+                    "`--mcp system.ai.slack`."
+                )
+            bare = sorted(name for name in services if name.count(".") < 2)
+            if bare:
+                raise RuntimeError(
+                    "--mcp names must be fully qualified `<catalog>.<schema>.<name>` "
+                    f"(got: {', '.join(bare)}). Use `ucode configure mcp` for the "
+                    "interactive picker."
+                )
+            configure_mcp_command(services=services)
     except RuntimeError as exc:
         print_err(str(exc))
         raise typer.Exit(1) from None

@@ -839,6 +839,68 @@ class TestConfigureAgentFlag:
         mock_cfg.assert_not_called()
 
 
+class TestConfigureMcpFlag:
+    def test_mcp_with_agents_configures_then_registers_services(self):
+        with (
+            patch("ucode.cli.install_databricks_cli"),
+            patch("ucode.cli.install_tool_binary"),
+            patch("ucode.cli.configure_workspace_command") as mock_cfg,
+            patch("ucode.cli.configure_mcp_command") as mock_mcp,
+        ):
+            result = runner.invoke(
+                app,
+                ["configure", "--agents", "claude", "--mcp", "system.ai.slack,system.ai.github"],
+            )
+        assert result.exit_code == 0, result.output
+        mock_cfg.assert_called_once_with(
+            selected_tools=["claude"],
+            prompt_optional_updates=True,
+        )
+        mock_mcp.assert_called_once_with(services={"system.ai.slack", "system.ai.github"})
+
+    def test_mcp_only_configures_workspace_without_agent_picker(self):
+        # `--mcp` with no --agents (e.g. Cursor): configure the workspace directly,
+        # never the interactive agent picker, then register the MCP service.
+        with (
+            patch("ucode.cli.install_databricks_cli"),
+            patch("ucode.cli.configure_workspace_command") as mock_cfg,
+            patch("ucode.cli._configure_shared_workspace_states") as mock_shared,
+            patch("ucode.cli.configure_mcp_command") as mock_mcp,
+        ):
+            result = runner.invoke(
+                app,
+                [
+                    "configure",
+                    "--workspaces",
+                    "https://ws.databricks.com",
+                    "--mcp",
+                    "system.ai.slack",
+                ],
+            )
+        assert result.exit_code == 0, result.output
+        # Never the model-agent picker path.
+        mock_cfg.assert_not_called()
+        mock_shared.assert_called_once()
+        # Workspace-only: no model tools fetched.
+        assert (
+            mock_shared.call_args.kwargs.get("tools") == [] or mock_shared.call_args.args[1] == []
+        )
+        mock_mcp.assert_called_once_with(services={"system.ai.slack"})
+
+    def test_mcp_rejects_bare_short_name(self):
+        with (
+            patch("ucode.cli.install_databricks_cli"),
+            patch("ucode.cli.configure_workspace_command"),
+            patch("ucode.cli._configure_shared_workspace_states"),
+            patch("ucode.cli.configure_mcp_command") as mock_mcp,
+        ):
+            result = runner.invoke(
+                app, ["configure", "--workspaces", "https://ws.databricks.com", "--mcp", "slack"]
+            )
+        assert result.exit_code != 0
+        mock_mcp.assert_not_called()
+
+
 class TestConfigureAgentsSelection:
     def test_selected_tools_skip_picker(self, monkeypatch):
         import ucode.cli as cli_mod
