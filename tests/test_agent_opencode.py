@@ -519,7 +519,13 @@ class TestRenderAuthPluginRuntimeBehavior:
     type surface and an isolated end-to-end run against opencode 1.17.10
     (#190 follow-up). Skips if `node` isn't on PATH."""
 
-    def _run_plugin(self, tmp_path, provider_id: str | None, fake_token: str = "fresh-token-xyz"):
+    def _run_plugin(
+        self,
+        tmp_path,
+        provider_id: str | None,
+        fake_token: str | None = "fresh-token-xyz",
+        headers_preset: bool = True,
+    ):
         import shutil
         import subprocess
 
@@ -528,10 +534,11 @@ class TestRenderAuthPluginRuntimeBehavior:
             pytest.skip("`node` is not installed")
 
         fake_ucode = tmp_path / "fake_ucode.py"
-        fake_ucode.write_text(
-            "#!/usr/bin/env python3\nimport sys\nprint(sys.argv[-1] if False else "
-            f"{fake_token!r})\n"
-        )
+        # `fake_token=None` simulates `ucode auth-token` exiting 0 but
+        # printing nothing (or only whitespace) -- a successful subprocess
+        # with unusable output.
+        print_stmt = f"print({fake_token!r})" if fake_token is not None else 'print("   ")'
+        fake_ucode.write_text(f"#!/usr/bin/env python3\n{print_stmt}\n")
         fake_ucode.chmod(0o755)
 
         with patch(
@@ -544,12 +551,17 @@ class TestRenderAuthPluginRuntimeBehavior:
         plugin_path.write_text(js)
 
         provider_literal = f"{{ id: {provider_id!r} }}" if provider_id else "undefined"
+        output_literal = (
+            '{ headers: { Authorization: "Bearer STALE-BOOTSTRAP-TOKEN" } }'
+            if headers_preset
+            else "{}"
+        )
         harness = tmp_path / "harness.mjs"
         harness.write_text(f"""
 import {{ UcodeDatabricksAuth }} from {str(plugin_path.as_posix())!r};
 
 const hooks = await UcodeDatabricksAuth({{}});
-const output = {{ headers: {{ Authorization: "Bearer STALE-BOOTSTRAP-TOKEN" }} }};
+const output = {output_literal};
 const input = {{
   sessionID: "ses_test",
   agent: "build",
@@ -558,7 +570,7 @@ const input = {{
   message: {{}},
 }};
 await hooks["chat.headers"](input, output);
-console.log(JSON.stringify(output.headers));
+console.log(JSON.stringify(output.headers ?? null));
 """)
 
         result = subprocess.run(
@@ -588,6 +600,28 @@ console.log(JSON.stringify(output.headers));
         assert result.returncode == 0, result.stderr
         headers = json.loads(result.stdout.strip().splitlines()[-1])
         assert headers["Authorization"] == "Bearer STALE-BOOTSTRAP-TOKEN"
+
+    def test_empty_token_output_fails_open_instead_of_setting_empty_bearer(self, tmp_path):
+        # `ucode auth-token` exiting 0 with empty/whitespace-only stdout must
+        # not be treated as a successful fetch -- otherwise the hook would
+        # cache and send `Authorization: Bearer ` (empty), clobbering a
+        # possibly-still-valid bootstrap token for the full TTL window.
+        result = self._run_plugin(tmp_path, provider_id="databricks-anthropic", fake_token=None)
+        assert result.returncode == 0, result.stderr
+        headers = json.loads(result.stdout.strip().splitlines()[-1])
+        assert headers["Authorization"] == "Bearer STALE-BOOTSTRAP-TOKEN"
+
+    def test_initializes_missing_output_headers_instead_of_throwing(self, tmp_path):
+        # If opencode ever invokes the hook with no pre-populated
+        # `output.headers`, the hook must still set Authorization rather
+        # than throwing (which the try/catch would otherwise silently
+        # swallow, no-opping the refresh).
+        result = self._run_plugin(
+            tmp_path, provider_id="databricks-anthropic", headers_preset=False
+        )
+        assert result.returncode == 0, result.stderr
+        headers = json.loads(result.stdout.strip().splitlines()[-1])
+        assert headers["Authorization"] == "Bearer fresh-token-xyz"
 
 
 class TestWriteAuthPlugin:

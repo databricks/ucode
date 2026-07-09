@@ -222,7 +222,14 @@ let inflight = null;
 async function fetchToken() {{
   const [cmd, ...args] = UCODE_AUTH_TOKEN_ARGV;
   const {{ stdout }} = await execFileAsync(cmd, args);
-  return stdout.trim();
+  const token = stdout.trim();
+  if (!token) {{
+    // `ucode auth-token` exited 0 but printed nothing usable -- treat as a
+    // failure so the caller's catch block fails open to the static
+    // bootstrap token instead of caching/sending an empty bearer.
+    throw new Error("ucode auth-token returned empty output");
+  }}
+  return token;
 }}
 
 async function getToken() {{
@@ -259,6 +266,11 @@ export const UcodeDatabricksAuth = async (_ctx) => ({{
     }}
     try {{
       const token = await getToken();
+      // Defensive: ensure `output.headers` exists even if this opencode
+      // version ever invokes the hook without a pre-populated headers
+      // object, so the header still gets set rather than throwing (which
+      // would be caught below and silently no-op the refresh).
+      output.headers = output.headers || {{}};
       output.headers["Authorization"] = "Bearer " + token;
     }} catch (err) {{
       console.error("[ucode] failed to refresh Databricks token:", err);
