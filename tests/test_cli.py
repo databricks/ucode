@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from unittest.mock import patch
@@ -181,6 +182,16 @@ class TestAuthTokenCommand:
         # or the consuming agent will treat the noise as part of the token.
         assert result.stdout == "tok-123\n"
         fetch.assert_called_once_with("https://ws", None)
+
+    def test_mcp_header_emits_json_authorization_object(self):
+        with (
+            patch("ucode.cli.load_state", return_value={"workspace": "https://ws"}),
+            patch("ucode.cli.get_databricks_token", return_value="tok-123"),
+        ):
+            result = runner.invoke(app, ["auth-token", "--mcp-header"])
+        assert result.exit_code == 0
+        # Claude's MCP headersHelper consumes JSON on stdout; nothing else may land there.
+        assert json.loads(result.stdout) == {"Authorization": "Bearer tok-123"}
 
     def test_host_and_profile_override_state(self):
         with (

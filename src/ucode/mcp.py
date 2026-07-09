@@ -28,6 +28,7 @@ from ucode.agents import copilot, gemini, opencode
 from ucode.config_io import restore_file
 from ucode.databricks import (
     apply_pat_environment,
+    build_auth_shell_command,
     build_mcp_service_url,
     ensure_databricks_auth,
     get_databricks_token,
@@ -103,6 +104,23 @@ def build_mcp_http_entry(url: str) -> dict:
         "headers": {
             "Authorization": f"Bearer ${{{MCP_AUTH_TOKEN_ENV_VAR}}}",
         },
+    }
+
+
+def build_claude_mcp_entry(url: str, headers_helper: str) -> dict:
+    """Claude Code HTTP MCP entry that authenticates via a ``headersHelper``
+    command instead of a static bearer.
+
+    Claude runs ``headersHelper`` fresh on every connect/reconnect and re-runs it
+    on a 401/403 retry, so the Databricks OAuth token never goes stale
+    mid-session — unlike the ``Bearer ${OAUTH_TOKEN}`` env-var header, which
+    Claude freezes at config-load time. The helper (``ucode auth-token
+    --mcp-header``) emits the ``{"Authorization": "Bearer <token>"}`` JSON Claude
+    merges into the connection headers."""
+    return {
+        "type": "http",
+        "url": url,
+        "headersHelper": headers_helper,
     }
 
 
@@ -256,12 +274,19 @@ def configured_mcp_clients(state: dict, installed_clients: list[str]) -> list[st
     ]
 
 
-def configure_client_mcp_server(client: str, name: str, url: str, entry: dict) -> list[str]:
+def configure_client_mcp_server(
+    client: str, name: str, url: str, entry: dict, claude_headers_helper: str | None = None
+) -> list[str]:
     if client == "claude":
         removed_scopes = [
             scope for scope in MCP_CLEANUP_SCOPES if remove_claude_mcp_server(name, scope)
         ]
-        add_claude_mcp_server(name, entry, MCP_USER_SCOPE)
+        # Prefer a self-refreshing headersHelper over the static ${OAUTH_TOKEN}
+        # header so the MCP bearer doesn't expire mid-session.
+        claude_entry = (
+            build_claude_mcp_entry(url, claude_headers_helper) if claude_headers_helper else entry
+        )
+        add_claude_mcp_server(name, claude_entry, MCP_USER_SCOPE)
         return removed_scopes
     if client == "codex":
         removed = remove_codex_mcp_server(name)
@@ -1019,6 +1044,7 @@ def apply_mcp_server_changes(
     original_servers: list[dict],
     working_servers: list[dict],
     clients: list[str],
+    claude_headers_helper: str | None = None,
 ) -> bool:
     original_by_name = _servers_by_name(original_servers)
     working_by_name = _servers_by_name(working_servers)
@@ -1039,7 +1065,7 @@ def apply_mcp_server_changes(
             continue
         entry = build_mcp_http_entry(url)
         for client in clients:
-            configure_client_mcp_server(client, name, url, entry)
+            configure_client_mcp_server(client, name, url, entry, claude_headers_helper)
         changed = True
 
     return changed
@@ -1223,6 +1249,17 @@ def configure_mcp_command(location: str | None = None, services: set[str] | None
     apply_pat_environment(state)
     ensure_databricks_auth(workspace, profile)
 
+    # Claude Code registers MCP servers with a self-refreshing headersHelper
+    # (`ucode auth-token --mcp-header`) so the bearer never expires mid-session.
+    # Other clients keep the launch-set ${OAUTH_TOKEN} header (see build_mcp_http_entry).
+    claude_headers_helper = (
+        build_auth_shell_command(
+            workspace, profile, use_pat=bool(state.get("use_pat")), mcp_header=True
+        )
+        if "claude" in clients
+        else None
+    )
+
     print_section("MCP Servers")
     client_names = ", ".join(str(MCP_CLIENTS[client]["display"]) for client in clients)
     print_note(f"Configuring for: {client_names}")
@@ -1238,7 +1275,7 @@ def configure_mcp_command(location: str | None = None, services: set[str] | None
             workspace, profile, clients, location, original_mcp_servers_for_location, services
         )
         changed = apply_mcp_server_changes(
-            original_mcp_servers_for_location, working_mcp_servers, clients
+            original_mcp_servers_for_location, working_mcp_servers, clients, claude_headers_helper
         )
         if changed or original_mcp_servers_for_location != working_mcp_servers:
             state["mcp_servers"] = working_mcp_servers
@@ -1326,7 +1363,9 @@ def configure_mcp_command(location: str | None = None, services: set[str] | None
         )
         working_names.add(entry_name)
 
-    changed = apply_mcp_server_changes(original_mcp_servers, working_mcp_servers, clients)
+    changed = apply_mcp_server_changes(
+        original_mcp_servers, working_mcp_servers, clients, claude_headers_helper
+    )
     if changed or original_mcp_servers != working_mcp_servers:
         state["mcp_servers"] = working_mcp_servers
         save_state(state)

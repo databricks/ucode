@@ -1057,31 +1057,37 @@ def _ucode_binary() -> str:
 
 
 def build_auth_token_argv(
-    workspace: str, profile: str | None = None, *, use_pat: bool = False
+    workspace: str, profile: str | None = None, *, use_pat: bool = False, mcp_header: bool = False
 ) -> list[str]:
     """Argv for the cross-platform token helper: `ucode auth-token ...`.
 
     Unlike the previous POSIX `databricks ... | jq` pipeline, this is a single
     executable with plain arguments — no `sh`, no `jq`, no shell quoting — so it
     runs identically on macOS, Linux, and Windows (issue #116). The DATABRICKS_BEARER
-    short-circuit and the PAT path both live inside `auth-token` itself."""
+    short-circuit and the PAT path both live inside `auth-token` itself.
+
+    With ``mcp_header`` the helper emits the JSON ``{"Authorization": "Bearer …"}``
+    object Claude Code's MCP ``headersHelper`` expects rather than the bare token."""
     argv = [_ucode_binary(), "auth-token", "--host", workspace.rstrip("/")]
     if profile:
         argv += ["--profile", profile]
     if use_pat:
         argv.append("--use-pat")
+    if mcp_header:
+        argv.append("--mcp-header")
     return argv
 
 
 def build_auth_shell_command(
-    workspace: str, profile: str | None = None, *, use_pat: bool = False
+    workspace: str, profile: str | None = None, *, use_pat: bool = False, mcp_header: bool = False
 ) -> str:
     """Single-line, shell-quoted form of :func:`build_auth_token_argv`.
 
     Used where a tool wants the helper as one command *string* (Claude Code's
-    `apiKeyHelper`). On every platform this resolves to the `ucode auth-token`
-    executable rather than a POSIX shell pipeline, so no `sh`/`jq` is required."""
-    argv = build_auth_token_argv(workspace, profile, use_pat=use_pat)
+    `apiKeyHelper`, or an MCP `headersHelper` with ``mcp_header=True``). On every
+    platform this resolves to the `ucode auth-token` executable rather than a
+    POSIX shell pipeline, so no `sh`/`jq` is required."""
+    argv = build_auth_token_argv(workspace, profile, use_pat=use_pat, mcp_header=mcp_header)
     if platform.system() == "Windows":
         return subprocess.list2cmdline(argv)
     return shlex.join(argv)

@@ -92,6 +92,13 @@ Options are shown in this order:
 Discovered external MCP connections are listed directly. MCP auth uses a Databricks token that
 `ucode` sets when launching each tool.
 
+For **Claude Code**, the MCP server is registered with a `headersHelper` command
+(`ucode auth-token --mcp-header`) that Claude re-runs on every connect/reconnect and on a
+401/403 retry, so the Databricks OAuth token is refreshed automatically and never goes stale
+mid-session. Other tools (Codex, Gemini CLI, OpenCode, GitHub Copilot CLI) receive the token via
+the `OAUTH_TOKEN` env var set at launch; those clients expose no per-request auth hook for MCP, so
+a session running past the token lifetime needs to be relaunched to pick up a fresh token.
+
 ---
 
 ## Other Commands

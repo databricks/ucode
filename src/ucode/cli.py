@@ -746,6 +746,14 @@ def auth_token_cmd(
     use_pat: Annotated[
         bool, typer.Option("--use-pat", help="Read the profile's static PAT instead of OAuth.")
     ] = False,
+    mcp_header: Annotated[
+        bool,
+        typer.Option(
+            "--mcp-header",
+            help='Emit a JSON `{"Authorization": "Bearer <token>"}` object instead of the '
+            "bare token, for use as a Claude Code MCP `headersHelper`.",
+        ),
+    ] = False,
 ) -> None:
     """Print a Databricks bearer token to stdout, then exit.
 
@@ -753,7 +761,12 @@ def auth_token_cmd(
     and Codex's auth command on every token refresh. It is not meant for
     interactive use. All token logic (DATABRICKS_BEARER short-circuit, PAT
     profiles, OAuth refresh) lives in `get_databricks_token`, so the same
-    binary works on macOS, Linux, and Windows without any POSIX shell."""
+    binary works on macOS, Linux, and Windows without any POSIX shell.
+
+    With ``--mcp-header`` the output is the JSON header object Claude Code's MCP
+    ``headersHelper`` expects; Claude runs this fresh on every connect/reconnect
+    and on a 401/403 retry, so the MCP bearer never goes stale mid-session."""
+    import json as _json
     import sys
 
     state = load_state()
@@ -780,6 +793,11 @@ def auth_token_cmd(
     except RuntimeError as exc:
         print_err(str(exc))
         raise typer.Exit(1) from None
+    if mcp_header:
+        # Claude Code's MCP headersHelper merges the JSON on stdout into the
+        # connection headers. Nothing else may land on stdout.
+        sys.stdout.write(_json.dumps({"Authorization": f"Bearer {token}"}) + "\n")
+        return
     # Write the bare token (with trailing newline) to stdout — nothing else may
     # land on stdout or the consuming agent will treat it as part of the token.
     sys.stdout.write(token + "\n")
