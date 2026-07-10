@@ -83,7 +83,7 @@ def is_update_available() -> tuple[str, str] | None:
 
 def _resolve_model_selector(
     model: str,
-    claude_models: dict[str, str],
+    claude_ids: list[str],
     codex_models: list[str],
     gemini_models: list[str],
 ) -> str:
@@ -91,7 +91,7 @@ def _resolve_model_selector(
     for name in PROVIDER_NAMES:
         if model.startswith(f"{name}/"):
             return model
-    if model in claude_models.values():
+    if model in claude_ids:
         return f"databricks-claude/{model}"
     if model in codex_models:
         return f"databricks-openai/{model}"
@@ -104,18 +104,23 @@ def render_overlay(
     model: str,
     token: str,
     pi_base_urls: dict[str, str],
-    claude_models: dict[str, str],
+    claude_ids: list[str],
     codex_models: list[str],
     gemini_models: list[str],
 ) -> tuple[dict, list[list[str]]]:
-    """Return (overlay, managed_key_paths) for ~/.pi/agent/models.json."""
+    """Return (overlay, managed_key_paths) for ~/.pi/agent/models.json.
+
+    ``claude_ids`` is every Anthropic-dialect model the workspace serves, not
+    just the newest per family — Pi has its own model picker, so it should see
+    the full list.
+    """
     providers: dict = {}
     keys: list[list[str]] = [["model"]]
     # Pi expands header values that match an env var name. Our UA contains
     # `/` and a space so it can never collide — safe to pass as a literal.
     ua_headers = {"User-Agent": f"ucode/{ucode_version()} pi/{agent_version('pi')}"}
 
-    claude_ids = sorted(set(claude_models.values()))
+    claude_ids = sorted(set(claude_ids))
     if claude_ids:
         providers["databricks-claude"] = {
             "baseUrl": pi_base_urls["claude"],
@@ -151,7 +156,7 @@ def render_overlay(
         }
         keys.append(["providers", "databricks-gemini"])
     overlay: dict = {
-        "model": _resolve_model_selector(model, claude_models, codex_models, gemini_models),
+        "model": _resolve_model_selector(model, claude_ids, codex_models, gemini_models),
     }
     if providers:
         overlay["providers"] = providers
@@ -171,11 +176,14 @@ def write_tool_config(
             state["workspace"], state.get("profile"), force_refresh=force_refresh
         )
     pi_base_urls = state.get("base_urls", {}).get("pi") or build_pi_base_urls(state["workspace"])
+    # State written before claude_model_ids existed only carries the family map;
+    # fall back to its values so a stale state still renders a usable config.
+    claude_ids = state.get("claude_model_ids") or list((state.get("claude_models") or {}).values())
     overlay, managed_keys = render_overlay(
         model,
         token,
         pi_base_urls,
-        state.get("claude_models") or {},
+        claude_ids,
         state.get("codex_models") or [],
         state.get("gemini_models") or [],
     )

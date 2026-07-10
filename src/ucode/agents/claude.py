@@ -24,6 +24,7 @@ from ucode.databricks import (
     build_auth_shell_command,
     build_tool_base_url,
     get_databricks_token,
+    is_responses_model_id,
 )
 from ucode.launcher import exec_or_spawn
 from ucode.state import mark_tool_managed, save_state
@@ -51,15 +52,20 @@ def is_update_available() -> tuple[str, str] | None:
 def _resolve_web_search_model(state: dict) -> str | None:
     """Pick the model the web_search MCP server should call. Prefers an
     explicit override in state, otherwise the first endpoint discovered as
-    Responses-API-capable. Returns None if no GPT endpoint is available —
-    callers should skip the MCP wiring in that case."""
+    Responses-API-capable. Returns None if no such endpoint is available —
+    callers should skip the MCP wiring in that case.
+
+    The MCP server POSTs to `/ai-gateway/codex/v1/responses`, which only
+    forwards models that speak the Responses dialect. `codex_models` holds
+    exactly those, so the guard below is a backstop against a discovery
+    regression silently repointing the MCP at a chat-completions model."""
     override = state.get("web_search_model")
     if isinstance(override, str) and override.strip():
         return override.strip()
     codex_models = state.get("codex_models") or []
     if isinstance(codex_models, list) and codex_models:
         first = codex_models[0]
-        if isinstance(first, str) and first.strip():
+        if isinstance(first, str) and first.strip() and is_responses_model_id(first.strip()):
             return first.strip()
     return None
 

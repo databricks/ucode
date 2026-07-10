@@ -280,6 +280,7 @@ def configure_shared_state(
     codex_reason: str | None = None
     oss_reason: str | None = None
     claude_models = {}
+    claude_model_ids: list[str] = []
     gemini_models = []
     codex_models = []
     oss_models = []
@@ -300,25 +301,32 @@ def configure_shared_state(
         # empty (workspace without UC model-services, or the listing failed), fall
         # back to the per-family AI Gateway listing for that family only.
         with spinner("Fetching available models..."):
-            ms_claude, ms_codex, ms_gemini, ms_oss, ms_reason = discover_model_services(
-                workspace, token
-            )
+            discovered = discover_model_services(workspace, token)
+            ms_reason = discovered.reason
             if want_claude:
-                claude_models, claude_reason = ms_claude, ms_reason
-                if not claude_models:
-                    claude_models, claude_reason = discover_claude_models(workspace, token)
+                claude_models = discovered.claude_models
+                claude_model_ids = discovered.claude_ids
+                claude_reason = ms_reason
+                if not claude_model_ids:
+                    claude_models, claude_model_ids, claude_reason = discover_claude_models(
+                        workspace, token
+                    )
             if want_gemini:
-                gemini_models, gemini_reason = ms_gemini, ms_reason
+                gemini_models, gemini_reason = discovered.gemini_models, ms_reason
                 if not gemini_models:
                     gemini_models, gemini_reason = discover_gemini_models(workspace, token)
             if want_codex:
-                codex_models, codex_reason = ms_codex, ms_reason
+                codex_models, codex_reason = discovered.codex_models, ms_reason
                 if not codex_models:
                     codex_models, codex_reason = discover_codex_models(workspace, token)
             if want_oss:
-                oss_models, oss_reason = ms_oss, ms_reason
+                oss_models, oss_reason = discovered.oss_models, ms_reason
     opencode_models: dict[str, list[str]] = {}
     if claude_models:
+        # Deliberately the family map, not claude_model_ids: opencode picks
+        # `anthropic[0]` as its default, and the family map is ordered
+        # opus → sonnet → haiku. Widening this to every Claude id would silently
+        # move opencode's default onto whichever id sorts first.
         opencode_models["anthropic"] = list(claude_models.values())
     if gemini_models:
         opencode_models["gemini"] = gemini_models
@@ -350,6 +358,7 @@ def configure_shared_state(
     else:
         if want_claude:
             state["claude_models"] = claude_models
+            state["claude_model_ids"] = claude_model_ids
         if want_gemini:
             state["gemini_models"] = gemini_models
         if want_codex:

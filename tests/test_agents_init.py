@@ -93,7 +93,14 @@ class TestCheckGatewayEndpoint:
         assert check_gateway_endpoint({}, "claude") is False
 
     def test_codex_available(self):
-        assert check_gateway_endpoint({"codex_models": ["model-a"]}, "codex") is True
+        assert check_gateway_endpoint({"codex_models": ["system.ai.gpt-5"]}, "codex") is True
+
+    def test_codex_unavailable_when_no_model_parses_as_gpt(self):
+        # A non-empty list isn't enough: codex pins the id verbatim and
+        # default_model drops anything that isn't `gpt-<version>`. Reporting
+        # available here would fail at launch instead of at configure time.
+        state = {"codex_models": ["system.ai.gpt-oss-120b", "system.ai.gpt-oss-20b"]}
+        assert check_gateway_endpoint(state, "codex") is False
 
     def test_gemini_available(self):
         assert check_gateway_endpoint({"gemini_models": ["gemini-2"]}, "gemini") is True
