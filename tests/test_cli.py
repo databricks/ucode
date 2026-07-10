@@ -10,6 +10,7 @@ import pytest
 from typer.testing import CliRunner
 
 from ucode.cli import app
+from ucode.databricks import DiscoveredModels
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
@@ -1045,8 +1046,8 @@ class TestConfigureSharedStateUsePat:
         monkeypatch.setattr(cli_mod, "find_profile_name_for_host", lambda w: None)
         monkeypatch.setattr(cli_mod, "get_databricks_token", lambda w, p: "token")
         monkeypatch.setattr(cli_mod, "ensure_ai_gateway_v2", lambda w, t: None)
-        monkeypatch.setattr(cli_mod, "discover_model_services", lambda w, t: ({}, [], [], [], None))
-        monkeypatch.setattr(cli_mod, "discover_claude_models", lambda w, t: ({}, None))
+        monkeypatch.setattr(cli_mod, "discover_model_services", lambda w, t: DiscoveredModels())
+        monkeypatch.setattr(cli_mod, "discover_claude_models", lambda w, t: ({}, [], None))
         monkeypatch.setattr(cli_mod, "discover_gemini_models", lambda w, t: ([], None))
         monkeypatch.setattr(cli_mod, "discover_codex_models", lambda w, t: ([], None))
         monkeypatch.setattr(cli_mod, "build_shared_base_urls", lambda w: {})
@@ -1117,24 +1118,30 @@ class TestConfigureSharedStateUsePat:
         monkeypatch.setattr(
             cli_mod,
             "discover_model_services",
-            lambda w, t: (
-                {"opus": "system.ai.claude-opus-4-8"},
-                ["system.ai.gpt-5"],
-                [],
-                [],
-                None,
+            lambda w, t: DiscoveredModels(
+                claude_models={"opus": "system.ai.claude-opus-4-8"},
+                claude_ids=["system.ai.claude-opus-4-8", "system.ai.claude-fable-5"],
+                codex_models=["system.ai.gpt-5"],
             ),
         )
         legacy_called: list[str] = []
         monkeypatch.setattr(
             cli_mod,
             "discover_claude_models",
-            lambda w, t: legacy_called.append("claude") or ({}, None),
+            lambda w, t: legacy_called.append("claude") or ({}, [], None),
         )
 
         state = cli_mod.configure_shared_state(self.WS, profile="DEFAULT")
 
         assert state["claude_models"] == {"opus": "system.ai.claude-opus-4-8"}
+        # The full id list is persisted for agents that register every model.
+        assert state["claude_model_ids"] == [
+            "system.ai.claude-opus-4-8",
+            "system.ai.claude-fable-5",
+        ]
+        # opencode takes anthropic[0] as its default, so it stays on the
+        # family map — widening it here would move the default onto fable.
+        assert state["opencode_models"]["anthropic"] == ["system.ai.claude-opus-4-8"]
         assert state["codex_models"] == ["system.ai.gpt-5"]
         assert legacy_called == []
         assert "uc_enabled" not in state
@@ -1143,13 +1150,16 @@ class TestConfigureSharedStateUsePat:
         # No UC model-services: each family falls back to the legacy listing.
         cli_mod, *_ = self._stub_deps(monkeypatch, pat_token="dapi-pat")
         monkeypatch.setattr(
-            cli_mod, "discover_model_services", lambda w, t: ({}, [], [], [], "no model services")
+            cli_mod,
+            "discover_model_services",
+            lambda w, t: DiscoveredModels(reason="no model services"),
         )
         monkeypatch.setattr(
             cli_mod,
             "discover_claude_models",
             lambda w, t: (
                 {"opus": "databricks-claude-opus-4-8", "sonnet": "databricks-claude-sonnet-4-6"},
+                ["databricks-claude-opus-4-8", "databricks-claude-sonnet-4-6"],
                 None,
             ),
         )
@@ -1160,6 +1170,10 @@ class TestConfigureSharedStateUsePat:
             "opus": "databricks-claude-opus-4-8",
             "sonnet": "databricks-claude-sonnet-4-6",
         }
+        assert state["claude_model_ids"] == [
+            "databricks-claude-opus-4-8",
+            "databricks-claude-sonnet-4-6",
+        ]
 
 
 class TestConfigureSkipValidate:
@@ -1221,8 +1235,8 @@ class TestConfigureSharedStateMcpCleanup:
         monkeypatch.setattr(cli_mod, "find_profile_name_for_host", lambda w: None)
         monkeypatch.setattr(cli_mod, "get_databricks_token", lambda w, p: "token")
         monkeypatch.setattr(cli_mod, "ensure_ai_gateway_v2", lambda w, t: None)
-        monkeypatch.setattr(cli_mod, "discover_model_services", lambda w, t: ({}, [], [], [], None))
-        monkeypatch.setattr(cli_mod, "discover_claude_models", lambda w, t: ({}, None))
+        monkeypatch.setattr(cli_mod, "discover_model_services", lambda w, t: DiscoveredModels())
+        monkeypatch.setattr(cli_mod, "discover_claude_models", lambda w, t: ({}, [], None))
         monkeypatch.setattr(cli_mod, "discover_gemini_models", lambda w, t: ([], None))
         monkeypatch.setattr(cli_mod, "discover_codex_models", lambda w, t: ([], None))
         monkeypatch.setattr(cli_mod, "build_shared_base_urls", lambda w: {})

@@ -23,7 +23,7 @@ def _base_urls() -> dict[str, str]:
 def _empty() -> dict:
     """No-models input bundle for render_overlay."""
     return {
-        "claude_models": {},
+        "claude_ids": [],
         "codex_models": [],
         "gemini_models": [],
     }
@@ -36,7 +36,7 @@ def _overlay(model: str, token: str = "tok", **kwargs):
         model,
         token,
         _base_urls(),
-        bundle["claude_models"],
+        bundle["claude_ids"],
         bundle["codex_models"],
         bundle["gemini_models"],
     )
@@ -64,7 +64,7 @@ class TestRenderOverlayProviders:
         assert "providers" not in overlay
 
     def test_claude_provider_uses_anthropic_messages(self):
-        overlay, _ = _overlay("claude-sonnet", claude_models={"sonnet": "claude-sonnet"})
+        overlay, _ = _overlay("claude-sonnet", claude_ids=["claude-sonnet"])
         provider = overlay["providers"]["databricks-claude"]
         assert provider["api"] == "anthropic-messages"
         assert provider["baseUrl"] == f"{WS}/ai-gateway/anthropic"
@@ -84,7 +84,7 @@ class TestRenderOverlayProviders:
     def test_all_three_providers_when_all_present(self):
         overlay, _ = _overlay(
             "claude-sonnet",
-            claude_models={"sonnet": "claude-sonnet"},
+            claude_ids=["claude-sonnet"],
             codex_models=["gpt-5"],
             gemini_models=["gemini-2"],
         )
@@ -101,7 +101,7 @@ class TestRenderOverlayUserAgent:
         monkeypatch.setattr(pi, "agent_version", lambda binary: "0.74.0")
         overlay, _ = _overlay(
             "claude-sonnet",
-            claude_models={"sonnet": "claude-sonnet"},
+            claude_ids=["claude-sonnet"],
             codex_models=["gpt-5"],
             gemini_models=["gemini-2"],
         )
@@ -115,7 +115,7 @@ class TestRenderOverlayCompatFlags:
         # Gateway's Anthropic translator rejects per-tool
         # `eager_input_streaming`; this flag makes pi send the legacy beta
         # header instead.
-        overlay, _ = _overlay("claude-sonnet", claude_models={"sonnet": "claude-sonnet"})
+        overlay, _ = _overlay("claude-sonnet", claude_ids=["claude-sonnet"])
         compat = overlay["providers"]["databricks-claude"]["compat"]
         assert compat["supportsEagerToolInputStreaming"] is False
 
@@ -132,15 +132,13 @@ class TestRenderOverlayCompatFlags:
 
 class TestRenderOverlayAuthAndModels:
     def test_token_in_api_key(self):
-        overlay, _ = _overlay(
-            "claude-sonnet", token="mytoken", claude_models={"sonnet": "claude-sonnet"}
-        )
+        overlay, _ = _overlay("claude-sonnet", token="mytoken", claude_ids=["claude-sonnet"])
         assert overlay["providers"]["databricks-claude"]["apiKey"] == "mytoken"
 
     def test_auth_header_flag_set_on_all_providers(self):
         overlay, _ = _overlay(
             "claude-sonnet",
-            claude_models={"sonnet": "claude-sonnet"},
+            claude_ids=["claude-sonnet"],
             codex_models=["gpt-5"],
             gemini_models=["gemini-2"],
         )
@@ -148,10 +146,12 @@ class TestRenderOverlayAuthAndModels:
             assert overlay["providers"][name]["authHeader"] is True
 
     def test_claude_models_listed(self):
-        claude_models = {"opus": "claude-opus", "sonnet": "claude-sonnet"}
-        overlay, _ = _overlay("claude-sonnet", claude_models=claude_models)
+        # Pi has its own picker, so it registers every Claude id the workspace
+        # serves — not just the newest of each opus/sonnet/haiku family.
+        claude_ids = ["claude-opus-4-8", "claude-opus-4-6", "claude-sonnet-5", "claude-fable-5"]
+        overlay, _ = _overlay("claude-sonnet-5", claude_ids=claude_ids)
         ids = {m["id"] for m in overlay["providers"]["databricks-claude"]["models"]}
-        assert ids == {"claude-opus", "claude-sonnet"}
+        assert ids == set(claude_ids)
 
     def test_openai_models_listed(self):
         overlay, _ = _overlay("gpt-5", codex_models=["gpt-5", "gpt-5-mini"])
@@ -172,7 +172,7 @@ class TestRenderOverlayManagedKeys:
     def test_managed_keys_include_each_provider_present(self):
         _, keys = _overlay(
             "claude-sonnet",
-            claude_models={"sonnet": "claude-sonnet"},
+            claude_ids=["claude-sonnet"],
             codex_models=["gpt-5"],
             gemini_models=["gemini-2"],
         )
@@ -182,7 +182,7 @@ class TestRenderOverlayManagedKeys:
 
 class TestRenderOverlayModelSelector:
     def test_prefixes_claude_model(self):
-        overlay, _ = _overlay("claude-sonnet", claude_models={"sonnet": "claude-sonnet"})
+        overlay, _ = _overlay("claude-sonnet", claude_ids=["claude-sonnet"])
         assert overlay["model"] == "databricks-claude/claude-sonnet"
 
     def test_prefixes_openai_model(self):
@@ -196,7 +196,7 @@ class TestRenderOverlayModelSelector:
     def test_preserves_already_prefixed_model(self):
         overlay, _ = _overlay(
             "databricks-claude/claude-sonnet",
-            claude_models={"sonnet": "claude-sonnet"},
+            claude_ids=["claude-sonnet"],
         )
         assert overlay["model"] == "databricks-claude/claude-sonnet"
 
@@ -281,12 +281,44 @@ class TestWriteToolConfig:
             "workspace": WS,
             "base_urls": {"pi": _base_urls()},
             "claude_models": {"sonnet": "claude-sonnet"},
+            "claude_model_ids": ["claude-sonnet"],
             "codex_models": [],
             "gemini_models": [],
             "managed_configs": {},
         }
         state.update(overrides)
         return state
+
+    def test_registers_every_claude_id(self, tmp_path, monkeypatch):
+        pi_mod, config_file, _, _ = self._setup(tmp_path, monkeypatch)
+        state = self._state(
+            claude_models={"sonnet": "claude-sonnet-5"},
+            claude_model_ids=["claude-sonnet-5", "claude-opus-4-6", "claude-fable-5"],
+        )
+        with (
+            patch("ucode.agents.pi.get_databricks_token", return_value="tok"),
+            patch("ucode.agents.pi.save_state"),
+        ):
+            pi_mod.write_tool_config(state, "claude-sonnet-5")
+
+        config = json.loads(config_file.read_text())
+        ids = {m["id"] for m in config["providers"]["databricks-claude"]["models"]}
+        assert ids == {"claude-sonnet-5", "claude-opus-4-6", "claude-fable-5"}
+
+    def test_falls_back_to_family_map_on_stale_state(self, tmp_path, monkeypatch):
+        # State written before claude_model_ids existed still renders a config.
+        pi_mod, config_file, _, _ = self._setup(tmp_path, monkeypatch)
+        state = self._state(claude_models={"sonnet": "claude-sonnet"})
+        state.pop("claude_model_ids")
+        with (
+            patch("ucode.agents.pi.get_databricks_token", return_value="tok"),
+            patch("ucode.agents.pi.save_state"),
+        ):
+            pi_mod.write_tool_config(state, "claude-sonnet")
+
+        config = json.loads(config_file.read_text())
+        ids = {m["id"] for m in config["providers"]["databricks-claude"]["models"]}
+        assert ids == {"claude-sonnet"}
 
     def test_stale_managed_providers_removed_before_merge(self, tmp_path, monkeypatch):
         pi_mod, config_file, _, _ = self._setup(tmp_path, monkeypatch)

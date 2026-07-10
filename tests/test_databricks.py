@@ -129,15 +129,58 @@ class TestDiscoverClaudeModels:
         }
         monkeypatch.setattr(db_mod, "_http_get_json", lambda url, token: (payload, None))
 
-        models, reason = db_mod.discover_claude_models(WS, "token")
+        models, ids, reason = db_mod.discover_claude_models(WS, "token")
 
         assert reason is None
         assert models["opus"] == "databricks-claude-opus-4-8"
+        assert set(ids) == {
+            "databricks-claude-opus-4-7",
+            "databricks-claude-opus-4-8",
+            "databricks-claude-sonnet-4-6",
+        }
+
+    def test_two_digit_minor_version_beats_single_digit(self, monkeypatch):
+        payload = {
+            "data": [
+                {"id": "databricks-claude-opus-4-8"},
+                {"id": "databricks-claude-opus-4-10"},
+            ]
+        }
+        monkeypatch.setattr(db_mod, "_http_get_json", lambda url, token: (payload, None))
+
+        models, _ids, _reason = db_mod.discover_claude_models(WS, "token")
+
+        assert models["opus"] == "databricks-claude-opus-4-10"
+
+    def test_familyless_model_reported_in_ids_only(self, monkeypatch):
+        # A Claude model outside opus/sonnet/haiku has no family env var, but
+        # agents with their own picker (pi) must still see it.
+        payload = {"data": [{"id": "databricks-claude-fable-5"}]}
+        monkeypatch.setattr(db_mod, "_http_get_json", lambda url, token: (payload, None))
+
+        models, ids, reason = db_mod.discover_claude_models(WS, "token")
+
+        assert reason is None
+        assert models == {}
+        assert ids == ["databricks-claude-fable-5"]
 
 
-def _model_service(model_id: str) -> dict:
-    """A model-services entry whose `name` strips to `model_id`."""
-    return {"name": f"model-services/{model_id}"}
+ANTHROPIC = "anthropic/v1/messages"
+RESPONSES = "openai/v1/responses"
+GEMINI = "gemini/v1/generateContent"
+MLFLOW_CHAT = "mlflow/v1/chat/completions"
+
+
+def _model_service(model_id: str, api_types: list[str] | None = None) -> dict:
+    """A model-services entry whose `name` strips to `model_id`.
+
+    Omitting `api_types` models a workspace whose API predates
+    `supported_api_types`, exercising the name-rule fallback.
+    """
+    entry: dict = {"name": f"model-services/{model_id}"}
+    if api_types is not None:
+        entry["supported_api_types"] = api_types
+    return entry
 
 
 class TestModelTokenLimits:
@@ -157,7 +200,130 @@ class TestModelTokenLimits:
         assert db_mod.model_token_limits("system.ai.kimi-k2-7-code") is None
 
 
+class TestDiscoverModelServicesByCapability:
+    """Bucketing driven by each service's advertised `supported_api_types`."""
+
+    def test_buckets_by_advertised_api_type(self, monkeypatch):
+        payload = {
+            "model_services": [
+                _model_service("system.ai.claude-opus-4-8", [MLFLOW_CHAT, ANTHROPIC]),
+                _model_service("system.ai.claude-sonnet-5", [MLFLOW_CHAT, ANTHROPIC]),
+                _model_service("system.ai.gpt-5-6", [RESPONSES]),
+                _model_service("system.ai.gemini-3-5-flash", [GEMINI]),
+                _model_service("system.ai.glm-5-2", [MLFLOW_CHAT]),
+            ]
+        }
+        monkeypatch.setattr(
+            db_mod, "_http_get_json", lambda url, token, timeout=10: (payload, None)
+        )
+
+        found = db_mod.discover_model_services(WS, "token")
+
+        assert found.reason is None
+        # Grouped by family prefix, newest-first within each family.
+        assert found.claude_ids == ["system.ai.claude-opus-4-8", "system.ai.claude-sonnet-5"]
+        assert found.codex_models == ["system.ai.gpt-5-6"]
+        assert found.gemini_models == ["system.ai.gemini-3-5-flash"]
+        assert found.oss_models == ["system.ai.glm-5-2"]
+
+    def test_claude_ids_newest_first_within_a_family(self, monkeypatch):
+        payload = {
+            "model_services": [
+                _model_service("system.ai.claude-opus-4-6", [ANTHROPIC]),
+                _model_service("system.ai.claude-opus-4-8", [ANTHROPIC]),
+            ]
+        }
+        monkeypatch.setattr(
+            db_mod, "_http_get_json", lambda url, token, timeout=10: (payload, None)
+        )
+
+        found = db_mod.discover_model_services(WS, "token")
+
+        assert found.claude_ids == ["system.ai.claude-opus-4-8", "system.ai.claude-opus-4-6"]
+
+    def test_gpt_oss_is_not_a_codex_model(self, monkeypatch):
+        # gpt-oss-* only speaks mlflow chat-completions. Bucketing it as a
+        # Responses model points pi's databricks-openai provider (and claude's
+        # web_search MCP) at /ai-gateway/codex/v1, which rejects it.
+        payload = {
+            "model_services": [
+                _model_service("system.ai.gpt-oss-120b", [MLFLOW_CHAT]),
+                _model_service("system.ai.gpt-oss-20b", [MLFLOW_CHAT]),
+                _model_service("system.ai.claude-opus-4-8", [MLFLOW_CHAT, ANTHROPIC]),
+            ]
+        }
+        monkeypatch.setattr(
+            db_mod, "_http_get_json", lambda url, token, timeout=10: (payload, None)
+        )
+
+        found = db_mod.discover_model_services(WS, "token")
+
+        assert found.codex_models == []
+        # Not allowlisted for opencode either, so it lands nowhere.
+        assert found.oss_models == []
+        assert found.claude_ids == ["system.ai.claude-opus-4-8"]
+
+    def test_claude_model_is_not_also_bucketed_as_oss(self, monkeypatch):
+        # Every Claude model advertises mlflow chat-completions too; precedence
+        # must keep it out of the oss bucket.
+        payload = {
+            "model_services": [
+                _model_service("system.ai.claude-opus-4-8", [MLFLOW_CHAT, ANTHROPIC]),
+                _model_service("system.ai.glm-5-2", [MLFLOW_CHAT]),
+            ]
+        }
+        monkeypatch.setattr(
+            db_mod, "_http_get_json", lambda url, token, timeout=10: (payload, None)
+        )
+
+        found = db_mod.discover_model_services(WS, "token")
+
+        assert found.oss_models == ["system.ai.glm-5-2"]
+        assert found.claude_ids == ["system.ai.claude-opus-4-8"]
+
+    def test_returns_every_claude_id_and_newest_per_family(self, monkeypatch):
+        # claude-fable-5 belongs to no opus/sonnet/haiku family, so it is
+        # reachable only through the full id list.
+        payload = {
+            "model_services": [
+                _model_service(f"system.ai.{m}", [ANTHROPIC])
+                for m in (
+                    "claude-fable-5",
+                    "claude-haiku-4-5",
+                    "claude-opus-4-6",
+                    "claude-opus-4-8",
+                    "claude-sonnet-4-5",
+                    "claude-sonnet-5",
+                )
+            ]
+        }
+        monkeypatch.setattr(
+            db_mod, "_http_get_json", lambda url, token, timeout=10: (payload, None)
+        )
+
+        found = db_mod.discover_model_services(WS, "token")
+
+        assert len(found.claude_ids) == 6
+        assert "system.ai.claude-fable-5" in found.claude_ids
+        assert found.claude_models == {
+            "opus": "system.ai.claude-opus-4-8",
+            "sonnet": "system.ai.claude-sonnet-5",
+            "haiku": "system.ai.claude-haiku-4-5",
+        }
+
+    def test_responses_model_included_regardless_of_name(self, monkeypatch):
+        # Capability wins over the name rule when the payload advertises one.
+        payload = {"model_services": [_model_service("system.ai.o4-turbo", [RESPONSES])]}
+        monkeypatch.setattr(
+            db_mod, "_http_get_json", lambda url, token, timeout=10: (payload, None)
+        )
+
+        assert db_mod.discover_model_services(WS, "token").codex_models == ["system.ai.o4-turbo"]
+
+
 class TestDiscoverModelServices:
+    """Name-rule fallback: workspaces whose payload omits supported_api_types."""
+
     def test_buckets_families_by_name(self, monkeypatch):
         payload = {
             "model_services": [
@@ -176,19 +342,85 @@ class TestDiscoverModelServices:
             db_mod, "_http_get_json", lambda url, token, timeout=10: (payload, None)
         )
 
-        claude, codex, gemini, oss, reason = db_mod.discover_model_services(WS, "token")
+        found = db_mod.discover_model_services(WS, "token")
 
-        assert reason is None
+        assert found.reason is None
         # Newest opus wins; sonnet bucketed; haiku absent.
-        assert claude == {
+        assert found.claude_models == {
             "opus": "system.ai.claude-opus-4-8",
             "sonnet": "system.ai.claude-sonnet-4-6",
         }
-        assert codex == ["system.ai.gpt-5"]
+        assert found.codex_models == ["system.ai.gpt-5"]
         # Gemini ordered newest-first via the shared sort key.
-        assert gemini[0] == "system.ai.gemini-3-5-flash"
+        assert found.gemini_models[0] == "system.ai.gemini-3-5-flash"
         # kimi and glm are the allowlisted OSS families; llama is not.
-        assert oss == ["system.ai.glm-5-2", "system.ai.kimi-k2-7-code"]
+        assert found.oss_models == ["system.ai.glm-5-2", "system.ai.kimi-k2-7-code"]
+
+    def test_gpt_oss_excluded_without_capability_data(self, monkeypatch):
+        # The name rule requires a version digit after `gpt-`, so a workspace
+        # with no supported_api_types still keeps gpt-oss out of codex.
+        payload = {
+            "model_services": [
+                _model_service("system.ai.gpt-oss-120b"),
+                _model_service("system.ai.gpt-5-6"),
+            ]
+        }
+        monkeypatch.setattr(
+            db_mod, "_http_get_json", lambda url, token, timeout=10: (payload, None)
+        )
+
+        found = db_mod.discover_model_services(WS, "token")
+
+        assert found.codex_models == ["system.ai.gpt-5-6"]
+
+    def test_codex_models_sorted_newest_first(self, monkeypatch):
+        payload = {
+            "model_services": [
+                _model_service("system.ai.gpt-4-1"),
+                _model_service("system.ai.gpt-5-6"),
+                _model_service("system.ai.gpt-5-2-codex"),
+            ]
+        }
+        monkeypatch.setattr(
+            db_mod, "_http_get_json", lambda url, token, timeout=10: (payload, None)
+        )
+
+        found = db_mod.discover_model_services(WS, "token")
+
+        # Alphabetical order would put gpt-4-1 first; pi and copilot take [0].
+        assert found.codex_models[0] == "system.ai.gpt-5-6"
+
+    def test_two_digit_minor_version_beats_single_digit(self, monkeypatch):
+        # Lexicographic reverse-sort ranks `4-8` above `4-10`.
+        payload = {
+            "model_services": [
+                _model_service("system.ai.claude-opus-4-8"),
+                _model_service("system.ai.claude-opus-4-10"),
+            ]
+        }
+        monkeypatch.setattr(
+            db_mod, "_http_get_json", lambda url, token, timeout=10: (payload, None)
+        )
+
+        found = db_mod.discover_model_services(WS, "token")
+
+        assert found.claude_models["opus"] == "system.ai.claude-opus-4-10"
+
+    def test_single_segment_version_buckets_into_family(self, monkeypatch):
+        # `claude-sonnet-5` has no dotted minor; it must still be a sonnet.
+        payload = {
+            "model_services": [
+                _model_service("system.ai.claude-sonnet-4-6"),
+                _model_service("system.ai.claude-sonnet-5"),
+            ]
+        }
+        monkeypatch.setattr(
+            db_mod, "_http_get_json", lambda url, token, timeout=10: (payload, None)
+        )
+
+        found = db_mod.discover_model_services(WS, "token")
+
+        assert found.claude_models["sonnet"] == "system.ai.claude-sonnet-5"
 
     def test_oss_allowlist_drops_unsupported_families(self, monkeypatch):
         # Only kimi/glm are allowlisted; other families are dropped.
@@ -206,11 +438,11 @@ class TestDiscoverModelServices:
             db_mod, "_http_get_json", lambda url, token, timeout=10: (payload, None)
         )
 
-        claude, codex, gemini, oss, reason = db_mod.discover_model_services(WS, "token")
+        found = db_mod.discover_model_services(WS, "token")
 
-        assert reason is None
-        assert (claude, codex, gemini) == ({}, [], [])
-        assert oss == ["system.ai.glm-5-2", "system.ai.kimi-k2-7-code"]
+        assert found.reason is None
+        assert (found.claude_models, found.codex_models, found.gemini_models) == ({}, [], [])
+        assert found.oss_models == ["system.ai.glm-5-2", "system.ai.kimi-k2-7-code"]
 
     def test_paginates_via_next_page_token(self, monkeypatch):
         pages = {
@@ -231,21 +463,23 @@ class TestDiscoverModelServices:
 
         monkeypatch.setattr(db_mod, "_http_get_json", fake_get)
 
-        claude, codex, _, _, reason = db_mod.discover_model_services(WS, "token")
+        found = db_mod.discover_model_services(WS, "token")
 
-        assert reason is None
-        assert codex == ["system.ai.gpt-5"]
-        assert claude == {"opus": "system.ai.claude-opus-4-8"}
+        assert found.reason is None
+        assert found.codex_models == ["system.ai.gpt-5"]
+        assert found.claude_models == {"opus": "system.ai.claude-opus-4-8"}
 
     def test_http_failure_returns_reason(self, monkeypatch):
         monkeypatch.setattr(
             db_mod, "_http_get_json", lambda url, token, timeout=10: (None, "HTTP 500 Server Error")
         )
 
-        claude, codex, gemini, oss, reason = db_mod.discover_model_services(WS, "token")
+        found = db_mod.discover_model_services(WS, "token")
 
-        assert (claude, codex, gemini, oss) == ({}, [], [], [])
-        assert reason == "HTTP 500 Server Error"
+        assert found.claude_models == {}
+        assert (found.claude_ids, found.codex_models, found.gemini_models) == ([], [], [])
+        assert found.oss_models == []
+        assert found.reason == "HTTP 500 Server Error"
 
     def test_no_matching_families_reports_sample(self, monkeypatch):
         payload = {"model_services": [_model_service("system.ai.llama-4-maverick")]}
@@ -253,10 +487,12 @@ class TestDiscoverModelServices:
             db_mod, "_http_get_json", lambda url, token, timeout=10: (payload, None)
         )
 
-        claude, codex, gemini, oss, reason = db_mod.discover_model_services(WS, "token")
+        found = db_mod.discover_model_services(WS, "token")
 
-        assert (claude, codex, gemini, oss) == ({}, [], [], [])
-        assert reason is not None and "llama-4-maverick" in reason
+        assert found.claude_models == {}
+        assert (found.claude_ids, found.codex_models, found.gemini_models) == ([], [], [])
+        assert found.oss_models == []
+        assert found.reason is not None and "llama-4-maverick" in found.reason
 
     def test_ignores_non_system_ai_schemas(self, monkeypatch):
         # The metastore listing returns services from every schema; only
@@ -274,13 +510,13 @@ class TestDiscoverModelServices:
             db_mod, "_http_get_json", lambda url, token, timeout=10: (payload, None)
         )
 
-        claude, codex, gemini, oss, reason = db_mod.discover_model_services(WS, "token")
+        found = db_mod.discover_model_services(WS, "token")
 
-        assert reason is None
-        assert codex == ["system.ai.gpt-5"]
-        assert claude == {}  # temp.erni.claude-* must not be bucketed
-        assert gemini == []
-        assert oss == []
+        assert found.reason is None
+        assert found.codex_models == ["system.ai.gpt-5"]
+        assert found.claude_models == {}  # temp.erni.claude-* must not be bucketed
+        assert found.gemini_models == []
+        assert found.oss_models == []
 
     def test_requests_bounded_page_size(self, monkeypatch):
         # The endpoint 499s without a bounded page_size, so every request must
@@ -289,15 +525,30 @@ class TestDiscoverModelServices:
 
         def fake_get(url, token, timeout=10):
             urls.append(url)
-            return {"model_services": [_model_service("system.ai.gpt-5")]}, None
+            return {"model_services": [_model_service("system.ai.gpt-5", [RESPONSES])]}, None
 
         monkeypatch.setattr(db_mod, "_http_get_json", fake_get)
 
-        ids, reason = db_mod.list_model_services(WS, "token")
+        services, reason = db_mod.list_model_services(WS, "token")
 
-        assert ids == ["system.ai.gpt-5"]
+        assert services == {"system.ai.gpt-5": [RESPONSES]}
         assert reason is None
         assert all("page_size=" in u for u in urls)
+
+    def test_missing_api_types_yields_empty_capability_list(self, monkeypatch):
+        monkeypatch.setattr(
+            db_mod,
+            "_http_get_json",
+            lambda url, token, timeout=10: (
+                {"model_services": [_model_service("system.ai.x")]},
+                None,
+            ),
+        )
+
+        services, reason = db_mod.list_model_services(WS, "token")
+
+        assert services == {"system.ai.x": []}
+        assert reason is None
 
     def test_retries_page_before_giving_up(self, monkeypatch):
         payload = {"model_services": [_model_service("system.ai.gpt-5")]}
@@ -311,10 +562,10 @@ class TestDiscoverModelServices:
 
         monkeypatch.setattr(db_mod, "_http_get_json", flaky_get)
 
-        ids, reason = db_mod.list_model_services(WS, "token")
+        services, reason = db_mod.list_model_services(WS, "token")
 
         assert reason is None
-        assert ids == ["system.ai.gpt-5"]
+        assert list(services) == ["system.ai.gpt-5"]
         assert calls["n"] == 3  # two failures, third succeeds
 
 
