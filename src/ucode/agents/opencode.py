@@ -43,6 +43,7 @@ PROVIDER_KEYS: list[list[str]] = [
     ["provider", "databricks-anthropic"],
     ["provider", "databricks-google"],
     ["provider", "databricks-oss"],
+    ["provider", "databricks-external"],
 ]
 
 
@@ -52,7 +53,9 @@ def is_update_available() -> tuple[str, str] | None:
 
 def _resolve_model_selector(model: str, opencode_models: dict[str, list[str]]) -> str:
     """Return an OpenCode model selector in provider/model form when possible."""
-    if model.startswith(("databricks-anthropic/", "databricks-google/", "databricks-oss/")):
+    if model.startswith(
+        ("databricks-anthropic/", "databricks-google/", "databricks-oss/", "databricks-external/")
+    ):
         return model
 
     anthropic_models = opencode_models.get("anthropic") or []
@@ -66,6 +69,10 @@ def _resolve_model_selector(model: str, opencode_models: dict[str, list[str]]) -
     oss_models = opencode_models.get("oss") or []
     if model in oss_models:
         return f"databricks-oss/{model}"
+
+    external_models = opencode_models.get("external") or []
+    if model in external_models:
+        return f"databricks-external/{model}"
 
     return model
 
@@ -103,6 +110,7 @@ def render_overlay(
     anthropic_models = opencode_models.get("anthropic") or []
     gemini_models = opencode_models.get("gemini") or []
     oss_models = opencode_models.get("oss") or []
+    external_models = opencode_models.get("external") or []
 
     providers: dict = {}
     keys: list[list[str]] = [["model"]]
@@ -148,6 +156,21 @@ def render_overlay(
             "models": {m: _oss_model_overlay(m, ua_header) for m in oss_models},
         }
         keys.append(["provider", "databricks-oss"])
+    if external_models:
+        # External-model serving endpoints (e.g. Azure OpenAI) speak OpenAI
+        # chat-completions on the classic `/serving-endpoints` path — the unified
+        # gateway 404s on them. The @ai-sdk/openai provider posts to
+        # `<baseURL>/chat/completions` with the endpoint name as the model.
+        providers["databricks-external"] = {
+            "npm": "@ai-sdk/openai",
+            "options": {
+                "baseURL": opencode_base_urls["external"],
+                "apiKey": token,
+                "headers": auth_headers,
+            },
+            "models": {m: {"headers": ua_header} for m in external_models},
+        }
+        keys.append(["provider", "databricks-external"])
 
     overlay: dict = {"model": _resolve_model_selector(model, opencode_models)}
     if providers:
@@ -184,6 +207,7 @@ def write_tool_config(
             "databricks-google",
             "databricks-openai",
             "databricks-oss",
+            "databricks-external",
         ):
             providers.pop(stale, None)
     merged = deep_merge_dict(existing, overlay)
@@ -237,21 +261,26 @@ def default_model(state: dict) -> str | None:
     if gemini:
         return gemini[0]
     oss = opencode_models.get("oss") or []
-    return oss[0] if oss else None
+    if oss:
+        return oss[0]
+    external = opencode_models.get("external") or []
+    return external[0] if external else None
 
 
-def _refresh_token_once(state: dict, *, force_refresh: bool = False) -> str:
-    model = default_model(state)
+def _refresh_token_once(
+    state: dict, model: str | None = None, *, force_refresh: bool = False
+) -> str:
+    model = model or default_model(state)
     if not model:
         raise RuntimeError("No OpenCode model is configured.")
     _, token = write_tool_config(state, model, force_refresh=force_refresh)
     return token
 
 
-def _refresh_forever(state: dict, stop_event: threading.Event) -> None:
+def _refresh_forever(state: dict, model: str | None, stop_event: threading.Event) -> None:
     while not stop_event.wait(TOKEN_REFRESH_INTERVAL_SECONDS):
         try:
-            _refresh_token_once(state, force_refresh=True)
+            _refresh_token_once(state, model, force_refresh=True)
         except RuntimeError:
             continue
 
@@ -263,15 +292,15 @@ def build_runtime_env(token: str, state: dict | None = None) -> dict[str, str]:
     return env
 
 
-def launch(state: dict, tool_args: list[str]) -> None:
+def launch(state: dict, tool_args: list[str], model: str | None = None) -> None:
     """Launch opencode with background token refresh (same pattern as Gemini)."""
-    token = _refresh_token_once(state)
+    token = _refresh_token_once(state, model)
     env = build_runtime_env(token, state)
 
     stop_event = threading.Event()
     refresher = threading.Thread(
         target=_refresh_forever,
-        args=(state, stop_event),
+        args=(state, model, stop_event),
         daemon=True,
     )
     refresher.start()

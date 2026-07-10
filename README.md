@@ -75,6 +75,23 @@ For CI or headless environments where the profile holds a personal access token 
 ucode configure --profiles DEFAULT --agents claude,codex --use-pat --skip-validate --skip-upgrade
 ```
 
+### Choosing a model
+
+`ucode` discovers the models your workspace serves and picks a sensible default per agent. To see what is available and override the choice:
+
+```bash
+ucode models list                      # every agent
+ucode models list --agent pi           # one agent; marks (auto) and (pinned)
+
+ucode pi --model system.ai.claude-fable-5     # this session only
+ucode models pin pi system.ai.claude-fable-5  # every launch, until unpinned
+ucode models unpin pi
+```
+
+Pins are saved per workspace. Claude Code is the exception: it selects by family, so use its in-session `/model` picker, or `ucode claude -- --model <id>` for one session.
+
+Because `--model` is a `ucode` flag, reaching an agent's own `--model` needs the `--` separator: `ucode opencode -- --model <id>`.
+
 ### MCP servers (optional)
 
 ```bash
@@ -99,6 +116,9 @@ Discovered external MCP connections are listed directly. MCP auth uses a Databri
 | Command | Description |
 |---------|-------------|
 | `ucode status` | Show current workspace, base URLs, managed config files, and selected models |
+| `ucode models list` | List the models each agent can launch with |
+| `ucode models pin <agent> <id>` | Always launch `<agent>` with `<id>` |
+| `ucode models unpin <agent>` | Return `<agent>` to automatic model selection |
 | `ucode usage` | Show AI Gateway usage summary |
 | `ucode revert` | Clear saved state and restore backed-up config files |
 | `ucode configure --dry-run` | Preview config files without writing them |

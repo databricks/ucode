@@ -391,7 +391,11 @@ def default_model(state: dict) -> str | None:
     return max(parsed, key=_gpt_version_key)[0]
 
 
-def launch(state: dict, tool_args: list[str]) -> None:
+def launch(state: dict, tool_args: list[str], model: str | None = None) -> None:
+    # `model` is already pinned into ~/.codex/ucode.config.toml by the
+    # pre-launch configure_tool call; accepted here so every agent's launch()
+    # has the same signature.
+    del model
     binary = SPEC["binary"]
     workspace = state.get("workspace")
     if workspace:

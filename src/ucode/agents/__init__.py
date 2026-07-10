@@ -24,7 +24,7 @@ from ucode.databricks import (
     map_bedrock_claude_models,
     resolve_provider_service,
 )
-from ucode.state import get_provider_service, load_state, save_state
+from ucode.state import get_model_override, get_provider_service, load_state, save_state
 from ucode.telemetry import agent_version
 from ucode.ui import (
     console,
@@ -245,12 +245,94 @@ def default_model_for_tool(tool: str, state: dict) -> str | None:
     return _MODULES[tool].default_model(state)
 
 
+#: Agents whose model ucode pins. Claude Code selects by family env var
+#: (`ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL`) and ships its own `/model`
+#: picker, so there is no single model to pin for it.
+PINNABLE_TOOLS = ("codex", "gemini", "opencode", "copilot", "pi")
+
+_MAX_LISTED_MODELS = 10
+
+
+def available_models_for_tool(tool: str, state: dict) -> list[str]:
+    """Every Databricks model id ``tool`` can be launched with, from state."""
+    claude_ids = state.get("claude_model_ids") or list((state.get("claude_models") or {}).values())
+    codex_models = state.get("codex_models") or []
+    gemini_models = state.get("gemini_models") or []
+    if tool == "opencode":
+        buckets = state.get("opencode_models") or {}
+        return [m for bucket in buckets.values() for m in bucket]
+    sources = {
+        "claude": claude_ids,
+        "codex": codex_models,
+        "gemini": gemini_models,
+        "oss": state.get("oss_models") or [],
+        "external": state.get("external_models") or [],
+    }
+    return [m for source in _TOOL_DISCOVERY_SOURCES.get(tool, ()) for m in sources[source]]
+
+
+def _model_list_hint(models: list[str]) -> str:
+    shown = ", ".join(models[:_MAX_LISTED_MODELS])
+    extra = len(models) - _MAX_LISTED_MODELS
+    return f"{shown}, ... ({len(models)} total)" if extra > 0 else shown
+
+
+def ensure_model_available(tool: str, state: dict, model: str, *, pinned: bool = False) -> None:
+    """Raise RuntimeError when ``model`` is not a model ``tool`` can launch.
+
+    Pi and OpenCode also accept provider-qualified selectors (e.g.
+    ``databricks-claude/system.ai.claude-opus-4-8``); the bare id is validated.
+    """
+    bare = model.split("/", 1)[1] if "/" in model else model
+    models = available_models_for_tool(tool, state)
+    if bare in models or model in models:
+        return
+    display = TOOL_SPECS[tool]["display"]
+    if not models:
+        raise RuntimeError(
+            f"No models discovered for {display} on this workspace. "
+            f"Run `ucode configure --agent {tool}` first."
+        )
+    if pinned:
+        raise RuntimeError(
+            f"Pinned {display} model '{model}' is no longer available on this workspace "
+            f"(model lists refresh on every launch). Run `ucode models unpin {tool}` to return "
+            f"to automatic selection, or `ucode models pin {tool} <id>` with one of: "
+            f"{_model_list_hint(models)}"
+        )
+    raise RuntimeError(
+        f"Model '{model}' is not available for {display} on this workspace. "
+        f"Available: {_model_list_hint(models)}. "
+        f"Run `ucode models list --agent {tool}` to see this list again."
+    )
+
+
 def resolve_launch_model(
     tool: str,
     state: dict,
     explicit_model: str | None,
+    *,
+    strict_pin: bool = True,
 ) -> tuple[dict, str | None]:
-    model = explicit_model or default_model_for_tool(tool, state)
+    """Resolve the model to launch: explicit flag > persisted pin > agent default.
+
+    A pin naming a model the workspace no longer serves is an error at launch —
+    never silently run a model other than the one asked for. During configure
+    (``strict_pin=False``) it degrades to a warning instead, since re-running
+    configure is how a user recovers from a rotated-out model.
+    """
+    pinned_model = None if explicit_model else get_model_override(state, tool)
+    model = explicit_model or pinned_model
+    if model:
+        try:
+            ensure_model_available(tool, state, model, pinned=bool(pinned_model))
+        except RuntimeError as exc:
+            if explicit_model or strict_pin:
+                raise
+            print_warning(f"{exc} Falling back to the default model.")
+            model = None
+    if not model:
+        model = default_model_for_tool(tool, state)
     if not model:
         raise RuntimeError(
             f"No models available for {tool}. Run `ucode configure` to set up your workspace."
@@ -317,8 +399,8 @@ def configure_tool(
     return result
 
 
-def launch(tool: str, state: dict, tool_args: list[str]) -> None:
-    _MODULES[tool].launch(state, tool_args)
+def launch(tool: str, state: dict, tool_args: list[str], model: str | None = None) -> None:
+    _MODULES[tool].launch(state, tool_args, model)
 
 
 def check_gateway_endpoint(state: dict, tool: str) -> bool:
@@ -328,27 +410,36 @@ def check_gateway_endpoint(state: dict, tool: str) -> bool:
     if tool == "opencode":
         return bool(state.get("opencode_models"))
     if tool == "codex":
-        return bool(state.get("codex_models"))
+        # A non-empty list isn't enough: codex pins the model id verbatim and
+        # `default_model` drops any id that doesn't parse as `gpt-<version>`.
+        # Testing the list alone reports codex available and then fails at
+        # launch with "No models available for codex".
+        return codex.default_model(state) is not None
     if tool == "gemini":
         return bool(state.get("gemini_models"))
     if tool == "copilot":
-        return bool(state.get("claude_models")) or bool(state.get("codex_models"))
+        return (
+            bool(state.get("claude_models"))
+            or bool(state.get("codex_models"))
+            or bool(state.get("external_models"))
+        )
     if tool == "pi":
         return (
             bool(state.get("claude_models"))
             or bool(state.get("codex_models"))
             or bool(state.get("gemini_models"))
+            or bool(state.get("external_models"))
         )
     return False
 
 
 _TOOL_DISCOVERY_SOURCES: dict[str, tuple[str, ...]] = {
     "claude": ("claude",),
-    "opencode": ("claude", "gemini", "oss"),
+    "opencode": ("claude", "gemini", "oss", "external"),
     "codex": ("codex",),
     "gemini": ("gemini",),
-    "copilot": ("claude", "codex"),
-    "pi": ("claude", "codex", "gemini"),
+    "copilot": ("claude", "codex", "external"),
+    "pi": ("claude", "codex", "gemini", "external"),
 }
 
 
@@ -392,7 +483,7 @@ def _configure_one(tool: str, state: dict, provider: str | None) -> dict:
         return configure_tool(tool, state, None, provider=provider, provider_models=provider_models)
     if tool == "codex":
         return configure_tool("codex", state)
-    state, model = resolve_launch_model(tool, state, None)
+    state, model = resolve_launch_model(tool, state, None, strict_pin=False)
     return configure_tool(tool, state, model)
 
 

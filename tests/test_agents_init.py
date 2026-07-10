@@ -10,6 +10,7 @@ import ucode.agents as agents_mod
 from ucode.agents import (
     DEFAULT_TOOL,
     TOOL_SPECS,
+    available_models_for_tool,
     check_gateway_endpoint,
     configure_selected_tools,
     default_model_for_tool,
@@ -93,7 +94,14 @@ class TestCheckGatewayEndpoint:
         assert check_gateway_endpoint({}, "claude") is False
 
     def test_codex_available(self):
-        assert check_gateway_endpoint({"codex_models": ["model-a"]}, "codex") is True
+        assert check_gateway_endpoint({"codex_models": ["system.ai.gpt-5"]}, "codex") is True
+
+    def test_codex_unavailable_when_no_model_parses_as_gpt(self):
+        # A non-empty list isn't enough: codex pins the id verbatim and
+        # default_model drops anything that isn't `gpt-<version>`. Reporting
+        # available here would fail at launch instead of at configure time.
+        state = {"codex_models": ["system.ai.gpt-oss-120b", "system.ai.gpt-oss-20b"]}
+        assert check_gateway_endpoint(state, "codex") is False
 
     def test_gemini_available(self):
         assert check_gateway_endpoint({"gemini_models": ["gemini-2"]}, "gemini") is True
@@ -189,7 +197,8 @@ class TestResolveLaunchModel:
         assert model == "databricks-gpt-5"
 
     def test_explicit_model_used_when_provided(self):
-        _, model = resolve_launch_model("claude", {}, "my-model")
+        state = {"claude_models": {"sonnet": "s4"}, "claude_model_ids": ["s4", "my-model"]}
+        _, model = resolve_launch_model("claude", state, "my-model")
         assert model == "my-model"
 
     def test_default_model_used_when_no_explicit(self):
@@ -200,6 +209,87 @@ class TestResolveLaunchModel:
     def test_raises_when_no_models_available(self):
         with pytest.raises(RuntimeError, match="No models available"):
             resolve_launch_model("claude", {}, None)
+
+    def test_explicit_model_must_be_available(self):
+        state = {"gemini_models": ["gemini-3"]}
+        with pytest.raises(RuntimeError, match="not available for Gemini"):
+            resolve_launch_model("gemini", state, "bogus")
+
+    def test_pin_used_when_no_explicit_model(self):
+        state = {
+            "gemini_models": ["gemini-3", "gemini-2"],
+            "model_overrides": {"gemini": "gemini-2"},
+        }
+        _, model = resolve_launch_model("gemini", state, None)
+        assert model == "gemini-2"
+
+    def test_explicit_model_beats_pin(self):
+        state = {
+            "gemini_models": ["gemini-3", "gemini-2"],
+            "model_overrides": {"gemini": "gemini-2"},
+        }
+        _, model = resolve_launch_model("gemini", state, "gemini-3")
+        assert model == "gemini-3"
+
+    def test_stale_pin_raises_at_launch(self):
+        state = {"gemini_models": ["gemini-3"], "model_overrides": {"gemini": "gemini-retired"}}
+        with pytest.raises(RuntimeError, match="ucode models unpin gemini"):
+            resolve_launch_model("gemini", state, None)
+
+    def test_stale_pin_falls_back_during_configure(self):
+        # Re-running configure is how a user recovers, so it must not hard-fail.
+        state = {"gemini_models": ["gemini-3"], "model_overrides": {"gemini": "gemini-retired"}}
+        _, model = resolve_launch_model("gemini", state, None, strict_pin=False)
+        assert model == "gemini-3"
+
+    def test_pi_accepts_provider_qualified_selector(self):
+        state = {"claude_model_ids": ["system.ai.claude-fable-5"]}
+        _, model = resolve_launch_model("pi", state, "databricks-claude/system.ai.claude-fable-5")
+        assert model == "databricks-claude/system.ai.claude-fable-5"
+
+    def test_pi_external_model_passes_availability_and_launches(self):
+        # The reported bug: an external serving-endpoint model must survive
+        # `ensure_model_available` so `--model` and pins reach launch.
+        state = {"external_models": ["azure-foundry-gpt-5-6-tera"]}
+        _, model = resolve_launch_model("pi", state, "azure-foundry-gpt-5-6-tera")
+        assert model == "azure-foundry-gpt-5-6-tera"
+
+    def test_copilot_external_model_passes_availability(self):
+        state = {"external_models": ["azure-foundry-gpt-5-6-tera"]}
+        _, model = resolve_launch_model("copilot", state, "azure-foundry-gpt-5-6-tera")
+        assert model == "azure-foundry-gpt-5-6-tera"
+
+
+class TestAvailableModelsForTool:
+    def test_pi_spans_claude_codex_and_gemini(self):
+        state = {
+            "claude_model_ids": ["c1", "c2"],
+            "codex_models": ["g1"],
+            "gemini_models": ["m1"],
+        }
+        assert available_models_for_tool("pi", state) == ["c1", "c2", "g1", "m1"]
+
+    def test_copilot_spans_claude_and_codex(self):
+        state = {"claude_model_ids": ["c1"], "codex_models": ["g1"], "gemini_models": ["m1"]}
+        assert available_models_for_tool("copilot", state) == ["c1", "g1"]
+
+    def test_pi_includes_external_models(self):
+        state = {"claude_model_ids": ["c1"], "external_models": ["azure-foundry-gpt-5-6-tera"]}
+        assert available_models_for_tool("pi", state) == ["c1", "azure-foundry-gpt-5-6-tera"]
+
+    def test_copilot_includes_external_models(self):
+        state = {"codex_models": ["g1"], "external_models": ["azure-foundry-gpt-5-6-tera"]}
+        assert available_models_for_tool("copilot", state) == ["g1", "azure-foundry-gpt-5-6-tera"]
+
+    def test_opencode_flattens_its_buckets(self):
+        state = {"opencode_models": {"anthropic": ["c1"], "oss": ["o1"], "external": ["e1"]}}
+        assert sorted(available_models_for_tool("opencode", state)) == ["c1", "e1", "o1"]
+
+    def test_falls_back_to_family_map_when_ids_absent(self):
+        assert available_models_for_tool("claude", {"claude_models": {"opus": "o1"}}) == ["o1"]
+
+    def test_empty_state_yields_nothing(self):
+        assert available_models_for_tool("pi", {}) == []
 
 
 class TestResolveProviderModels:

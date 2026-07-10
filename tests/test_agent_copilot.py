@@ -7,6 +7,8 @@ import json
 from ucode.agents import copilot
 
 WS = "https://example.databricks.com"
+STATE = {"workspace": WS}
+STATE_WITH_EXTERNAL = {"workspace": WS, "external_models": ["azure-foundry-gpt-5-6-tera"]}
 
 
 class TestCopilotSpec:
@@ -25,39 +27,53 @@ class TestCopilotSpec:
 
 class TestRenderEnvOverlay:
     def test_sets_provider_base_url(self):
-        env = copilot.render_env_overlay(WS, "claude-sonnet-4-6", "tok")
+        env = copilot.render_env_overlay(STATE, "claude-sonnet-4-6", "tok")
         assert env["COPILOT_PROVIDER_BASE_URL"] == f"{WS}/ai-gateway/mlflow/v1"
 
     def test_sets_provider_type(self):
-        env = copilot.render_env_overlay(WS, "m", "t")
+        env = copilot.render_env_overlay(STATE, "m", "t")
         assert env["COPILOT_PROVIDER_TYPE"] == "openai"
 
     def test_sets_model(self):
-        env = copilot.render_env_overlay(WS, "claude-sonnet-4-6", "tok")
+        env = copilot.render_env_overlay(STATE, "claude-sonnet-4-6", "tok")
         assert env["COPILOT_MODEL"] == "claude-sonnet-4-6"
 
     def test_sets_bearer_token(self):
-        env = copilot.render_env_overlay(WS, "m", "tok123")
+        env = copilot.render_env_overlay(STATE, "m", "tok123")
         assert env["COPILOT_PROVIDER_BEARER_TOKEN"] == "tok123"
 
     def test_sets_offline_true(self):
-        env = copilot.render_env_overlay(WS, "m", "t")
+        env = copilot.render_env_overlay(STATE, "m", "t")
         assert env["COPILOT_OFFLINE"] == "true"
+
+    def test_external_model_routes_to_serving_endpoints(self):
+        env = copilot.render_env_overlay(STATE_WITH_EXTERNAL, "azure-foundry-gpt-5-6-tera", "tok")
+        assert env["COPILOT_PROVIDER_BASE_URL"] == f"{WS}/serving-endpoints"
+
+    def test_non_external_model_stays_on_gateway_when_external_present(self):
+        # A gateway model must keep the MLflow route even on a workspace that
+        # also serves external endpoints — the route is chosen per model.
+        env = copilot.render_env_overlay(STATE_WITH_EXTERNAL, "claude-sonnet-4-6", "tok")
+        assert env["COPILOT_PROVIDER_BASE_URL"] == f"{WS}/ai-gateway/mlflow/v1"
 
 
 class TestBuildRuntimeEnv:
     def test_inherits_path(self):
-        env = copilot.build_runtime_env(WS, "m", "t")
+        env = copilot.build_runtime_env(STATE, "m", "t")
         assert "PATH" in env
 
     def test_overrides_copilot_vars(self):
-        env = copilot.build_runtime_env(WS, "m", "tok")
+        env = copilot.build_runtime_env(STATE, "m", "tok")
         assert env["COPILOT_PROVIDER_BASE_URL"] == f"{WS}/ai-gateway/mlflow/v1"
         assert env["COPILOT_PROVIDER_BEARER_TOKEN"] == "tok"
 
     def test_sets_oauth_token_for_mcp(self):
-        env = copilot.build_runtime_env(WS, "m", "tok")
+        env = copilot.build_runtime_env(STATE, "m", "tok")
         assert env["OAUTH_TOKEN"] == "tok"
+
+    def test_external_model_routes_to_serving_endpoints(self):
+        env = copilot.build_runtime_env(STATE_WITH_EXTERNAL, "azure-foundry-gpt-5-6-tera", "tok")
+        assert env["COPILOT_PROVIDER_BASE_URL"] == f"{WS}/serving-endpoints"
 
 
 class TestMcpServerConfig:

@@ -22,6 +22,7 @@ from concurrent.futures import (
 from concurrent.futures import (
     TimeoutError as FutureTimeoutError,
 )
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, cast, overload
 from urllib import error as urllib_error
@@ -1096,9 +1097,56 @@ _MODEL_SERVICE_NAME_PREFIX = "model-services/"
 # Databricks-managed foundation models under `system.ai`.
 _MODEL_SERVICE_REQUIRED_PREFIX = "system.ai."
 
-# Supported OSS chat families, matched by name substring. Add an entry to
-# support a new family.
+# API dialects a model-service advertises in its `supported_api_types`. A model
+# can speak several — every Claude model also advertises mlflow chat-completions
+# — so buckets are assigned by precedence rather than by sweeping each dialect
+# independently, or a Claude model would land in both `claude` and `oss`.
+_ANTHROPIC_API_TYPE = "anthropic/v1/messages"
+_RESPONSES_API_TYPE = "openai/v1/responses"
+_GEMINI_API_TYPE = "gemini/v1/generateContent"
+_MLFLOW_CHAT_API_TYPE = "mlflow/v1/chat/completions"
+
+# Name rules, used only for workspaces whose model-services payload predates
+# `supported_api_types`. The codex rule requires a version digit: `gpt-oss-120b`
+# is an open-weight chat model served on the mlflow route, not a Responses
+# endpoint, and a bare `gpt-` substring wrongly claims it. (Mirrors
+# `codex._GPT_RE`; duplicated so databricks.py stays free of agent imports.)
+_CLAUDE_NAME_FRAGMENT = "claude-"
+_GEMINI_NAME_FRAGMENT = "gemini-"
+_GPT_VERSIONED_RE = re.compile(r"gpt-\d")
+
+# Supported OSS chat families, matched by name substring. This is an allowlist of
+# families vetted against the agents that serve them (see `_MODEL_TOKEN_LIMITS`),
+# not a list of every mlflow-capable model — qwen, llama and gemma all speak the
+# same dialect and are deliberately excluded. Add an entry to support a family.
 _OSS_MODEL_FAMILIES = ("kimi-", "glm-")
+
+
+@dataclass(frozen=True)
+class DiscoveredModels:
+    """Workspace model ids bucketed by the API dialect each agent speaks.
+
+    ``claude_models`` maps ``opus``/``sonnet``/``haiku`` to the newest id in that
+    family, for agents that select by family (Claude Code's
+    ``ANTHROPIC_DEFAULT_*_MODEL`` env vars). ``claude_ids`` is every
+    Anthropic-dialect id — including models outside those three families, e.g.
+    ``claude-fable-5`` — for agents like Pi that register a full model list.
+    It is grouped by family and newest-first within each, so no entry is
+    meaningfully "the default"; read ``claude_models`` for that.
+
+    ``codex_models`` and ``gemini_models`` are newest first: consumers that need
+    a single default take entry ``[0]``.
+
+    ``reason`` is None on success, else it explains why the buckets are empty.
+    """
+
+    claude_models: dict[str, str] = field(default_factory=dict)
+    claude_ids: list[str] = field(default_factory=list)
+    codex_models: list[str] = field(default_factory=list)
+    gemini_models: list[str] = field(default_factory=list)
+    oss_models: list[str] = field(default_factory=list)
+    reason: str | None = None
+
 
 # Per-family token limits (context window + max output tokens). These are a
 # property of the model + its `/ai-gateway/mlflow/v1` route (the gateway rejects
@@ -1125,11 +1173,13 @@ def model_token_limits(model_id: str) -> dict[str, int] | None:
     return None
 
 
-def _model_service_id(service: dict) -> str | None:
-    """Extract the `system.ai.<model-name>` id from one model-service entry.
+def _model_service_entry(service: dict) -> tuple[str, list[str]] | None:
+    """Extract `(system.ai.<model-name>, supported_api_types)` from one entry.
 
     Returns None for services in any other schema, so user/internal model
-    services don't leak into the family buckets."""
+    services don't leak into the family buckets. The api-type list is empty when
+    the workspace's API predates `supported_api_types`; callers read that as
+    "capabilities unknown" and fall back to name rules."""
     name = service.get("name")
     if not isinstance(name, str):
         return None
@@ -1138,7 +1188,11 @@ def _model_service_id(service: dict) -> str | None:
         name = name[len(_MODEL_SERVICE_NAME_PREFIX) :]
     if not name.startswith(_MODEL_SERVICE_REQUIRED_PREFIX):
         return None
-    return name or None
+    if not name:
+        return None
+    raw = service.get("supported_api_types")
+    api_types = [t for t in raw if isinstance(t, str)] if isinstance(raw, list) else []
+    return name, api_types
 
 
 # The model-services metastore listing REQUIRES a bounded `page_size`:
@@ -1174,17 +1228,18 @@ def list_model_services(
     *,
     page_size: int = _MODEL_SERVICES_PAGE_SIZE,
     max_pages: int = 100,
-) -> tuple[list[str], str | None]:
-    """List all `system.ai.*` model ids via the UC model-services API.
+) -> tuple[dict[str, list[str]], str | None]:
+    """List all `system.ai.*` model services and the API dialects each speaks.
 
     Pages through ``/api/2.1/unity-catalog/model-services`` (metastore scope)
-    with a bounded ``page_size`` (the endpoint 499s without one) and returns the
-    de-duplicated, sorted list of ``system.ai.<model-name>`` ids. Returns
-    (ids, reason); reason is None on success, otherwise it describes why the
-    list is empty (HTTP/network error or no services).
+    with a bounded ``page_size`` (the endpoint 499s without one) and returns
+    (services, reason). ``services`` maps each ``system.ai.<model-name>`` id to
+    its ``supported_api_types``, sorted by id; the list is empty for a workspace
+    whose API predates that field. ``reason`` is None on success, otherwise it
+    describes why the mapping is empty (HTTP/network error or no services).
     """
     hostname = workspace_hostname(workspace)
-    ids: list[str] = []
+    services: dict[str, list[str]] = {}
     page_token: str | None = None
     seen_tokens: set[str] = set()
     last_reason: str | None = None
@@ -1202,9 +1257,13 @@ def list_model_services(
         data = cast(dict, payload) if isinstance(payload, dict) else {}
         for service in data.get("model_services", []):
             if isinstance(service, dict):
-                model_id = _model_service_id(service)
-                if model_id:
-                    ids.append(model_id)
+                entry = _model_service_entry(service)
+                if entry:
+                    model_id, api_types = entry
+                    # A duplicate id across pages keeps whichever entry actually
+                    # advertised capabilities.
+                    if api_types or model_id not in services:
+                        services[model_id] = api_types
         page_token = data.get("next_page_token") or None
         if not page_token:
             last_reason = None
@@ -1213,60 +1272,108 @@ def list_model_services(
             break
         seen_tokens.add(page_token)
 
-    deduped = sorted(set(ids))
-    if deduped:
-        return deduped, None
-    return [], last_reason or "model-services listing returned no models"
+    if services:
+        return dict(sorted(services.items())), None
+    return {}, last_reason or "model-services listing returned no models"
 
 
-def discover_model_services(
-    workspace: str, token: str
-) -> tuple[dict[str, str], list[str], list[str], list[str], str | None]:
-    """Discover models via UC model-services and bucket them by family name.
+def is_responses_model_id(model_id: str) -> bool:
+    """True when ``model_id`` names a GPT model that speaks the Responses dialect.
 
-    Returns (claude_models, codex_models, gemini_models, oss_models, reason):
-
-    - ``claude_models`` maps ``opus``/``sonnet``/``haiku`` to the newest
-      matching ``system.ai.claude-*`` id (mirrors ``discover_claude_models``).
-    - ``codex_models`` is the list of ``system.ai.*gpt-*`` ids.
-    - ``gemini_models`` is the list of ``system.ai.*gemini-*`` ids, newest first.
-    - ``oss_models`` is the list of OSS-model ``system.ai.*`` ids.
-
-    ``reason`` is None on success, else explains why nothing was found. Family
-    bucketing is by name substring because the model-services API does not
-    expose per-model API dialects.
+    A name-shaped backstop for callers that hold a bare id and no capability
+    record. `gpt-oss-*` is an open-weight chat model served on the mlflow route,
+    so a bare `gpt-` substring is not sufficient — a version digit is required.
     """
-    ids, reason = list_model_services(workspace, token)
-    if not ids:
-        return {}, [], [], [], reason
+    return bool(_GPT_VERSIONED_RE.search(model_id))
 
-    claude_models: dict[str, str] = {}
+
+def _speaks(api_types: list[str], api_type: str, name_matches: bool) -> bool:
+    """True when a model advertises ``api_type``.
+
+    Falls back to ``name_matches`` for entries whose payload carries no
+    ``supported_api_types`` (older workspaces), so discovery never degrades
+    below the name-substring behavior it replaces.
+    """
+    if api_types:
+        return api_type in api_types
+    return name_matches
+
+
+def _claude_family_map(claude_ids: list[str]) -> dict[str, str]:
+    """Map ``opus``/``sonnet``/``haiku`` to the newest id in that family.
+
+    Ids outside those three families (e.g. ``claude-fable-5``) belong to no
+    family and are reachable only through the full id list — Claude Code selects
+    by family env var and has no slot for them.
+    """
+    result: dict[str, str] = {}
     for family in ("opus", "sonnet", "haiku"):
         candidates = sorted(
-            [m for m in ids if f"claude-{family}-" in m],
-            reverse=True,
+            [m for m in claude_ids if f"claude-{family}-" in m],
+            key=model_version_sort_key,
         )
         if candidates:
-            claude_models[family] = candidates[0]
+            result[family] = candidates[0]
+    return result
 
-    codex_models = [m for m in ids if "gpt-" in m]
-    gemini_models = sorted([m for m in ids if "gemini-" in m], key=model_version_sort_key)
 
-    oss_models = [m for m in ids if any(family in m for family in _OSS_MODEL_FAMILIES)]
+def _is_oss_model(model_id: str, api_types: list[str]) -> bool:
+    """True for an allowlisted OSS chat family served on the mlflow route."""
+    if not any(family in model_id for family in _OSS_MODEL_FAMILIES):
+        return False
+    return _speaks(api_types, _MLFLOW_CHAT_API_TYPE, True)
 
-    if not (claude_models or codex_models or gemini_models or oss_models):
-        sample = ", ".join(ids[:5])
-        return (
-            {},
-            [],
-            [],
-            [],
-            (
+
+def discover_model_services(workspace: str, token: str) -> DiscoveredModels:
+    """Discover models via UC model-services and bucket them by API dialect.
+
+    Each service advertises the dialects it speaks in ``supported_api_types``;
+    buckets are assigned by precedence because a model can speak several (every
+    Claude model also serves mlflow chat-completions). Workspaces whose API
+    predates that field fall back to matching the model name.
+    """
+    services, reason = list_model_services(workspace, token)
+    if not services:
+        return DiscoveredModels(reason=reason)
+
+    claude_ids: list[str] = []
+    codex_models: list[str] = []
+    gemini_models: list[str] = []
+    oss_models: list[str] = []
+    for model_id, api_types in services.items():
+        if _speaks(api_types, _ANTHROPIC_API_TYPE, _CLAUDE_NAME_FRAGMENT in model_id):
+            claude_ids.append(model_id)
+        elif _speaks(api_types, _RESPONSES_API_TYPE, bool(_GPT_VERSIONED_RE.search(model_id))):
+            codex_models.append(model_id)
+        elif _speaks(api_types, _GEMINI_API_TYPE, _GEMINI_NAME_FRAGMENT in model_id):
+            gemini_models.append(model_id)
+        elif _is_oss_model(model_id, api_types):
+            oss_models.append(model_id)
+
+    # `model_version_sort_key` groups by the non-numeric name prefix, then orders
+    # by version descending. For codex/gemini every id shares a prefix, so [0] is
+    # the newest — which is what their consumers take. Claude ids span several
+    # prefixes (opus/sonnet/haiku/fable), so this groups by family rather than
+    # ranking globally; callers wanting a default read `claude_models`.
+    claude_ids.sort(key=model_version_sort_key)
+    codex_models.sort(key=model_version_sort_key)
+    gemini_models.sort(key=model_version_sort_key)
+
+    if not (claude_ids or codex_models or gemini_models or oss_models):
+        sample = ", ".join(list(services)[:5])
+        return DiscoveredModels(
+            reason=(
                 "model-services returned model ids but none matched "
                 f"claude/gpt/gemini/oss families (got: {sample})"
-            ),
+            )
         )
-    return claude_models, codex_models, gemini_models, oss_models, None
+    return DiscoveredModels(
+        claude_models=_claude_family_map(claude_ids),
+        claude_ids=claude_ids,
+        codex_models=codex_models,
+        gemini_models=gemini_models,
+        oss_models=oss_models,
+    )
 
 
 # --- MCP services (parallel to model services) -----------------------------
@@ -1777,17 +1884,21 @@ def list_uc_functions_catalog_schemas(
     return sorted(pairs), None
 
 
-def discover_claude_models(workspace: str, token: str) -> tuple[dict[str, str], str | None]:
-    """Discover Claude families on this workspace's AI Gateway.
+def discover_claude_models(
+    workspace: str, token: str
+) -> tuple[dict[str, str], list[str], str | None]:
+    """Discover Claude models on this workspace's AI Gateway.
 
-    Returns (models_by_family, reason). reason is None on success; otherwise it
-    describes why the dict is empty (HTTP error, network error, or no models
+    Returns (models_by_family, claude_ids, reason). ``claude_ids`` is every
+    Claude model the gateway serves, newest first, including ids outside the
+    opus/sonnet/haiku families. reason is None on success; otherwise it
+    describes why the result is empty (HTTP error, network error, or no models
     matching the expected naming convention).
     """
     hostname = workspace_hostname(workspace)
     payload, reason = _http_get_json(f"https://{hostname}/ai-gateway/anthropic/v1/models", token)
     if payload is None:
-        return {}, reason
+        return {}, [], reason
 
     data = cast(dict, payload) if isinstance(payload, dict) else {}
     raw_ids = [
@@ -1796,28 +1907,25 @@ def discover_claude_models(workspace: str, token: str) -> tuple[dict[str, str], 
         if isinstance(m.get("id"), str) and not m["id"].endswith("-anthropic")
     ]
 
-    result: dict[str, str] = {}
-    for family, key in [("opus", "opus"), ("sonnet", "sonnet"), ("haiku", "haiku")]:
-        candidates = sorted(
-            [m for m in raw_ids if f"databricks-claude-{family}-" in m],
-            reverse=True,
-        )
-        if candidates:
-            result[key] = candidates[0]
-    if result:
-        return result, None
+    claude_ids = sorted(
+        [m for m in raw_ids if _CLAUDE_NAME_FRAGMENT in m], key=model_version_sort_key
+    )
+    result = _claude_family_map(claude_ids)
+    if claude_ids:
+        return result, claude_ids, None
     if not raw_ids:
-        return {}, "AI Gateway returned no Claude model ids"
+        return {}, [], "AI Gateway returned no Claude model ids"
     sample = ", ".join(raw_ids[:5])
-    return {}, (
-        "AI Gateway returned model ids but none matched "
-        f"`databricks-claude-{{opus,sonnet,haiku}}-*` (got: {sample})"
+    return (
+        {},
+        [],
+        (f"AI Gateway returned model ids but none matched `databricks-claude-*` (got: {sample})"),
     )
 
 
 def fetch_ai_gateway_claude_models(workspace: str, token: str) -> dict[str, str]:
-    """Backwards-compatible wrapper that discards the diagnostic reason."""
-    models, _ = discover_claude_models(workspace, token)
+    """Backwards-compatible wrapper that discards the ids and diagnostic reason."""
+    models, _ids, _reason = discover_claude_models(workspace, token)
     return models
 
 
@@ -1924,6 +2032,48 @@ def fetch_gemini_models(workspace: str, token: str) -> list[str]:
 def fetch_codex_models(workspace: str, token: str) -> list[str]:
     models, _ = discover_codex_models(workspace, token)
     return models
+
+
+# A classic serving endpoint that hosts an external model (Azure OpenAI, etc.)
+# speaks the OpenAI chat-completions dialect and is reachable ONLY via the
+# per-endpoint `/serving-endpoints/{name}/invocations` path — the unified AI
+# Gateway 404s on it. We surface the chat-capable ones so agents that speak that
+# dialect can route to them by endpoint name.
+_EXTERNAL_MODEL_ENDPOINT_TYPE = "EXTERNAL_MODEL"
+_CHAT_COMPLETIONS_TASK = "llm/v1/chat"
+
+
+def discover_external_serving_models(workspace: str, token: str) -> tuple[list[str], str | None]:
+    """List external-model serving endpoints that speak OpenAI chat-completions.
+
+    Reads `/api/2.0/serving-endpoints` and keeps endpoints whose ``endpoint_type``
+    is ``EXTERNAL_MODEL``, whose ``task`` is ``llm/v1/chat``, and that are ready.
+    The returned ids are the endpoint names — exactly the ``model`` value the
+    `/serving-endpoints/chat/completions` route expects. Returns (names, reason);
+    reason is non-None when the listing failed or matched nothing.
+    """
+    hostname = workspace_hostname(workspace)
+    payload, reason = _http_get_json(f"https://{hostname}/api/2.0/serving-endpoints", token)
+    if payload is None:
+        return [], reason
+    data = cast(dict, payload) if isinstance(payload, dict) else {}
+    names: list[str] = []
+    for ep in data.get("endpoints") or []:
+        if not isinstance(ep, dict):
+            continue
+        if ep.get("endpoint_type") != _EXTERNAL_MODEL_ENDPOINT_TYPE:
+            continue
+        if ep.get("task") != _CHAT_COMPLETIONS_TASK:
+            continue
+        ready = (ep.get("state") or {}).get("ready")
+        if ready is not None and ready != "READY":
+            continue
+        name = ep.get("name")
+        if isinstance(name, str) and name:
+            names.append(name)
+    if names:
+        return sorted(names), None
+    return [], "no ready external-model chat serving endpoints found"
 
 
 def ensure_ai_gateway_v2(workspace: str, token: str) -> None:
@@ -2109,11 +2259,20 @@ def build_tool_base_url(tool: str, workspace: str) -> str:
     raise RuntimeError(f"Unsupported tool '{tool}'.")
 
 
+def build_external_serving_base_url(workspace: str) -> str:
+    # External-model serving endpoints are reached via the classic OpenAI-
+    # compatible path, NOT the unified AI Gateway (which 404s on them). An agent's
+    # openai chat-completions provider appends `/chat/completions`, so this stops
+    # just before that suffix; the `model` field carries the endpoint name.
+    return f"{workspace}/serving-endpoints"
+
+
 def build_opencode_base_urls(workspace: str) -> dict[str, str]:
     return {
         "anthropic": build_tool_base_url("claude", workspace) + "/v1",
         "gemini": build_tool_base_url("gemini", workspace) + "/v1beta",
         "oss": f"{workspace}/ai-gateway/mlflow/v1",
+        "external": build_external_serving_base_url(workspace),
     }
 
 
@@ -2133,6 +2292,7 @@ def build_pi_base_urls(workspace: str) -> dict[str, str]:
         "claude": build_tool_base_url("claude", workspace),
         "openai": build_tool_base_url("codex", workspace),
         "gemini": build_tool_base_url("gemini", workspace) + "/v1beta",
+        "external": build_external_serving_base_url(workspace),
     }
 
 

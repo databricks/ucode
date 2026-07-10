@@ -141,8 +141,10 @@ def build_agent_state(state: dict) -> dict[str, dict]:
     claude_model = (
         claude_models.get("opus") or claude_models.get("sonnet") or claude_models.get("haiku")
     )
-    codex_model = codex_models[0] if codex_models else None
-    pi_model = claude_model or codex_model or (gemini_models[0] if gemini_models else None)
+    codex_model = get_model_override(state, "codex") or (codex_models[0] if codex_models else None)
+    pi_model = get_model_override(state, "pi") or (
+        claude_model or codex_model or (gemini_models[0] if gemini_models else None)
+    )
 
     agents: dict[str, dict] = {
         "claude": {
@@ -226,4 +228,32 @@ def set_provider_service(state: dict, tool: str, full_name: str | None) -> dict:
         state["provider_services"] = providers
     else:
         state.pop("provider_services", None)
+    return state
+
+
+def get_model_override(state: dict, tool: str) -> str | None:
+    """Return the model pinned for ``tool`` via `ucode models pin`, if any.
+
+    Launches use this instead of the agent's default-model heuristic, unless an
+    explicit ``--model`` flag overrides it. Pins live under the workspace entry,
+    so they never leak across workspaces.
+    """
+    overrides = state.get("model_overrides")
+    if not isinstance(overrides, dict):
+        return None
+    model = overrides.get(tool)
+    return model if isinstance(model, str) and model else None
+
+
+def set_model_override(state: dict, tool: str, model: str | None) -> dict:
+    """Persist (or clear, when ``model`` is None) the model pinned for ``tool``."""
+    overrides = dict(state.get("model_overrides") or {})
+    if model:
+        overrides[tool] = model
+    else:
+        overrides.pop(tool, None)
+    if overrides:
+        state["model_overrides"] = overrides
+    else:
+        state.pop("model_overrides", None)
     return state

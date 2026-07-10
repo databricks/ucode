@@ -247,15 +247,22 @@ class TestResolveWebSearchModel:
         assert claude._resolve_web_search_model({"web_search_model": "explicit"}) == "explicit"
 
     def test_falls_back_to_first_codex_model(self):
-        state = {"codex_models": ["m1", "m2"]}
-        assert claude._resolve_web_search_model(state) == "m1"
+        state = {"codex_models": ["system.ai.gpt-5-6", "system.ai.gpt-5-2-codex"]}
+        assert claude._resolve_web_search_model(state) == "system.ai.gpt-5-6"
 
     def test_returns_none_when_no_codex_models(self):
         assert claude._resolve_web_search_model({}) is None
         assert claude._resolve_web_search_model({"codex_models": []}) is None
 
+    def test_ignores_codex_model_that_is_not_responses_capable(self):
+        # The MCP POSTs to /ai-gateway/codex/v1/responses. If a discovery
+        # regression ever leaks a chat-completions model (gpt-oss-*) into
+        # codex_models, skip the MCP rather than wire it to a route that 400s.
+        state = {"codex_models": ["system.ai.gpt-oss-120b"]}
+        assert claude._resolve_web_search_model(state) is None
+
     def test_override_wins_over_codex_models(self):
-        state = {"web_search_model": "winner", "codex_models": ["loser"]}
+        state = {"web_search_model": "winner", "codex_models": ["system.ai.gpt-5-6"]}
         assert claude._resolve_web_search_model(state) == "winner"
 
 

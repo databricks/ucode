@@ -10,6 +10,7 @@ import pytest
 from typer.testing import CliRunner
 
 from ucode.cli import app
+from ucode.databricks import DiscoveredModels
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
@@ -37,6 +38,8 @@ def no_state_writes():
         patch("ucode.agents.claude.save_state"),
         patch("ucode.agents.gemini.save_state"),
         patch("ucode.agents.opencode.save_state"),
+        patch("ucode.agents.copilot.save_state"),
+        patch("ucode.agents.pi.save_state"),
     ):
         yield
 
@@ -442,6 +445,131 @@ class TestAutoConfigureOnFirstRun:
         mock_auto.assert_not_called()
 
 
+_PI_STATE = {**MINIMAL_STATE, "available_tools": [*TOOLS, "pi"]}
+
+
+def _patch_pi_launch(state: dict | None = None):
+    """_patch_launch, but with a state where `pi` is already configured."""
+    state = state or _PI_STATE
+    return [
+        patch("ucode.cli.ensure_bootstrap_dependencies"),
+        patch("ucode.cli.load_state", return_value=state),
+        patch("ucode.cli.ensure_provider_state", return_value=state),
+        patch("ucode.cli.configure_shared_state", return_value=state),
+        patch(
+            "ucode.cli.resolve_launch_model",
+            return_value=(state, "databricks-claude-sonnet-4"),
+        ),
+        patch("ucode.cli.configure_tool", return_value=state),
+        patch("ucode.cli.launch_agent"),
+    ]
+
+
+class TestModelFlag:
+    def test_flag_reaches_resolve_launch_model(self):
+        p = _patch_pi_launch()
+        with p[0], p[1], p[2], p[3], p[4] as mock_resolve, p[5], p[6]:
+            result = runner.invoke(app, ["pi", "--model", "system.ai.claude-fable-5"])
+        assert result.exit_code == 0, result.output
+        assert mock_resolve.call_args[0][2] == "system.ai.claude-fable-5"
+
+    def test_resolved_model_reaches_launch(self):
+        p = _patch_pi_launch()
+        with p[0], p[1], p[2], p[3], p[4], p[5], p[6] as mock_launch:
+            result = runner.invoke(app, ["pi", "--model", "databricks-claude-sonnet-4"])
+        assert result.exit_code == 0, result.output
+        assert mock_launch.call_args[1]["model"] == "databricks-claude-sonnet-4"
+
+    def test_plain_launch_passes_no_model_to_the_agent(self):
+        # None tells pi "use your default, don't disturb the selector choice".
+        p = _patch_pi_launch()
+        with p[0], p[1], p[2], p[3], p[4], p[5], p[6] as mock_launch:
+            result = runner.invoke(app, ["pi"])
+        assert result.exit_code == 0, result.output
+        assert mock_launch.call_args[1]["model"] is None
+
+    def test_pinned_model_reaches_launch_without_a_flag(self):
+        state = {**_PI_STATE, "model_overrides": {"pi": "databricks-claude-sonnet-4"}}
+        p = _patch_pi_launch(state)
+        with p[0], p[1], p[2], p[3], p[4], p[5], p[6] as mock_launch:
+            result = runner.invoke(app, ["pi"])
+        assert result.exit_code == 0, result.output
+        assert mock_launch.call_args[1]["model"] == "databricks-claude-sonnet-4"
+        assert "(pinned)" in _strip_ansi(result.output)
+
+    def test_model_and_provider_are_mutually_exclusive(self):
+        patches = _patch_launch("codex")
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
+            result = runner.invoke(app, ["codex", "--model", "m", "--provider", "main.a.b"])
+        assert result.exit_code == 1
+        assert "not both" in _strip_ansi(result.output)
+
+    def test_claude_has_no_model_flag(self):
+        result = runner.invoke(app, ["claude", "--help"])
+        assert "--model" not in _strip_ansi(result.output)
+
+
+class TestModelsCommands:
+    _STATE = {
+        **MINIMAL_STATE,
+        "claude_model_ids": ["databricks-claude-sonnet-4", "databricks-claude-fable-5"],
+    }
+
+    def test_list_marks_auto_and_pinned(self):
+        state = {**self._STATE, "model_overrides": {"pi": "databricks-claude-fable-5"}}
+        with patch("ucode.cli.load_state", return_value=state):
+            result = runner.invoke(app, ["models", "list", "--agent", "pi"])
+        assert result.exit_code == 0, result.output
+        out = _strip_ansi(result.output)
+        assert "databricks-claude-fable-5 (pinned)" in out
+        assert "(auto)" not in out  # a pin suppresses the auto marker
+
+    def test_list_without_pin_marks_the_default(self):
+        with patch("ucode.cli.load_state", return_value=self._STATE):
+            result = runner.invoke(app, ["models", "list", "--agent", "pi"])
+        assert result.exit_code == 0, result.output
+        assert "databricks-claude-sonnet-4 (auto)" in _strip_ansi(result.output)
+
+    def test_pin_persists_the_override(self):
+        with (
+            patch("ucode.cli.load_state", return_value=dict(self._STATE)),
+            patch("ucode.cli.set_model_override", wraps=lambda s, t, m: s) as mock_set,
+        ):
+            result = runner.invoke(app, ["models", "pin", "pi", "databricks-claude-fable-5"])
+        assert result.exit_code == 0, result.output
+        mock_set.assert_called_once_with(self._STATE, "pi", "databricks-claude-fable-5")
+
+    def test_pin_rejects_an_unavailable_model(self):
+        with patch("ucode.cli.load_state", return_value=dict(self._STATE)):
+            result = runner.invoke(app, ["models", "pin", "pi", "bogus"])
+        assert result.exit_code == 1
+        out = _strip_ansi(result.output)
+        assert "not available for Pi" in out
+        assert "databricks-claude-fable-5" in out  # the error lists what is
+
+    def test_pin_rejects_claude(self):
+        with patch("ucode.cli.load_state", return_value=dict(self._STATE)):
+            result = runner.invoke(app, ["models", "pin", "claude", "some-model"])
+        assert result.exit_code == 1
+        assert "/model" in _strip_ansi(result.output)
+
+    def test_unpin_clears_the_override(self):
+        state = {**self._STATE, "model_overrides": {"pi": "databricks-claude-fable-5"}}
+        with (
+            patch("ucode.cli.load_state", return_value=state),
+            patch("ucode.cli.set_model_override", wraps=lambda s, t, m: s) as mock_set,
+        ):
+            result = runner.invoke(app, ["models", "unpin", "pi"])
+        assert result.exit_code == 0, result.output
+        mock_set.assert_called_once_with(state, "pi", None)
+
+    def test_unpin_is_a_noop_when_nothing_pinned(self):
+        with patch("ucode.cli.load_state", return_value=dict(self._STATE)):
+            result = runner.invoke(app, ["models", "unpin", "pi"])
+        assert result.exit_code == 0
+        assert "No model was pinned" in _strip_ansi(result.output)
+
+
 class TestPassthroughArgs:
     @pytest.mark.parametrize(
         "tool,extra_args",
@@ -450,7 +578,10 @@ class TestPassthroughArgs:
             ("claude", ["--resume"]),
             ("codex", ["--full-auto"]),
             ("gemini", ["--debug"]),
-            ("opencode", ["--model", "my-model"]),
+            # `--model` is a ucode flag now, so reaching the agent's own
+            # `--model` requires the `--` separator.
+            ("opencode", ["--", "--model", "my-model"]),
+            ("claude", ["--model", "my-model"]),  # claude_cmd declares no --model
             ("claude", ["-r", "--some-flag", "value"]),
         ],
     )
@@ -468,7 +599,24 @@ class TestPassthroughArgs:
             result = runner.invoke(app, [tool, *extra_args])
         assert result.exit_code == 0, result.output
         forwarded = mock_launch.call_args[0][2]
-        assert forwarded == extra_args
+        assert forwarded == [a for a in extra_args if a != "--"]
+
+    def test_ucode_model_flag_is_not_forwarded_to_the_agent(self):
+        # Declaring --model on the launch commands intercepts it. Before this,
+        # `ucode opencode --model X` reached the opencode binary verbatim.
+        patches = _patch_launch("opencode")
+        with (
+            patches[0],
+            patches[1],
+            patches[2],
+            patches[3],
+            patches[4],
+            patches[5],
+            patches[6] as mock_launch,
+        ):
+            result = runner.invoke(app, ["opencode", "--model", "my-model"])
+        assert result.exit_code == 0, result.output
+        assert mock_launch.call_args[0][2] == []
 
     def test_no_extra_args_passes_empty_list(self):
         patches = _patch_launch("claude")
@@ -1045,8 +1193,8 @@ class TestConfigureSharedStateUsePat:
         monkeypatch.setattr(cli_mod, "find_profile_name_for_host", lambda w: None)
         monkeypatch.setattr(cli_mod, "get_databricks_token", lambda w, p: "token")
         monkeypatch.setattr(cli_mod, "ensure_ai_gateway_v2", lambda w, t: None)
-        monkeypatch.setattr(cli_mod, "discover_model_services", lambda w, t: ({}, [], [], [], None))
-        monkeypatch.setattr(cli_mod, "discover_claude_models", lambda w, t: ({}, None))
+        monkeypatch.setattr(cli_mod, "discover_model_services", lambda w, t: DiscoveredModels())
+        monkeypatch.setattr(cli_mod, "discover_claude_models", lambda w, t: ({}, [], None))
         monkeypatch.setattr(cli_mod, "discover_gemini_models", lambda w, t: ([], None))
         monkeypatch.setattr(cli_mod, "discover_codex_models", lambda w, t: ([], None))
         monkeypatch.setattr(cli_mod, "build_shared_base_urls", lambda w: {})
@@ -1117,24 +1265,30 @@ class TestConfigureSharedStateUsePat:
         monkeypatch.setattr(
             cli_mod,
             "discover_model_services",
-            lambda w, t: (
-                {"opus": "system.ai.claude-opus-4-8"},
-                ["system.ai.gpt-5"],
-                [],
-                [],
-                None,
+            lambda w, t: DiscoveredModels(
+                claude_models={"opus": "system.ai.claude-opus-4-8"},
+                claude_ids=["system.ai.claude-opus-4-8", "system.ai.claude-fable-5"],
+                codex_models=["system.ai.gpt-5"],
             ),
         )
         legacy_called: list[str] = []
         monkeypatch.setattr(
             cli_mod,
             "discover_claude_models",
-            lambda w, t: legacy_called.append("claude") or ({}, None),
+            lambda w, t: legacy_called.append("claude") or ({}, [], None),
         )
 
         state = cli_mod.configure_shared_state(self.WS, profile="DEFAULT")
 
         assert state["claude_models"] == {"opus": "system.ai.claude-opus-4-8"}
+        # The full id list is persisted for agents that register every model.
+        assert state["claude_model_ids"] == [
+            "system.ai.claude-opus-4-8",
+            "system.ai.claude-fable-5",
+        ]
+        # opencode takes anthropic[0] as its default, so it stays on the
+        # family map — widening it here would move the default onto fable.
+        assert state["opencode_models"]["anthropic"] == ["system.ai.claude-opus-4-8"]
         assert state["codex_models"] == ["system.ai.gpt-5"]
         assert legacy_called == []
         assert "uc_enabled" not in state
@@ -1143,13 +1297,16 @@ class TestConfigureSharedStateUsePat:
         # No UC model-services: each family falls back to the legacy listing.
         cli_mod, *_ = self._stub_deps(monkeypatch, pat_token="dapi-pat")
         monkeypatch.setattr(
-            cli_mod, "discover_model_services", lambda w, t: ({}, [], [], [], "no model services")
+            cli_mod,
+            "discover_model_services",
+            lambda w, t: DiscoveredModels(reason="no model services"),
         )
         monkeypatch.setattr(
             cli_mod,
             "discover_claude_models",
             lambda w, t: (
                 {"opus": "databricks-claude-opus-4-8", "sonnet": "databricks-claude-sonnet-4-6"},
+                ["databricks-claude-opus-4-8", "databricks-claude-sonnet-4-6"],
                 None,
             ),
         )
@@ -1160,6 +1317,10 @@ class TestConfigureSharedStateUsePat:
             "opus": "databricks-claude-opus-4-8",
             "sonnet": "databricks-claude-sonnet-4-6",
         }
+        assert state["claude_model_ids"] == [
+            "databricks-claude-opus-4-8",
+            "databricks-claude-sonnet-4-6",
+        ]
 
 
 class TestConfigureSkipValidate:
@@ -1221,8 +1382,8 @@ class TestConfigureSharedStateMcpCleanup:
         monkeypatch.setattr(cli_mod, "find_profile_name_for_host", lambda w: None)
         monkeypatch.setattr(cli_mod, "get_databricks_token", lambda w, p: "token")
         monkeypatch.setattr(cli_mod, "ensure_ai_gateway_v2", lambda w, t: None)
-        monkeypatch.setattr(cli_mod, "discover_model_services", lambda w, t: ({}, [], [], [], None))
-        monkeypatch.setattr(cli_mod, "discover_claude_models", lambda w, t: ({}, None))
+        monkeypatch.setattr(cli_mod, "discover_model_services", lambda w, t: DiscoveredModels())
+        monkeypatch.setattr(cli_mod, "discover_claude_models", lambda w, t: ({}, [], None))
         monkeypatch.setattr(cli_mod, "discover_gemini_models", lambda w, t: ([], None))
         monkeypatch.setattr(cli_mod, "discover_codex_models", lambda w, t: ([], None))
         monkeypatch.setattr(cli_mod, "build_shared_base_urls", lambda w: {})
