@@ -15,6 +15,7 @@ def _base_urls() -> dict[str, str]:
         "anthropic": f"{WS}/ai-gateway/anthropic/v1",
         "gemini": f"{WS}/ai-gateway/gemini/v1beta",
         "oss": f"{WS}/ai-gateway/mlflow/v1",
+        "external": f"{WS}/serving-endpoints",
     }
 
 
@@ -200,6 +201,30 @@ class TestRenderOverlay:
             "system.ai.kimi-k2-7-code", "tok", _base_urls(), models
         )
         assert overlay["model"] == "databricks-oss/system.ai.kimi-k2-7-code"
+
+
+class TestRenderOverlayExternalProvider:
+    def test_external_provider_uses_openai_on_serving_endpoints(self):
+        models = {"external": ["azure-foundry-gpt-5-6-tera"]}
+        overlay, _ = opencode.render_overlay(
+            "azure-foundry-gpt-5-6-tera", "tok", _base_urls(), models
+        )
+        provider = overlay["provider"]["databricks-external"]
+        assert provider["npm"] == "@ai-sdk/openai"
+        assert provider["options"]["baseURL"] == f"{WS}/serving-endpoints"
+        assert set(provider["models"]) == {"azure-foundry-gpt-5-6-tera"}
+
+    def test_prefixes_external_model_with_provider_id(self):
+        models = {"external": ["azure-foundry-gpt-5-6-tera"]}
+        overlay, _ = opencode.render_overlay(
+            "azure-foundry-gpt-5-6-tera", "tok", _base_urls(), models
+        )
+        assert overlay["model"] == "databricks-external/azure-foundry-gpt-5-6-tera"
+
+    def test_managed_keys_include_external_provider(self):
+        models = {"external": ["azure-foundry-gpt-5-6-tera"]}
+        _, keys = opencode.render_overlay("azure-foundry-gpt-5-6-tera", "tok", _base_urls(), models)
+        assert ["provider", "databricks-external"] in keys
 
 
 class TestMcpServerConfig:

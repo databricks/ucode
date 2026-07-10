@@ -43,6 +43,7 @@ PROVIDER_KEYS: list[list[str]] = [
     ["provider", "databricks-anthropic"],
     ["provider", "databricks-google"],
     ["provider", "databricks-oss"],
+    ["provider", "databricks-external"],
 ]
 
 
@@ -52,7 +53,9 @@ def is_update_available() -> tuple[str, str] | None:
 
 def _resolve_model_selector(model: str, opencode_models: dict[str, list[str]]) -> str:
     """Return an OpenCode model selector in provider/model form when possible."""
-    if model.startswith(("databricks-anthropic/", "databricks-google/", "databricks-oss/")):
+    if model.startswith(
+        ("databricks-anthropic/", "databricks-google/", "databricks-oss/", "databricks-external/")
+    ):
         return model
 
     anthropic_models = opencode_models.get("anthropic") or []
@@ -66,6 +69,10 @@ def _resolve_model_selector(model: str, opencode_models: dict[str, list[str]]) -
     oss_models = opencode_models.get("oss") or []
     if model in oss_models:
         return f"databricks-oss/{model}"
+
+    external_models = opencode_models.get("external") or []
+    if model in external_models:
+        return f"databricks-external/{model}"
 
     return model
 
@@ -103,6 +110,7 @@ def render_overlay(
     anthropic_models = opencode_models.get("anthropic") or []
     gemini_models = opencode_models.get("gemini") or []
     oss_models = opencode_models.get("oss") or []
+    external_models = opencode_models.get("external") or []
 
     providers: dict = {}
     keys: list[list[str]] = [["model"]]
@@ -148,6 +156,21 @@ def render_overlay(
             "models": {m: _oss_model_overlay(m, ua_header) for m in oss_models},
         }
         keys.append(["provider", "databricks-oss"])
+    if external_models:
+        # External-model serving endpoints (e.g. Azure OpenAI) speak OpenAI
+        # chat-completions on the classic `/serving-endpoints` path — the unified
+        # gateway 404s on them. The @ai-sdk/openai provider posts to
+        # `<baseURL>/chat/completions` with the endpoint name as the model.
+        providers["databricks-external"] = {
+            "npm": "@ai-sdk/openai",
+            "options": {
+                "baseURL": opencode_base_urls["external"],
+                "apiKey": token,
+                "headers": auth_headers,
+            },
+            "models": {m: {"headers": ua_header} for m in external_models},
+        }
+        keys.append(["provider", "databricks-external"])
 
     overlay: dict = {"model": _resolve_model_selector(model, opencode_models)}
     if providers:
@@ -184,6 +207,7 @@ def write_tool_config(
             "databricks-google",
             "databricks-openai",
             "databricks-oss",
+            "databricks-external",
         ):
             providers.pop(stale, None)
     merged = deep_merge_dict(existing, overlay)
@@ -237,7 +261,10 @@ def default_model(state: dict) -> str | None:
     if gemini:
         return gemini[0]
     oss = opencode_models.get("oss") or []
-    return oss[0] if oss else None
+    if oss:
+        return oss[0]
+    external = opencode_models.get("external") or []
+    return external[0] if external else None
 
 
 def _refresh_token_once(

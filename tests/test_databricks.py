@@ -100,6 +100,16 @@ class TestBuildOpencodeBaseUrls:
         assert urls["gemini"] == f"{WS}/ai-gateway/gemini/v1beta"
         assert urls["oss"] == f"{WS}/ai-gateway/mlflow/v1"
 
+    def test_external_uses_classic_serving_endpoints_path(self):
+        assert build_opencode_base_urls(WS)["external"] == f"{WS}/serving-endpoints"
+
+
+class TestBuildExternalServingBaseUrl:
+    def test_points_at_classic_serving_endpoints(self):
+        # External models are reached off the unified gateway; the openai
+        # chat-completions provider appends `/chat/completions`.
+        assert db_mod.build_external_serving_base_url(WS) == f"{WS}/serving-endpoints"
+
 
 class TestBuildSharedBaseUrls:
     def test_contains_all_tools(self):
@@ -567,6 +577,86 @@ class TestDiscoverModelServices:
         assert reason is None
         assert list(services) == ["system.ai.gpt-5"]
         assert calls["n"] == 3  # two failures, third succeeds
+
+
+def _serving_endpoint(
+    name: str,
+    *,
+    endpoint_type: str = "EXTERNAL_MODEL",
+    task: str = "llm/v1/chat",
+    ready: str | None = "READY",
+) -> dict:
+    """A `/api/2.0/serving-endpoints` list entry matching the live API shape."""
+    entry: dict = {"name": name, "endpoint_type": endpoint_type, "task": task}
+    if ready is not None:
+        entry["state"] = {"ready": ready}
+    return entry
+
+
+class TestDiscoverExternalServingModels:
+    """Surfacing external-model chat serving endpoints reached via /serving-endpoints."""
+
+    def test_surfaces_only_ready_external_chat_endpoints(self, monkeypatch):
+        payload = {
+            "endpoints": [
+                _serving_endpoint("azure-foundry-gpt-5-6-tera"),
+                _serving_endpoint("azure-foundry-gpt-5-5"),
+                # Same task, but a Databricks-managed foundation model — excluded.
+                _serving_endpoint("databricks-gpt-oss-120b", endpoint_type="FOUNDATION_MODEL_API"),
+                # A ready chat endpoint of a non-external type (a user's own custom
+                # model). Not reached by the OpenAI-external route — excluded. This
+                # pins the filter to `== EXTERNAL_MODEL`, not merely `!= foundation`.
+                _serving_endpoint("my-custom-chat", endpoint_type="CUSTOM_MODEL"),
+                # External, but an embeddings endpoint — excluded.
+                _serving_endpoint("azure-foundry-embed", task="llm/v1/embeddings"),
+                # External chat, but not ready — excluded.
+                _serving_endpoint("azure-foundry-warming", ready="NOT_READY"),
+            ]
+        }
+        monkeypatch.setattr(db_mod, "_http_get_json", lambda url, token: (payload, None))
+
+        models, reason = db_mod.discover_external_serving_models(WS, "token")
+
+        assert reason is None
+        assert models == ["azure-foundry-gpt-5-5", "azure-foundry-gpt-5-6-tera"]
+
+    def test_foundation_endpoint_is_excluded_near_miss(self, monkeypatch):
+        # Near-miss: an entry identical to a surfaced one except endpoint_type.
+        payload = {"endpoints": [_serving_endpoint("x", endpoint_type="FOUNDATION_MODEL_API")]}
+        monkeypatch.setattr(db_mod, "_http_get_json", lambda url, token: (payload, None))
+
+        models, reason = db_mod.discover_external_serving_models(WS, "token")
+
+        assert models == []
+        assert reason == "no ready external-model chat serving endpoints found"
+
+    def test_non_chat_task_is_excluded_near_miss(self, monkeypatch):
+        # Near-miss: external endpoint that speaks a non-chat task.
+        payload = {"endpoints": [_serving_endpoint("x", task="llm/v1/completions")]}
+        monkeypatch.setattr(db_mod, "_http_get_json", lambda url, token: (payload, None))
+
+        models, _ = db_mod.discover_external_serving_models(WS, "token")
+
+        assert models == []
+
+    def test_missing_state_is_treated_as_available(self, monkeypatch):
+        payload = {"endpoints": [_serving_endpoint("x", ready=None)]}
+        monkeypatch.setattr(db_mod, "_http_get_json", lambda url, token: (payload, None))
+
+        models, reason = db_mod.discover_external_serving_models(WS, "token")
+
+        assert models == ["x"]
+        assert reason is None
+
+    def test_http_failure_returns_reason(self, monkeypatch):
+        monkeypatch.setattr(
+            db_mod, "_http_get_json", lambda url, token: (None, "HTTP 500 Server Error")
+        )
+
+        models, reason = db_mod.discover_external_serving_models(WS, "token")
+
+        assert models == []
+        assert reason == "HTTP 500 Server Error"
 
 
 class TestListModelProviderServices:

@@ -39,6 +39,7 @@ from ucode.databricks import (
     build_shared_base_urls,
     discover_claude_models,
     discover_codex_models,
+    discover_external_serving_models,
     discover_gemini_models,
     discover_model_services,
     ensure_ai_gateway_v2,
@@ -97,6 +98,7 @@ _DISCOVERY_CONSUMERS: dict[str, tuple[str, ...]] = {
     "codex": ("codex", "copilot", "pi"),
     "gemini": ("gemini", "opencode", "pi"),
     "oss": ("opencode",),
+    "external": ("pi", "copilot", "opencode"),
 }
 
 
@@ -111,6 +113,7 @@ def _print_discovery_diagnostics(state: dict) -> None:
         "codex": "Codex models",
         "gemini": "Gemini models",
         "oss": "OSS models",
+        "external": "External serving models",
     }
     for source, reason in reasons.items():
         consumers = ", ".join(_DISCOVERY_CONSUMERS.get(source, ()))
@@ -280,16 +283,19 @@ def configure_shared_state(
     want_gemini = fetch_all or "gemini" in tools or "opencode" in tools or "pi" in tools
     want_codex = fetch_all or "codex" in tools or "copilot" in tools or "pi" in tools
     want_oss = fetch_all or "opencode" in tools
+    want_external = fetch_all or "pi" in tools or "copilot" in tools or "opencode" in tools
 
     claude_reason: str | None = None
     gemini_reason: str | None = None
     codex_reason: str | None = None
     oss_reason: str | None = None
+    external_reason: str | None = None
     claude_models = {}
     claude_model_ids: list[str] = []
     gemini_models = []
     codex_models = []
     oss_models = []
+    external_models: list[str] = []
     web_search_model: str | None = None
     if skip_model_discovery:
         # Provider mode: the agent routes through a Model Provider Service and
@@ -327,6 +333,12 @@ def configure_shared_state(
                     codex_models, codex_reason = discover_codex_models(workspace, token)
             if want_oss:
                 oss_models, oss_reason = discovered.oss_models, ms_reason
+            if want_external:
+                # External-model serving endpoints live outside UC model-services
+                # and the unified gateway, so they need their own listing call.
+                external_models, external_reason = discover_external_serving_models(
+                    workspace, token
+                )
     opencode_models: dict[str, list[str]] = {}
     if claude_models:
         # Deliberately the family map, not claude_model_ids: opencode picks
@@ -338,6 +350,8 @@ def configure_shared_state(
         opencode_models["gemini"] = gemini_models
     if oss_models:
         opencode_models["oss"] = oss_models
+    if external_models:
+        opencode_models["external"] = external_models
 
     # Merge into existing workspace state so prior tool configs are preserved.
     state = load_state()
@@ -371,6 +385,8 @@ def configure_shared_state(
             state["codex_models"] = codex_models
         if want_oss:
             state["oss_models"] = oss_models
+        if want_external:
+            state["external_models"] = external_models
         if fetch_all or "opencode" in tools:
             state["opencode_models"] = opencode_models
     save_state(state)
@@ -385,6 +401,7 @@ def configure_shared_state(
         "gemini": gemini_reason,
         "codex": codex_reason,
         "oss": oss_reason,
+        "external": external_reason,
     }
     return state
 

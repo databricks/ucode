@@ -68,6 +68,7 @@ PROVIDER_NAMES = (
     "databricks-claude",
     "databricks-openai",
     "databricks-gemini",
+    "databricks-external",
 )
 
 PROVIDER_KEYS: list[list[str]] = [["providers", name] for name in PROVIDER_NAMES]
@@ -86,6 +87,7 @@ def _resolve_model_selector(
     claude_ids: list[str],
     codex_models: list[str],
     gemini_models: list[str],
+    external_models: list[str],
 ) -> str:
     """Return a Pi model selector in `<provider>/<model>` form when possible."""
     for name in PROVIDER_NAMES:
@@ -97,6 +99,8 @@ def _resolve_model_selector(
         return f"databricks-openai/{model}"
     if model in gemini_models:
         return f"databricks-gemini/{model}"
+    if model in external_models:
+        return f"databricks-external/{model}"
     return model
 
 
@@ -107,12 +111,15 @@ def render_overlay(
     claude_ids: list[str],
     codex_models: list[str],
     gemini_models: list[str],
+    external_models: list[str],
 ) -> tuple[dict, list[list[str]]]:
     """Return (overlay, managed_key_paths) for ~/.pi/agent/models.json.
 
     ``claude_ids`` is every Anthropic-dialect model the workspace serves, not
     just the newest per family — Pi has its own model picker, so it should see
-    the full list.
+    the full list. ``external_models`` are external-model serving endpoints
+    (e.g. Azure OpenAI), reached via the OpenAI chat-completions dialect on the
+    classic `/serving-endpoints` path rather than the unified gateway.
     """
     providers: dict = {}
     keys: list[list[str]] = [["model"]]
@@ -155,8 +162,24 @@ def render_overlay(
             "models": [{"id": m} for m in gemini_models],
         }
         keys.append(["providers", "databricks-gemini"])
+    if external_models:
+        # External-model serving endpoints speak OpenAI chat-completions on the
+        # classic `/serving-endpoints/{name}/invocations` path; `openai-completions`
+        # appends `/chat/completions` to the base URL and sends the endpoint name
+        # as the model.
+        providers["databricks-external"] = {
+            "baseUrl": pi_base_urls["external"],
+            "api": "openai-completions",
+            "apiKey": token,
+            "authHeader": True,
+            "headers": ua_headers,
+            "models": [{"id": m} for m in external_models],
+        }
+        keys.append(["providers", "databricks-external"])
     overlay: dict = {
-        "model": _resolve_model_selector(model, claude_ids, codex_models, gemini_models),
+        "model": _resolve_model_selector(
+            model, claude_ids, codex_models, gemini_models, external_models
+        ),
     }
     if providers:
         overlay["providers"] = providers
@@ -197,6 +220,7 @@ def write_tool_config(
         claude_ids,
         state.get("codex_models") or [],
         state.get("gemini_models") or [],
+        state.get("external_models") or [],
     )
     existing = read_json_safe(PI_CONFIG_PATH)
     providers = existing.get("providers")
@@ -251,7 +275,7 @@ def _write_settings(model_selector: str, providers: dict, *, force: bool = False
 
 
 def default_model(state: dict) -> str | None:
-    """Prefer Claude opus → sonnet → haiku; fall back to codex, gemini."""
+    """Prefer Claude opus → sonnet → haiku; fall back to codex, gemini, external."""
     claude_models = state.get("claude_models") or {}
     for family in ("opus", "sonnet", "haiku"):
         if claude_models.get(family):
@@ -260,7 +284,10 @@ def default_model(state: dict) -> str | None:
     if codex_models:
         return codex_models[0]
     gemini_models = state.get("gemini_models") or []
-    return gemini_models[0] if gemini_models else None
+    if gemini_models:
+        return gemini_models[0]
+    external_models = state.get("external_models") or []
+    return external_models[0] if external_models else None
 
 
 def _refresh_token_once(

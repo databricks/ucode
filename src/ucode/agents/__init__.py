@@ -266,6 +266,7 @@ def available_models_for_tool(tool: str, state: dict) -> list[str]:
         "codex": codex_models,
         "gemini": gemini_models,
         "oss": state.get("oss_models") or [],
+        "external": state.get("external_models") or [],
     }
     return [m for source in _TOOL_DISCOVERY_SOURCES.get(tool, ()) for m in sources[source]]
 
@@ -417,23 +418,28 @@ def check_gateway_endpoint(state: dict, tool: str) -> bool:
     if tool == "gemini":
         return bool(state.get("gemini_models"))
     if tool == "copilot":
-        return bool(state.get("claude_models")) or bool(state.get("codex_models"))
+        return (
+            bool(state.get("claude_models"))
+            or bool(state.get("codex_models"))
+            or bool(state.get("external_models"))
+        )
     if tool == "pi":
         return (
             bool(state.get("claude_models"))
             or bool(state.get("codex_models"))
             or bool(state.get("gemini_models"))
+            or bool(state.get("external_models"))
         )
     return False
 
 
 _TOOL_DISCOVERY_SOURCES: dict[str, tuple[str, ...]] = {
     "claude": ("claude",),
-    "opencode": ("claude", "gemini", "oss"),
+    "opencode": ("claude", "gemini", "oss", "external"),
     "codex": ("codex",),
     "gemini": ("gemini",),
-    "copilot": ("claude", "codex"),
-    "pi": ("claude", "codex", "gemini"),
+    "copilot": ("claude", "codex", "external"),
+    "pi": ("claude", "codex", "gemini", "external"),
 }
 
 

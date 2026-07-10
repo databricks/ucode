@@ -2034,6 +2034,48 @@ def fetch_codex_models(workspace: str, token: str) -> list[str]:
     return models
 
 
+# A classic serving endpoint that hosts an external model (Azure OpenAI, etc.)
+# speaks the OpenAI chat-completions dialect and is reachable ONLY via the
+# per-endpoint `/serving-endpoints/{name}/invocations` path — the unified AI
+# Gateway 404s on it. We surface the chat-capable ones so agents that speak that
+# dialect can route to them by endpoint name.
+_EXTERNAL_MODEL_ENDPOINT_TYPE = "EXTERNAL_MODEL"
+_CHAT_COMPLETIONS_TASK = "llm/v1/chat"
+
+
+def discover_external_serving_models(workspace: str, token: str) -> tuple[list[str], str | None]:
+    """List external-model serving endpoints that speak OpenAI chat-completions.
+
+    Reads `/api/2.0/serving-endpoints` and keeps endpoints whose ``endpoint_type``
+    is ``EXTERNAL_MODEL``, whose ``task`` is ``llm/v1/chat``, and that are ready.
+    The returned ids are the endpoint names — exactly the ``model`` value the
+    `/serving-endpoints/chat/completions` route expects. Returns (names, reason);
+    reason is non-None when the listing failed or matched nothing.
+    """
+    hostname = workspace_hostname(workspace)
+    payload, reason = _http_get_json(f"https://{hostname}/api/2.0/serving-endpoints", token)
+    if payload is None:
+        return [], reason
+    data = cast(dict, payload) if isinstance(payload, dict) else {}
+    names: list[str] = []
+    for ep in data.get("endpoints") or []:
+        if not isinstance(ep, dict):
+            continue
+        if ep.get("endpoint_type") != _EXTERNAL_MODEL_ENDPOINT_TYPE:
+            continue
+        if ep.get("task") != _CHAT_COMPLETIONS_TASK:
+            continue
+        ready = (ep.get("state") or {}).get("ready")
+        if ready is not None and ready != "READY":
+            continue
+        name = ep.get("name")
+        if isinstance(name, str) and name:
+            names.append(name)
+    if names:
+        return sorted(names), None
+    return [], "no ready external-model chat serving endpoints found"
+
+
 def ensure_ai_gateway_v2(workspace: str, token: str) -> None:
     """Probe AI Gateway v2 and raise if unavailable.
 
@@ -2217,11 +2259,20 @@ def build_tool_base_url(tool: str, workspace: str) -> str:
     raise RuntimeError(f"Unsupported tool '{tool}'.")
 
 
+def build_external_serving_base_url(workspace: str) -> str:
+    # External-model serving endpoints are reached via the classic OpenAI-
+    # compatible path, NOT the unified AI Gateway (which 404s on them). An agent's
+    # openai chat-completions provider appends `/chat/completions`, so this stops
+    # just before that suffix; the `model` field carries the endpoint name.
+    return f"{workspace}/serving-endpoints"
+
+
 def build_opencode_base_urls(workspace: str) -> dict[str, str]:
     return {
         "anthropic": build_tool_base_url("claude", workspace) + "/v1",
         "gemini": build_tool_base_url("gemini", workspace) + "/v1beta",
         "oss": f"{workspace}/ai-gateway/mlflow/v1",
+        "external": build_external_serving_base_url(workspace),
     }
 
 
@@ -2241,6 +2292,7 @@ def build_pi_base_urls(workspace: str) -> dict[str, str]:
         "claude": build_tool_base_url("claude", workspace),
         "openai": build_tool_base_url("codex", workspace),
         "gemini": build_tool_base_url("gemini", workspace) + "/v1beta",
+        "external": build_external_serving_base_url(workspace),
     }
 
 

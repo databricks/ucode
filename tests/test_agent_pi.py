@@ -17,6 +17,7 @@ def _base_urls() -> dict[str, str]:
         "claude": f"{WS}/ai-gateway/anthropic",
         "openai": f"{WS}/ai-gateway/codex/v1",
         "gemini": f"{WS}/ai-gateway/gemini/v1beta",
+        "external": f"{WS}/serving-endpoints",
     }
 
 
@@ -26,6 +27,7 @@ def _empty() -> dict:
         "claude_ids": [],
         "codex_models": [],
         "gemini_models": [],
+        "external_models": [],
     }
 
 
@@ -39,6 +41,7 @@ def _overlay(model: str, token: str = "tok", **kwargs):
         bundle["claude_ids"],
         bundle["codex_models"],
         bundle["gemini_models"],
+        bundle["external_models"],
     )
 
 
@@ -93,6 +96,36 @@ class TestRenderOverlayProviders:
             "databricks-openai",
             "databricks-gemini",
         }
+
+
+class TestRenderOverlayExternalProvider:
+    def test_external_provider_uses_openai_completions_on_serving_endpoints(self):
+        overlay, _ = _overlay(
+            "azure-foundry-gpt-5-6-tera",
+            external_models=["azure-foundry-gpt-5-6-tera"],
+        )
+        provider = overlay["providers"]["databricks-external"]
+        assert provider["api"] == "openai-completions"
+        assert provider["baseUrl"] == f"{WS}/serving-endpoints"
+        assert provider["models"] == [{"id": "azure-foundry-gpt-5-6-tera"}]
+
+    def test_selector_prefixes_external_model(self):
+        overlay, _ = _overlay(
+            "azure-foundry-gpt-5-6-tera",
+            external_models=["azure-foundry-gpt-5-6-tera"],
+        )
+        assert overlay["model"] == "databricks-external/azure-foundry-gpt-5-6-tera"
+
+    def test_managed_keys_include_external_provider(self):
+        _, keys = _overlay(
+            "azure-foundry-gpt-5-6-tera",
+            external_models=["azure-foundry-gpt-5-6-tera"],
+        )
+        assert ["providers", "databricks-external"] in keys
+
+    def test_no_external_provider_without_external_models(self):
+        overlay, _ = _overlay("gpt-5", codex_models=["gpt-5"])
+        assert "databricks-external" not in overlay.get("providers", {})
 
 
 class TestRenderOverlayUserAgent:

@@ -33,6 +33,7 @@ from ucode.config_io import (
 from ucode.databricks import (
     TOKEN_REFRESH_INTERVAL_SECONDS,
     build_copilot_base_url,
+    build_external_serving_base_url,
     get_databricks_token,
 )
 from ucode.state import get_model_override, mark_tool_managed, save_state
@@ -71,7 +72,7 @@ def is_update_available() -> tuple[str, str] | None:
 
 
 def default_model(state: dict) -> str | None:
-    """Prefer Claude sonnet, then opus/haiku, then codex."""
+    """Prefer Claude sonnet, then opus/haiku, then codex, then external."""
     claude_models = state.get("claude_models") or {}
     for family in ("sonnet", "opus", "haiku"):
         if claude_models.get(family):
@@ -79,13 +80,26 @@ def default_model(state: dict) -> str | None:
     codex_models = state.get("codex_models") or []
     if codex_models:
         return codex_models[0]
-    return None
+    external_models = state.get("external_models") or []
+    return external_models[0] if external_models else None
 
 
-def render_env_overlay(workspace: str, model: str, token: str) -> dict[str, str]:
+def _resolve_base_url(state: dict, model: str) -> str:
+    """Pick Copilot's single provider base URL for ``model``.
+
+    External-model serving endpoints are reached via the classic
+    `/serving-endpoints` path (the unified MLflow gateway 404s on them); every
+    other model routes through the gateway's OpenAI-compatible chat-completions.
+    """
+    if model in (state.get("external_models") or []):
+        return build_external_serving_base_url(state["workspace"])
+    return build_copilot_base_url(state["workspace"])
+
+
+def render_env_overlay(state: dict, model: str, token: str) -> dict[str, str]:
     return {
         "COPILOT_PROVIDER_TYPE": "openai",
-        "COPILOT_PROVIDER_BASE_URL": build_copilot_base_url(workspace),
+        "COPILOT_PROVIDER_BASE_URL": _resolve_base_url(state, model),
         "COPILOT_MODEL": model,
         "COPILOT_PROVIDER_BEARER_TOKEN": token,
         "COPILOT_OFFLINE": "true",
@@ -93,9 +107,9 @@ def render_env_overlay(workspace: str, model: str, token: str) -> dict[str, str]
     }
 
 
-def build_runtime_env(workspace: str, model: str, token: str) -> dict[str, str]:
+def build_runtime_env(state: dict, model: str, token: str) -> dict[str, str]:
     env = os.environ.copy()
-    env.update(render_env_overlay(workspace, model, token))
+    env.update(render_env_overlay(state, model, token))
     return env
 
 
@@ -146,7 +160,7 @@ def write_tool_config(
         token = get_databricks_token(
             state["workspace"], state.get("profile"), force_refresh=force_refresh
         )
-    overlay = render_env_overlay(state["workspace"], model, token)
+    overlay = render_env_overlay(state, model, token)
     existing = parse_dotenv(COPILOT_ENV_PATH)
     for key in LEGACY_ENV_KEYS:
         existing.pop(key, None)
@@ -177,7 +191,7 @@ def _refresh_forever(state: dict, model: str | None, stop_event: threading.Event
 
 def launch(state: dict, tool_args: list[str], model: str | None = None) -> None:
     model, token = _refresh_token_once(state, model)
-    env = build_runtime_env(state["workspace"], model, token)
+    env = build_runtime_env(state, model, token)
 
     stop_event = threading.Event()
     refresher = threading.Thread(
@@ -225,4 +239,4 @@ def validate_env(state: dict) -> dict[str, str]:
     if not model:
         raise RuntimeError("No Copilot model is available on this workspace.")
     token = get_databricks_token(workspace, state.get("profile"))
-    return build_runtime_env(workspace, model, token)
+    return build_runtime_env(state, model, token)

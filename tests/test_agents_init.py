@@ -247,6 +247,18 @@ class TestResolveLaunchModel:
         _, model = resolve_launch_model("pi", state, "databricks-claude/system.ai.claude-fable-5")
         assert model == "databricks-claude/system.ai.claude-fable-5"
 
+    def test_pi_external_model_passes_availability_and_launches(self):
+        # The reported bug: an external serving-endpoint model must survive
+        # `ensure_model_available` so `--model` and pins reach launch.
+        state = {"external_models": ["azure-foundry-gpt-5-6-tera"]}
+        _, model = resolve_launch_model("pi", state, "azure-foundry-gpt-5-6-tera")
+        assert model == "azure-foundry-gpt-5-6-tera"
+
+    def test_copilot_external_model_passes_availability(self):
+        state = {"external_models": ["azure-foundry-gpt-5-6-tera"]}
+        _, model = resolve_launch_model("copilot", state, "azure-foundry-gpt-5-6-tera")
+        assert model == "azure-foundry-gpt-5-6-tera"
+
 
 class TestAvailableModelsForTool:
     def test_pi_spans_claude_codex_and_gemini(self):
@@ -261,9 +273,17 @@ class TestAvailableModelsForTool:
         state = {"claude_model_ids": ["c1"], "codex_models": ["g1"], "gemini_models": ["m1"]}
         assert available_models_for_tool("copilot", state) == ["c1", "g1"]
 
+    def test_pi_includes_external_models(self):
+        state = {"claude_model_ids": ["c1"], "external_models": ["azure-foundry-gpt-5-6-tera"]}
+        assert available_models_for_tool("pi", state) == ["c1", "azure-foundry-gpt-5-6-tera"]
+
+    def test_copilot_includes_external_models(self):
+        state = {"codex_models": ["g1"], "external_models": ["azure-foundry-gpt-5-6-tera"]}
+        assert available_models_for_tool("copilot", state) == ["g1", "azure-foundry-gpt-5-6-tera"]
+
     def test_opencode_flattens_its_buckets(self):
-        state = {"opencode_models": {"anthropic": ["c1"], "oss": ["o1"]}}
-        assert sorted(available_models_for_tool("opencode", state)) == ["c1", "o1"]
+        state = {"opencode_models": {"anthropic": ["c1"], "oss": ["o1"], "external": ["e1"]}}
+        assert sorted(available_models_for_tool("opencode", state)) == ["c1", "e1", "o1"]
 
     def test_falls_back_to_family_map_when_ids_absent(self):
         assert available_models_for_tool("claude", {"claude_models": {"opus": "o1"}}) == ["o1"]
