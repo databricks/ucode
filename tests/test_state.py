@@ -12,12 +12,14 @@ from ucode.state import (
     STATE_VERSION,
     build_agent_state,
     clear_state,
+    get_model_override,
     get_provider_service,
     hydrate_state,
     load_full_state,
     load_state,
     mark_tool_managed,
     save_state,
+    set_model_override,
     set_provider_service,
 )
 
@@ -139,6 +141,46 @@ class TestClearState:
 
     def test_clear_when_no_state_is_noop(self):
         clear_state()  # should not raise
+
+
+class TestModelOverride:
+    def test_get_returns_none_when_unset(self):
+        assert get_model_override({}, "pi") is None
+        assert get_model_override({"model_overrides": {}}, "pi") is None
+
+    def test_set_and_get_roundtrip(self):
+        state = set_model_override({}, "pi", "system.ai.claude-fable-5")
+        assert state["model_overrides"]["pi"] == "system.ai.claude-fable-5"
+        assert get_model_override(state, "pi") == "system.ai.claude-fable-5"
+        assert get_model_override(state, "gemini") is None
+
+    def test_set_none_clears_entry_and_key(self):
+        state = set_model_override({}, "pi", "m1")
+        state = set_model_override(state, "pi", None)
+        assert get_model_override(state, "pi") is None
+        # Drop the empty container entirely rather than leaving {}.
+        assert "model_overrides" not in state
+
+    def test_clearing_one_tool_keeps_the_other(self):
+        state = set_model_override({}, "pi", "m1")
+        state = set_model_override(state, "gemini", "m2")
+        state = set_model_override(state, "pi", None)
+        assert get_model_override(state, "pi") is None
+        assert get_model_override(state, "gemini") == "m2"
+
+    def test_survives_hydrate_state(self):
+        state = hydrate_state({"workspace": FAKE_WS, "model_overrides": {"pi": "m1"}})
+        assert get_model_override(state, "pi") == "m1"
+
+    def test_build_agent_state_reports_the_pin(self):
+        state = hydrate_state(
+            {
+                "workspace": FAKE_WS,
+                "claude_models": {"opus": "o1"},
+                "model_overrides": {"pi": "system.ai.claude-fable-5"},
+            }
+        )
+        assert state["agents"]["pi"]["model"] == "system.ai.claude-fable-5"
 
 
 class TestProviderService:

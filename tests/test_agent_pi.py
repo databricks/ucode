@@ -497,7 +497,10 @@ class TestWriteToolConfig:
         monkeypatch.setattr(
             pi_mod,
             "write_tool_config",
-            lambda state, model, **kwargs: (calls.append(kwargs), (state, "tok"))[1],
+            lambda state, model, **kwargs: (
+                calls.append({"model": model, **kwargs}),
+                (state, "tok"),
+            )[1],
         )
         monkeypatch.setattr(pi_mod, "TOKEN_REFRESH_INTERVAL_SECONDS", 0)
 
@@ -509,9 +512,35 @@ class TestWriteToolConfig:
                 self.waits += 1
                 return self.waits > 1  # run the body once, then exit the loop
 
-        pi_mod._refresh_forever(self._state(), _FiresOnce())
+        pi_mod._refresh_forever(self._state(), None, _FiresOnce())
 
-        assert calls == [{"force_refresh": True, "update_settings": False}]
+        assert len(calls) == 1
+        assert calls[0]["model"] == "claude-sonnet"  # from default_model
+        assert calls[0]["force_refresh"] is True
+        assert calls[0]["update_settings"] is False
+
+    def test_refresh_thread_keeps_the_requested_model(self, tmp_path, monkeypatch):
+        # A --model / pinned launch must survive the 30-minute rewrite.
+        pi_mod, _, _, _ = self._setup(tmp_path, monkeypatch)
+        seen: list[str] = []
+        monkeypatch.setattr(
+            pi_mod,
+            "write_tool_config",
+            lambda state, model, **kwargs: (seen.append(model), (state, "tok"))[1],
+        )
+        monkeypatch.setattr(pi_mod, "TOKEN_REFRESH_INTERVAL_SECONDS", 0)
+
+        class _FiresOnce:
+            def __init__(self):
+                self.waits = 0
+
+            def wait(self, _timeout):
+                self.waits += 1
+                return self.waits > 1
+
+        pi_mod._refresh_forever(self._state(), "claude-fable-5", _FiresOnce())
+
+        assert seen == ["claude-fable-5"]
 
 
 class TestValidateAllToolsPiRollback:

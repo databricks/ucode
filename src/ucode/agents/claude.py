@@ -640,7 +640,11 @@ def _build_claude_argv(binary: str, tool_args: list[str]) -> list[str]:
     return [binary, "--settings", json.dumps(merged, separators=(",", ":")), *remaining]
 
 
-def launch(state: dict, tool_args: list[str]) -> None:
+def launch(state: dict, tool_args: list[str], model: str | None = None) -> None:
+    # Claude Code selects by family env var and ships its own `/model` picker,
+    # so ucode pins no single model for it. `model` is accepted so every agent's
+    # launch() has the same signature; `ucode claude -- --model X` still works.
+    del model
     binary = SPEC["binary"]
     workspace = state.get("workspace")
     if workspace:

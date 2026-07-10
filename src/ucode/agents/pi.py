@@ -170,12 +170,16 @@ def write_tool_config(
     *,
     force_refresh: bool = False,
     update_settings: bool = True,
+    pin_model: bool = False,
 ) -> tuple[dict, str]:
     """Write Pi's models.json, and seed settings.json unless told not to.
 
     ``update_settings=False`` is used by the background token refresh: it must
     rewrite models.json to rotate the baked-in bearer, but must not touch the
     model the user picked in Pi's own model selector.
+
+    ``pin_model=True`` means the user named this model (`--model` or a pin), so
+    it wins over whatever they last chose in Pi's selector.
     """
     backup_existing_file(PI_CONFIG_PATH, PI_BACKUP_PATH)
     if token is None:
@@ -202,7 +206,7 @@ def write_tool_config(
     merged = deep_merge_dict(existing, overlay)
     write_json_file(PI_CONFIG_PATH, merged)
     if update_settings:
-        _write_settings(overlay["model"], overlay.get("providers") or {})
+        _write_settings(overlay["model"], overlay.get("providers") or {}, force=pin_model)
     state = mark_tool_managed(state, "pi", managed_keys)
     save_state(state)
     return state, token
@@ -234,12 +238,12 @@ def _settings_need_repair(existing: dict, providers: dict) -> bool:
     return provider in (*PROVIDER_NAMES, *LEGACY_PROVIDER_NAMES)
 
 
-def _write_settings(model_selector: str, providers: dict) -> None:
+def _write_settings(model_selector: str, providers: dict, *, force: bool = False) -> None:
     provider, _, model_id = model_selector.partition("/")
     if not model_id:
         return
     existing = read_json_safe(PI_SETTINGS_PATH)
-    if not _settings_need_repair(existing, providers):
+    if not force and not _settings_need_repair(existing, providers):
         return
     backup_existing_file(PI_SETTINGS_PATH, PI_SETTINGS_BACKUP_PATH)
     merged = deep_merge_dict(existing, {"defaultProvider": provider, "defaultModel": model_id})
@@ -260,24 +264,33 @@ def default_model(state: dict) -> str | None:
 
 
 def _refresh_token_once(
-    state: dict, *, force_refresh: bool = False, update_settings: bool = True
+    state: dict,
+    model: str | None = None,
+    *,
+    force_refresh: bool = False,
+    update_settings: bool = True,
+    pin_model: bool = False,
 ) -> str:
-    model = default_model(state)
+    model = model or default_model(state)
     if not model:
         raise RuntimeError("No Pi model is available on this workspace.")
     _, token = write_tool_config(
-        state, model, force_refresh=force_refresh, update_settings=update_settings
+        state,
+        model,
+        force_refresh=force_refresh,
+        update_settings=update_settings,
+        pin_model=pin_model,
     )
     return token
 
 
-def _refresh_forever(state: dict, stop_event: threading.Event) -> None:
+def _refresh_forever(state: dict, model: str | None, stop_event: threading.Event) -> None:
     while not stop_event.wait(TOKEN_REFRESH_INTERVAL_SECONDS):
         try:
             # Rotate the bearer baked into models.json, but leave settings.json
             # alone: mid-session the user may have switched models in Pi's
             # selector, and Pi persists that choice there.
-            _refresh_token_once(state, force_refresh=True, update_settings=False)
+            _refresh_token_once(state, model, force_refresh=True, update_settings=False)
         except RuntimeError:
             continue
 
@@ -289,14 +302,17 @@ def build_runtime_env(token: str) -> dict[str, str]:
     return env
 
 
-def launch(state: dict, tool_args: list[str]) -> None:
-    token = _refresh_token_once(state)
+def launch(state: dict, tool_args: list[str], model: str | None = None) -> None:
+    # A non-None `model` was named by the user (`--model` or a pin), so it wins
+    # over whatever they last selected inside Pi. None means "use the default,
+    # but don't disturb their selector choice".
+    token = _refresh_token_once(state, model, pin_model=model is not None)
     env = build_runtime_env(token)
 
     stop_event = threading.Event()
     refresher = threading.Thread(
         target=_refresh_forever,
-        args=(state, stop_event),
+        args=(state, model, stop_event),
         daemon=True,
     )
     refresher.start()

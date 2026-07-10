@@ -9,12 +9,16 @@ import typer
 from rich.panel import Panel
 
 from ucode.agents import (
+    PINNABLE_TOOLS,
     TOOL_SPECS,
+    available_models_for_tool,
     check_gateway_endpoint,
     configure_selected_tools,
     configure_single_tool,
     configure_tool,
+    default_model_for_tool,
     ensure_bootstrap_dependencies,
+    ensure_model_available,
     ensure_provider_state,
     install_tool_binary,
     normalize_tool,
@@ -60,10 +64,12 @@ from ucode.mcp import (
 from ucode.state import (
     STATE_PATH,
     clear_state,
+    get_model_override,
     get_provider_service,
     load_full_state,
     load_state,
     save_state,
+    set_model_override,
     set_provider_service,
 )
 from ucode.tracing import configure_tracing_command
@@ -641,6 +647,11 @@ def status() -> int:
         provider_service = get_provider_service(state, tool)
         if configured and provider_service:
             print_kv("Model Provider Service", provider_service)
+        elif configured:
+            pinned = get_model_override(state, tool)
+            active = pinned or default_model_for_tool(tool, state)
+            if active:
+                print_kv("Model", f"{active} ({'pinned' if pinned else 'auto'})")
         print_kv("Base URL", base_url)
         if configured and tool in MCP_CLIENTS:
             tool_mcp_servers = [
@@ -734,6 +745,101 @@ configure_app = typer.Typer(add_completion=False, no_args_is_help=False)
 app.add_typer(configure_app, name="configure", help="Configure workspace and tool settings.")
 mcp_app = typer.Typer(add_completion=False, no_args_is_help=True)
 app.add_typer(mcp_app, name="mcp", help="MCP servers exposed by ucode.")
+models_app = typer.Typer(add_completion=False, no_args_is_help=True)
+app.add_typer(
+    models_app, name="models", help="List available Databricks models and pin per-agent defaults."
+)
+
+
+def _pinnable_tool(agent: str) -> str:
+    """Normalize ``agent`` and reject agents ucode does not pin a model for."""
+    try:
+        tool = normalize_tool(agent)
+    except (KeyError, RuntimeError) as exc:
+        raise RuntimeError(f"Unknown agent '{agent}'.") from exc
+    if tool not in PINNABLE_TOOLS:
+        raise RuntimeError(
+            f"ucode doesn't pin a model for {TOOL_SPECS[tool]['display']} — use its in-session "
+            f"/model picker, or `ucode {tool} -- --model <id>` for a single session."
+        )
+    return tool
+
+
+@models_app.command("list")
+def models_list_cmd(
+    agent: Annotated[
+        str | None, typer.Option("--agent", help="Show one agent instead of all.")
+    ] = None,
+) -> None:
+    """List the model ids each agent can launch with, from the last discovery."""
+    state = load_state()
+    if not state.get("workspace"):
+        print_err("No workspace configured. Run `ucode configure` first.")
+        raise typer.Exit(1)
+    tools = [normalize_tool(agent)] if agent else list(TOOL_SPECS)
+    print_section("Available models")
+    for tool in tools:
+        models = available_models_for_tool(tool, state)
+        print_heading(TOOL_SPECS[tool]["display"])
+        if tool == "claude":
+            print_note(
+                "ucode maps opus/sonnet/haiku to this workspace's models automatically. "
+                "Pick one in-session with /model, or `ucode claude -- --model <id>`."
+            )
+        if not models:
+            print_note("No models discovered. Run `ucode configure --agent " + tool + "`.")
+            continue
+        pinned = get_model_override(state, tool)
+        default = default_model_for_tool(tool, state)
+        for model in models:
+            if model == pinned:
+                marker = " (pinned)"
+            elif not pinned and model == default:
+                marker = " (auto)"
+            else:
+                marker = ""
+            console.print(f"    {model}{marker}")
+    print_note("Model lists refresh on every launch and on `ucode configure`.")
+
+
+@models_app.command("pin")
+def models_pin_cmd(agent: str, model: str) -> None:
+    """Pin the model AGENT launches with, until `ucode models unpin`."""
+    try:
+        tool = _pinnable_tool(agent)
+        state = load_state()
+        if not state.get("workspace"):
+            raise RuntimeError("No workspace configured. Run `ucode configure` first.")
+        ensure_model_available(tool, state, model)
+        save_state(set_model_override(state, tool, model))
+    except RuntimeError as exc:
+        print_err(str(exc))
+        raise typer.Exit(1) from None
+    display = TOOL_SPECS[tool]["display"]
+    if get_provider_service(state, tool):
+        print_warning(
+            f"{display} currently routes through a Model Provider Service; the pin applies "
+            "only when launching without one."
+        )
+    print_success(f"{display} will launch with {model}.")
+    print_note(f"Clear it with `ucode models unpin {tool}`.")
+
+
+@models_app.command("unpin")
+def models_unpin_cmd(agent: str) -> None:
+    """Return AGENT to automatic model selection."""
+    try:
+        tool = _pinnable_tool(agent)
+    except RuntimeError as exc:
+        print_err(str(exc))
+        raise typer.Exit(1) from None
+    state = load_state()
+    display = TOOL_SPECS[tool]["display"]
+    if not get_model_override(state, tool):
+        print_note(f"No model was pinned for {display}.")
+        return
+    save_state(set_model_override(state, tool, None))
+    print_success(f"{display} is back to automatic model selection.")
 
 
 @mcp_app.command("web-search")
@@ -831,7 +937,12 @@ def _auto_configure_tool(tool: str) -> None:
         raise RuntimeError(f"{spec['display']} validation failed — config reverted.")
 
 
-def _launch_tool(tool_name: str, ctx: typer.Context, provider: str | None = None) -> None:
+def _launch_tool(
+    tool_name: str,
+    ctx: typer.Context,
+    provider: str | None = None,
+    model: str | None = None,
+) -> None:
     try:
         tool = normalize_tool(tool_name)
         existing = load_state()
@@ -846,9 +957,22 @@ def _launch_tool(tool_name: str, ctx: typer.Context, provider: str | None = None
         if needs_auto_configure:
             _auto_configure_tool(tool)
         state = ensure_provider_state(tool)
+        if model and provider:
+            raise RuntimeError(
+                "Use either --model or --provider, not both. A Model Provider Service "
+                "routes by header and pins no Databricks model."
+            )
         # An explicit --provider overrides the persisted choice; otherwise fall
-        # back to whatever `ucode configure` saved for this tool.
-        provider = provider or get_provider_service(state, tool)
+        # back to whatever `ucode configure` saved for this tool. An explicit
+        # --model likewise beats a persisted provider service for this session.
+        saved_provider = get_provider_service(state, tool)
+        if model and saved_provider:
+            print_note(
+                f"Ignoring saved Model Provider Service '{saved_provider}' for this session "
+                "(--model pins a Databricks model). Re-run `ucode configure` to change it."
+            )
+            saved_provider = None
+        provider = provider or saved_provider
         # Validate the provider service before launching — it must exist, be a
         # provider type this tool can route to (e.g. claude can't use an OpenAI
         # or Foundry service), and, for Bedrock, expose Claude models to pin.
@@ -876,8 +1000,12 @@ def _launch_tool(tool_name: str, ctx: typer.Context, provider: str | None = None
             # provider). Skip model resolution, which would otherwise fail when
             # the workspace has no matching Databricks models.
             resolved_model = None
+            requested_model = None
         else:
-            state, resolved_model = resolve_launch_model(tool, state, None)
+            state, resolved_model = resolve_launch_model(tool, state, model)
+            # Non-None only when the user named the model, so agents can tell a
+            # deliberate choice from "whatever the default is" (Pi's settings.json).
+            requested_model = resolved_model if (model or get_model_override(state, tool)) else None
         state = configure_tool(
             tool, state, resolved_model, provider=provider, provider_models=provider_models
         )
@@ -885,20 +1013,28 @@ def _launch_tool(tool_name: str, ctx: typer.Context, provider: str | None = None
         if provider:
             print_kv("Provider", provider)
         elif resolved_model:
-            print_kv("Model", resolved_model)
+            suffix = " (pinned)" if requested_model and not model else ""
+            print_kv("Model", f"{resolved_model}{suffix}")
         if tool in ("gemini", "opencode", "copilot", "pi"):
             print_note(
                 f"{TOOL_SPECS[tool]['display']} token refresh is managed automatically "
                 f"every 30 minutes while the session is running."
             )
         print_success(f"Starting {TOOL_SPECS[tool]['display']}")
-        launch_agent(tool, state, ctx.args)
+        launch_agent(tool, state, ctx.args, model=requested_model)
     except RuntimeError as exc:
         print_err(str(exc))
         raise typer.Exit(1) from None
     except KeyboardInterrupt:
         print_err("Interrupted.")
         raise typer.Exit(130) from None
+
+
+_MODEL_OPTION_HELP = (
+    "Databricks model id to use for this session (see `ucode models list`). "
+    "Overrides any pinned model; pass before any `--` separator. Use "
+    "`ucode models pin <agent> <id>` to make it permanent."
+)
 
 
 @app.command("codex", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
@@ -913,9 +1049,10 @@ def codex_cmd(
             "before any `--` separator.",
         ),
     ] = None,
+    model: Annotated[str | None, typer.Option("--model", help=_MODEL_OPTION_HELP)] = None,
 ) -> None:
     """Launch Codex via Databricks."""
-    _launch_tool("codex", ctx, provider=provider)
+    _launch_tool("codex", ctx, provider=provider, model=model)
 
 
 @app.command("claude", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
@@ -936,29 +1073,48 @@ def claude_cmd(
 
 
 @app.command("gemini", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
-def gemini_cmd(ctx: typer.Context) -> None:
+def gemini_cmd(
+    ctx: typer.Context,
+    model: Annotated[str | None, typer.Option("--model", help=_MODEL_OPTION_HELP)] = None,
+) -> None:
     """Launch Gemini CLI via Databricks."""
-    _launch_tool("gemini", ctx)
+    _launch_tool("gemini", ctx, model=model)
 
 
 @app.command(
     "opencode", context_settings={"allow_extra_args": True, "ignore_unknown_options": True}
 )
-def opencode_cmd(ctx: typer.Context) -> None:
+def opencode_cmd(
+    ctx: typer.Context,
+    model: Annotated[str | None, typer.Option("--model", help=_MODEL_OPTION_HELP)] = None,
+) -> None:
     """Launch OpenCode via Databricks."""
-    _launch_tool("opencode", ctx)
+    _launch_tool("opencode", ctx, model=model)
 
 
 @app.command("copilot", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
-def copilot_cmd(ctx: typer.Context) -> None:
+def copilot_cmd(
+    ctx: typer.Context,
+    model: Annotated[str | None, typer.Option("--model", help=_MODEL_OPTION_HELP)] = None,
+) -> None:
     """Launch GitHub Copilot CLI via Databricks."""
-    _launch_tool("copilot", ctx)
+    _launch_tool("copilot", ctx, model=model)
 
 
 @app.command("pi", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
-def pi_cmd(ctx: typer.Context) -> None:
+def pi_cmd(
+    ctx: typer.Context,
+    model: Annotated[
+        str | None,
+        typer.Option(
+            "--model",
+            help=f"{_MODEL_OPTION_HELP} Accepts provider-qualified ids like "
+            "databricks-claude/system.ai.claude-opus-4-8.",
+        ),
+    ] = None,
+) -> None:
     """Launch Pi coding agent via Databricks."""
-    _launch_tool("pi", ctx)
+    _launch_tool("pi", ctx, model=model)
 
 
 @configure_app.callback(invoke_without_command=True)

@@ -35,7 +35,7 @@ from ucode.databricks import (
     build_copilot_base_url,
     get_databricks_token,
 )
-from ucode.state import mark_tool_managed, save_state
+from ucode.state import get_model_override, mark_tool_managed, save_state
 
 COPILOT_CONFIG_DIR = Path.home() / ".copilot"
 COPILOT_ENV_PATH = COPILOT_CONFIG_DIR / "ucode.env"
@@ -157,30 +157,32 @@ def write_tool_config(
     return state, token
 
 
-def _refresh_token_once(state: dict, *, force_refresh: bool = False) -> tuple[str, str]:
-    model = default_model(state)
+def _refresh_token_once(
+    state: dict, model: str | None = None, *, force_refresh: bool = False
+) -> tuple[str, str]:
+    model = model or default_model(state)
     if not model:
         raise RuntimeError("No Copilot model is available on this workspace.")
     _, token = write_tool_config(state, model, force_refresh=force_refresh)
     return model, token
 
 
-def _refresh_forever(state: dict, stop_event: threading.Event) -> None:
+def _refresh_forever(state: dict, model: str | None, stop_event: threading.Event) -> None:
     while not stop_event.wait(TOKEN_REFRESH_INTERVAL_SECONDS):
         try:
-            _refresh_token_once(state, force_refresh=True)
+            _refresh_token_once(state, model, force_refresh=True)
         except RuntimeError:
             continue
 
 
-def launch(state: dict, tool_args: list[str]) -> None:
-    model, token = _refresh_token_once(state)
+def launch(state: dict, tool_args: list[str], model: str | None = None) -> None:
+    model, token = _refresh_token_once(state, model)
     env = build_runtime_env(state["workspace"], model, token)
 
     stop_event = threading.Event()
     refresher = threading.Thread(
         target=_refresh_forever,
-        args=(state, stop_event),
+        args=(state, model, stop_event),
         daemon=True,
     )
     refresher.start()
@@ -219,7 +221,7 @@ def validate_env(state: dict) -> dict[str, str]:
     workspace = state.get("workspace")
     if not workspace:
         raise RuntimeError("No workspace configured.")
-    model = default_model(state)
+    model = get_model_override(state, "copilot") or default_model(state)
     if not model:
         raise RuntimeError("No Copilot model is available on this workspace.")
     token = get_databricks_token(workspace, state.get("profile"))
