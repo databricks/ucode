@@ -328,7 +328,11 @@ def check_gateway_endpoint(state: dict, tool: str) -> bool:
     if tool == "opencode":
         return bool(state.get("opencode_models"))
     if tool == "codex":
-        return bool(state.get("codex_models"))
+        # A non-empty list isn't enough: codex pins the model id verbatim and
+        # `default_model` drops any id that doesn't parse as `gpt-<version>`.
+        # Testing the list alone reports codex available and then fails at
+        # launch with "No models available for codex".
+        return codex.default_model(state) is not None
     if tool == "gemini":
         return bool(state.get("gemini_models"))
     if tool == "copilot":

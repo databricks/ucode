@@ -17,18 +17,20 @@ import pytest
 from ucode.cli import configure_shared_state
 from ucode.databricks import (
     discover_model_services,
+    is_responses_model_id,
     list_mcp_services,
 )
 from ucode.state import load_state
 
 
 def _has_uc_models(workspace: str, token: str) -> bool:
-    claude, codex, gemini, oss, _reason = discover_model_services(workspace, token)
-    return bool(claude or codex or gemini or oss)
+    found = discover_model_services(workspace, token)
+    return bool(found.claude_ids or found.codex_models or found.gemini_models or found.oss_models)
 
 
 def _all_resolved_model_ids(state: dict) -> list[str]:
     ids: list[str] = list((state.get("claude_models") or {}).values())
+    ids += state.get("claude_model_ids") or []
     ids += state.get("codex_models") or []
     ids += state.get("gemini_models") or []
     ids += state.get("oss_models") or []
@@ -43,24 +45,40 @@ def _all_resolved_model_ids(state: dict) -> list[str]:
 
 class TestDiscoverModelServicesE2E:
     def test_returns_only_system_ai_models(self, e2e_workspace, e2e_token):
-        claude, codex, gemini, oss, reason = discover_model_services(e2e_workspace, e2e_token)
-        if not (claude or codex or gemini or oss):
-            pytest.skip(f"No system.ai.* model services on workspace: {reason}")
+        found = discover_model_services(e2e_workspace, e2e_token)
+        if not _has_uc_models(e2e_workspace, e2e_token):
+            pytest.skip(f"No system.ai.* model services on workspace: {found.reason}")
         non_system = sorted(
             {
                 m
                 for m in _all_resolved_model_ids(
                     {
-                        "claude_models": claude,
-                        "codex_models": codex,
-                        "gemini_models": gemini,
-                        "oss_models": oss,
+                        "claude_models": found.claude_models,
+                        "claude_model_ids": found.claude_ids,
+                        "codex_models": found.codex_models,
+                        "gemini_models": found.gemini_models,
+                        "oss_models": found.oss_models,
                     }
                 )
                 if not m.startswith("system.ai.")
             }
         )
         assert not non_system, f"Non-system.ai entries leaked through: {non_system[:5]}"
+
+    def test_codex_bucket_holds_only_responses_models(self, e2e_workspace, e2e_token):
+        # `gpt-oss-*` speaks mlflow chat-completions, not the Responses dialect
+        # codex and pi's databricks-openai provider route to.
+        found = discover_model_services(e2e_workspace, e2e_token)
+        if not found.codex_models:
+            pytest.skip("No Responses-capable models on this workspace.")
+        bad = [m for m in found.codex_models if not is_responses_model_id(m)]
+        assert not bad, f"Non-Responses models bucketed as codex: {bad}"
+
+    def test_claude_family_map_is_a_subset_of_claude_ids(self, e2e_workspace, e2e_token):
+        found = discover_model_services(e2e_workspace, e2e_token)
+        if not found.claude_ids:
+            pytest.skip("No Claude models on this workspace.")
+        assert set(found.claude_models.values()) <= set(found.claude_ids)
 
 
 class TestListMcpServicesE2E:
