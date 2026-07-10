@@ -423,6 +423,96 @@ class TestWriteToolConfig:
         assert merged["defaultProvider"] == "databricks-claude"
         assert merged["theme"] == "Default Dark"
 
+    def _write(self, pi_mod, state, model="claude-sonnet", **kwargs):
+        with (
+            patch("ucode.agents.pi.get_databricks_token", return_value="tok"),
+            patch("ucode.agents.pi.save_state"),
+        ):
+            pi_mod.write_tool_config(state, model, token="tok", **kwargs)
+
+    def test_preserves_user_model_choice(self, tmp_path, monkeypatch):
+        # Pi writes settings.json when the user picks a model in its selector.
+        # ucode must not reset that on the next launch.
+        pi_mod, _, settings_file, _ = self._setup(tmp_path, monkeypatch)
+        settings_file.write_text(
+            json.dumps({"defaultProvider": "databricks-claude", "defaultModel": "claude-opus"}),
+            encoding="utf-8",
+        )
+        state = self._state(claude_model_ids=["claude-sonnet", "claude-opus"])
+
+        self._write(pi_mod, state)
+
+        settings = json.loads(settings_file.read_text())
+        assert settings["defaultModel"] == "claude-opus"
+
+    def test_repairs_pin_to_provider_no_longer_registered(self, tmp_path, monkeypatch):
+        # `databricks-openai` disappears on a workspace with no Responses models;
+        # a settings pin naming it would leave Pi unable to resolve a model.
+        pi_mod, _, settings_file, _ = self._setup(tmp_path, monkeypatch)
+        settings_file.write_text(
+            json.dumps(
+                {"defaultProvider": "databricks-openai", "defaultModel": "system.ai.gpt-oss-120b"}
+            ),
+            encoding="utf-8",
+        )
+
+        self._write(pi_mod, self._state())
+
+        settings = json.loads(settings_file.read_text())
+        assert settings["defaultProvider"] == "databricks-claude"
+        assert settings["defaultModel"] == "claude-sonnet"
+
+    def test_repairs_pin_to_model_no_longer_offered(self, tmp_path, monkeypatch):
+        pi_mod, _, settings_file, _ = self._setup(tmp_path, monkeypatch)
+        settings_file.write_text(
+            json.dumps({"defaultProvider": "databricks-claude", "defaultModel": "claude-retired"}),
+            encoding="utf-8",
+        )
+
+        self._write(pi_mod, self._state())
+
+        assert json.loads(settings_file.read_text())["defaultModel"] == "claude-sonnet"
+
+    def test_leaves_a_non_ucode_provider_pin_alone(self, tmp_path, monkeypatch):
+        # Pi only writes defaultProvider on an explicit user selection, so a
+        # provider ucode doesn't manage is a deliberate choice.
+        pi_mod, _, settings_file, _ = self._setup(tmp_path, monkeypatch)
+        original = {"defaultProvider": "openrouter", "defaultModel": "some/model"}
+        settings_file.write_text(json.dumps(original), encoding="utf-8")
+
+        self._write(pi_mod, self._state())
+
+        assert json.loads(settings_file.read_text()) == original
+
+    def test_refresh_path_does_not_write_settings(self, tmp_path, monkeypatch):
+        pi_mod, _, settings_file, _ = self._setup(tmp_path, monkeypatch)
+
+        self._write(pi_mod, self._state(), update_settings=False)
+
+        assert not settings_file.exists()
+
+    def test_refresh_thread_rotates_token_without_touching_settings(self, tmp_path, monkeypatch):
+        pi_mod, _, _, _ = self._setup(tmp_path, monkeypatch)
+        calls: list[dict] = []
+        monkeypatch.setattr(
+            pi_mod,
+            "write_tool_config",
+            lambda state, model, **kwargs: (calls.append(kwargs), (state, "tok"))[1],
+        )
+        monkeypatch.setattr(pi_mod, "TOKEN_REFRESH_INTERVAL_SECONDS", 0)
+
+        class _FiresOnce:
+            def __init__(self):
+                self.waits = 0
+
+            def wait(self, _timeout):
+                self.waits += 1
+                return self.waits > 1  # run the body once, then exit the loop
+
+        pi_mod._refresh_forever(self._state(), _FiresOnce())
+
+        assert calls == [{"force_refresh": True, "update_settings": False}]
+
 
 class TestValidateAllToolsPiRollback:
     def test_failed_pi_validation_rolls_back_settings(self, tmp_path, monkeypatch):

@@ -169,7 +169,14 @@ def write_tool_config(
     token: str | None = None,
     *,
     force_refresh: bool = False,
+    update_settings: bool = True,
 ) -> tuple[dict, str]:
+    """Write Pi's models.json, and seed settings.json unless told not to.
+
+    ``update_settings=False`` is used by the background token refresh: it must
+    rewrite models.json to rotate the baked-in bearer, but must not touch the
+    model the user picked in Pi's own model selector.
+    """
     backup_existing_file(PI_CONFIG_PATH, PI_BACKUP_PATH)
     if token is None:
         token = get_databricks_token(
@@ -194,21 +201,47 @@ def write_tool_config(
             providers.pop(stale, None)
     merged = deep_merge_dict(existing, overlay)
     write_json_file(PI_CONFIG_PATH, merged)
-    _write_settings(overlay["model"])
+    if update_settings:
+        _write_settings(overlay["model"], overlay.get("providers") or {})
     state = mark_tool_managed(state, "pi", managed_keys)
     save_state(state)
     return state, token
 
 
-def _write_settings(model_selector: str) -> None:
-    # Pin defaultProvider/defaultModel in settings.json so Pi doesn't fall
-    # through to an env-key-backed provider (e.g. HF_TOKEN exposing
-    # huggingface) in `findInitialModel` when no --model is passed.
+def _settings_need_repair(existing: dict, providers: dict) -> bool:
+    """True when ucode should (re)write Pi's defaultProvider/defaultModel.
+
+    Pi persists the user's model-selector choice into settings.json via
+    `setDefaultModelAndProvider`, so an existing pin is a user preference and
+    must survive. We only write when there is nothing to preserve, or when what
+    is there is ucode-authored residue that no longer resolves:
+
+    - nothing pinned yet — seed it, so Pi's `findInitialModel` can't fall
+      through to an env-key-backed provider (e.g. HF_TOKEN exposing huggingface)
+    - pinned to a ucode provider we no longer register (e.g. `databricks-openai`
+      on a workspace with no Responses models, or a `LEGACY_PROVIDER_NAMES` entry)
+    - pinned to a ucode provider we do register, but to a model it no longer offers
+
+    A pin naming a provider ucode does not manage is the user's own; leave it.
+    """
+    provider = existing.get("defaultProvider")
+    model_id = existing.get("defaultModel")
+    if not isinstance(provider, str) or not isinstance(model_id, str) or not model_id:
+        return True
+    if provider in providers:
+        offered = {m["id"] for m in providers[provider].get("models") or []}
+        return model_id not in offered
+    return provider in (*PROVIDER_NAMES, *LEGACY_PROVIDER_NAMES)
+
+
+def _write_settings(model_selector: str, providers: dict) -> None:
     provider, _, model_id = model_selector.partition("/")
     if not model_id:
         return
-    backup_existing_file(PI_SETTINGS_PATH, PI_SETTINGS_BACKUP_PATH)
     existing = read_json_safe(PI_SETTINGS_PATH)
+    if not _settings_need_repair(existing, providers):
+        return
+    backup_existing_file(PI_SETTINGS_PATH, PI_SETTINGS_BACKUP_PATH)
     merged = deep_merge_dict(existing, {"defaultProvider": provider, "defaultModel": model_id})
     write_json_file(PI_SETTINGS_PATH, merged)
 
@@ -226,18 +259,25 @@ def default_model(state: dict) -> str | None:
     return gemini_models[0] if gemini_models else None
 
 
-def _refresh_token_once(state: dict, *, force_refresh: bool = False) -> str:
+def _refresh_token_once(
+    state: dict, *, force_refresh: bool = False, update_settings: bool = True
+) -> str:
     model = default_model(state)
     if not model:
         raise RuntimeError("No Pi model is available on this workspace.")
-    _, token = write_tool_config(state, model, force_refresh=force_refresh)
+    _, token = write_tool_config(
+        state, model, force_refresh=force_refresh, update_settings=update_settings
+    )
     return token
 
 
 def _refresh_forever(state: dict, stop_event: threading.Event) -> None:
     while not stop_event.wait(TOKEN_REFRESH_INTERVAL_SECONDS):
         try:
-            _refresh_token_once(state, force_refresh=True)
+            # Rotate the bearer baked into models.json, but leave settings.json
+            # alone: mid-session the user may have switched models in Pi's
+            # selector, and Pi persists that choice there.
+            _refresh_token_once(state, force_refresh=True, update_settings=False)
         except RuntimeError:
             continue
 
