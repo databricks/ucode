@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import copy
+import json
 import os
 import re
 import shutil
@@ -202,12 +204,20 @@ def render_overlay(
     }
     keys: list[list[str]] = [["apiKeyHelper"]] + [["env", k] for k in env]
 
-    # Disable Claude Code's built-in WebSearch (it routes through Anthropic's
-    # hosted infra and fails through the Databricks gateway). The replacement
-    # `web_search` MCP server is registered separately via the claude CLI.
+    # Disable Claude Code's built-in WebSearch: it declares Anthropic's hosted
+    # `web_search_20250305` server tool, which the Databricks gateway rejects
+    # (HTTP 400: "Input tag 'web_search_20250305' ... does not match"), so the
+    # model wastes a turn on it before falling back. A *bare* `permissions.deny`
+    # entry removes the tool from Claude's context entirely, so it is never
+    # advertised to the model nor sent to the gateway. (Claude Code has no
+    # `disabledTools` setting — the `permissions` block is the only settings.json
+    # mechanism for built-in tools; a bare tool name in `deny` drops it, whereas
+    # a scoped rule like `WebSearch(*)` would leave it advertised.) The
+    # replacement `web_search` MCP server is registered separately via the
+    # claude CLI.
     if disable_web_search:
-        overlay["disabledTools"] = ["WebSearch"]
-        keys.append(["disabledTools"])
+        overlay["permissions"] = {"deny": ["WebSearch"]}
+        keys.append(["permissions", "deny"])
 
     return overlay, keys
 
@@ -495,12 +505,141 @@ def default_model(state: dict) -> str | None:
     return claude_models.get("opus") or claude_models.get("sonnet") or claude_models.get("haiku")
 
 
+def _extract_caller_settings(tool_args: list[str]) -> tuple[list[str], list[str]]:
+    """Split caller-supplied ``--settings`` values out of *tool_args*.
+
+    Returns ``(values, remaining_args)``, handling both ``--settings <value>``
+    and ``--settings=<value>`` spellings. Each value is either a JSON string or
+    a path to a settings file — Claude Code accepts either.
+    """
+    values: list[str] = []
+    remaining: list[str] = []
+    i = 0
+    while i < len(tool_args):
+        arg = tool_args[i]
+        if arg == "--settings" and i + 1 < len(tool_args):
+            values.append(tool_args[i + 1])
+            i += 2
+            continue
+        if arg.startswith("--settings="):
+            values.append(arg[len("--settings=") :])
+            i += 1
+            continue
+        remaining.append(arg)
+        i += 1
+    return values, remaining
+
+
+def _load_caller_settings(value: str) -> dict:
+    """Resolve a ``--settings`` value (inline JSON or file path) to a dict.
+
+    Claude Code accepts either inline JSON or a path to a JSON file. Raises
+    ``RuntimeError`` (surfaced by the CLI as an actionable error) when the value
+    is neither, rather than silently dropping it: a dropped value would also be
+    passed through as a second ``--settings`` flag, and Claude Code honors only
+    one — so either the caller's settings or ucode's gateway config would be
+    silently ignored. Failing loudly lets the caller fix their input.
+    """
+    text = value.strip()
+    if text.startswith("{"):
+        source, malformed = text, "value is not valid JSON"
+    else:
+        path = Path(text)
+        if not path.exists():
+            raise RuntimeError(
+                f"--settings file not found: {value!r}. "
+                "Pass inline JSON or a path to an existing JSON file."
+            )
+        try:
+            source = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise RuntimeError(f"--settings file could not be read: {value!r} ({exc}).") from exc
+        malformed = "file is not valid JSON"
+    try:
+        parsed = json.loads(source)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            f"--settings {malformed} ({exc}): {value!r}. Pass inline JSON or a path to a JSON file."
+        ) from exc
+    if not isinstance(parsed, dict):
+        raise RuntimeError(
+            f"--settings must be a JSON object, got {type(parsed).__name__}: {value!r}."
+        )
+    return parsed
+
+
+def _union_claude_hooks(base: dict, overlay: dict) -> dict:
+    """Union two Claude Code ``hooks`` maps.
+
+    ``hooks`` is ``{event: [entry, ...]}``. Per event we concatenate the entry
+    lists so hooks from BOTH settings sources fire, rather than one replacing
+    the other (which is what a plain deep-merge does to lists). This is what
+    lets ucode's tracing Stop hook and a caller's own hooks coexist.
+    """
+    result: dict = {}
+    for event in [*base, *(e for e in overlay if e not in base)]:
+        entries: list = []
+        for src in (base, overlay):
+            val = src.get(event)
+            if isinstance(val, list):
+                entries.extend(val)
+        result[event] = entries
+    return result
+
+
+def _merge_claude_settings(base: dict, overlay: dict) -> dict:
+    """Deep-merge *overlay* onto *base* (overlay wins on conflicting leaves),
+    but UNION the ``hooks`` so neither side's hooks are dropped. Inputs are not
+    mutated.
+    """
+    merged = deep_merge_dict(copy.deepcopy(base), overlay)
+    base_hooks = base.get("hooks")
+    overlay_hooks = overlay.get("hooks")
+    if isinstance(base_hooks, dict) or isinstance(overlay_hooks, dict):
+        merged["hooks"] = _union_claude_hooks(
+            base_hooks if isinstance(base_hooks, dict) else {},
+            overlay_hooks if isinstance(overlay_hooks, dict) else {},
+        )
+    return merged
+
+
+def _build_claude_argv(binary: str, tool_args: list[str]) -> list[str]:
+    """Build the ``claude`` argv, composing any caller ``--settings`` with
+    ucode's managed settings.
+
+    ucode needs its own settings (gateway ``apiKeyHelper`` + env) to reach
+    Claude, and normally passes ``--settings <ucode-file>``. But Claude Code
+    honors only ONE ``--settings`` flag, so a caller that ALSO passes
+    ``--settings`` (e.g. an integration injecting hooks) would have exactly one
+    of the two silently dropped. To let ucode compose with any prior command,
+    we merge a caller-supplied ``--settings`` with ucode's — ucode's gateway
+    keys win, hooks from both are unioned — and hand Claude a single merged
+    ``--settings`` (inline JSON). The merge is per-launch and is never written
+    back to the shared ucode settings file, so concurrent launches cannot
+    accumulate one another's hooks. A caller ``--settings`` value ucode cannot
+    resolve raises (see :func:`_load_caller_settings`) rather than being passed
+    through as a second, colliding flag.
+    """
+    caller_values, remaining = _extract_caller_settings(tool_args)
+    if not caller_values:
+        # No caller --settings: hand Claude ucode's settings file directly (the
+        # common path; behavior unchanged).
+        return [binary, "--settings", str(CLAUDE_SETTINGS_PATH), *tool_args]
+    caller_settings: dict = {}
+    for value in caller_values:
+        caller_settings = _merge_claude_settings(caller_settings, _load_caller_settings(value))
+    # ucode wins over the caller for conflicting keys (protects gateway auth);
+    # hooks from both sides survive.
+    merged = _merge_claude_settings(caller_settings, read_json_safe(CLAUDE_SETTINGS_PATH))
+    return [binary, "--settings", json.dumps(merged, separators=(",", ":")), *remaining]
+
+
 def launch(state: dict, tool_args: list[str]) -> None:
     binary = SPEC["binary"]
     workspace = state.get("workspace")
     if workspace:
         os.environ["OAUTH_TOKEN"] = get_databricks_token(workspace, state.get("profile"))
-    exec_or_spawn([binary, "--settings", str(CLAUDE_SETTINGS_PATH), *tool_args])
+    exec_or_spawn(_build_claude_argv(binary, tool_args))
 
 
 def validate_cmd(binary: str) -> list[str]:
