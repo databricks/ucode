@@ -153,7 +153,9 @@ def build_agent_state(state: dict) -> dict[str, dict]:
             "env": {
                 "ANTHROPIC_BASE_URL": base_urls.get("claude"),
                 "CLAUDE_CODE_API_KEY_HELPER_TTL_MS": str(AUTH_REFRESH_INTERVAL_MS),
-                "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1",
+                # Kept in sync with agents/claude.py render_overlay.
+                "ENABLE_PROMPT_CACHING_1H": "1",
+                "ENABLE_TOOL_SEARCH": "true",
             },
         },
         "codex": {
