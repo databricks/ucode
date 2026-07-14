@@ -523,20 +523,29 @@ def _quit_app() -> None:
         )
 
 
-def _open_app() -> bool:
-    """Open the Codex desktop app. Returns False when it couldn't be launched."""
+def _open_app(workdir: str | None = None) -> bool:
+    """Open the Codex desktop app, in ``workdir`` when given.
+
+    A GUI app launched via ``open``/``start`` does not inherit the terminal's
+    working directory (the launch is handed to launchd / the shell), so Codex
+    would otherwise open its own default folder. Passing the directory as a
+    positional argument tells Codex which repo to open.
+    """
     system = platform.system()
     try:
         if system == "Darwin":
-            result = subprocess.run(
-                ["open", "-b", CODEX_APP_BUNDLE_ID], capture_output=True, timeout=15
-            )
+            argv = ["open", "-b", CODEX_APP_BUNDLE_ID]
+            if workdir:
+                argv.append(workdir)
+            result = subprocess.run(argv, capture_output=True, timeout=15)
             return result.returncode == 0
         if system == "Windows":
-            # `start` is a cmd builtin; launch the Codex app by name.
-            result = subprocess.run(
-                ["cmd", "/c", "start", "", "Codex.exe"], capture_output=True, timeout=15
-            )
+            # `start` is a cmd builtin; launch the Codex app by name, passing the
+            # directory as an argument so it opens there.
+            argv = ["cmd", "/c", "start", "", "Codex.exe"]
+            if workdir:
+                argv.append(workdir)
+            result = subprocess.run(argv, capture_output=True, timeout=15)
             return result.returncode == 0
     except (OSError, subprocess.SubprocessError):
         return False
@@ -560,7 +569,7 @@ def _wait_for_app_exit(timeout: float) -> bool:
     return not _app_is_running()
 
 
-def _restart_app(prompt: str) -> None:
+def _restart_app(prompt: str, workdir: str | None = None) -> None:
     """Quit and reopen the app (with confirmation) so it re-reads config.toml."""
     if not prompt_yes_no(prompt):
         print_note("Quit and reopen Codex when you're ready for the change to take effect.")
@@ -569,7 +578,7 @@ def _restart_app(prompt: str) -> None:
     if not _wait_for_app_exit(CODEX_APP_QUIT_TIMEOUT):
         print_warning("Codex did not quit; quit it manually, then reopen it to apply the change.")
         return
-    if _open_app():
+    if _open_app(workdir):
         print_success("Codex restarted.")
     else:
         _warn_app_not_found()
@@ -590,13 +599,14 @@ def launch_app(state: dict) -> None:
     prompt to quit + reopen; declining leaves the config written for next launch.
     """
     _ensure_app_supported()
+    workdir = os.getcwd()
     if not _app_is_running():
-        if _open_app():
+        if _open_app(workdir):
             print_success("Codex is now configured to use Databricks. Opening the app...")
         else:
             _warn_app_not_found()
         return
-    _restart_app("Codex is running. Restart it to use Databricks?")
+    _restart_app("Codex is running. Restart it to use Databricks?", workdir)
 
 
 def restart_app_after_restore() -> None:

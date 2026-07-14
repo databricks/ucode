@@ -548,15 +548,17 @@ class TestCodexAppLaunch:
         except RuntimeError as exc:
             assert "macOS and Windows" in str(exc)
 
-    def test_opens_app_when_not_running(self, monkeypatch):
-        opened: list[bool] = []
+    def test_opens_app_in_cwd_when_not_running(self, tmp_path, monkeypatch):
+        opened: list[str | None] = []
+        monkeypatch.chdir(tmp_path)
         monkeypatch.setattr(codex.platform, "system", lambda: "Darwin")
         monkeypatch.setattr(codex, "_app_is_running", lambda: False)
-        monkeypatch.setattr(codex, "_open_app", lambda: opened.append(True) or True)
+        monkeypatch.setattr(codex, "_open_app", lambda workdir=None: opened.append(workdir) or True)
 
         codex.launch_app({"workspace": WS})
 
-        assert opened == [True]
+        # The app is opened in the directory ucode was run from, not its default.
+        assert opened == [str(tmp_path)]
 
     def test_prompts_restart_when_running(self, monkeypatch):
         calls: list[str] = []
@@ -565,7 +567,7 @@ class TestCodexAppLaunch:
         monkeypatch.setattr(codex, "prompt_yes_no", lambda prompt: True)
         monkeypatch.setattr(codex, "_quit_app", lambda: calls.append("quit"))
         monkeypatch.setattr(codex, "_wait_for_app_exit", lambda timeout: True)
-        monkeypatch.setattr(codex, "_open_app", lambda: calls.append("open") or True)
+        monkeypatch.setattr(codex, "_open_app", lambda workdir=None: calls.append("open") or True)
 
         codex.launch_app({"workspace": WS})
 
@@ -577,7 +579,7 @@ class TestCodexAppLaunch:
         monkeypatch.setattr(codex, "_app_is_running", lambda: True)
         monkeypatch.setattr(codex, "prompt_yes_no", lambda prompt: False)
         monkeypatch.setattr(codex, "_quit_app", lambda: calls.append("quit"))
-        monkeypatch.setattr(codex, "_open_app", lambda: calls.append("open") or True)
+        monkeypatch.setattr(codex, "_open_app", lambda workdir=None: calls.append("open") or True)
 
         codex.launch_app({"workspace": WS})
 
