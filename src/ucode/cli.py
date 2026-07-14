@@ -66,6 +66,7 @@ from ucode.state import (
     save_state,
     set_provider_service,
 )
+from ucode.telemetry import ucode_version_string
 from ucode.tracing import configure_tracing_command
 from ucode.ui import (
     console,
@@ -84,6 +85,7 @@ from ucode.ui import (
     spinner,
     status_badge,
 )
+from ucode.update_check import maybe_warn_if_outdated
 from ucode.usage import usage as usage_report
 
 _DISCOVERY_CONSUMERS: dict[str, tuple[str, ...]] = {
@@ -763,6 +765,28 @@ mcp_app = typer.Typer(add_completion=False, no_args_is_help=True)
 app.add_typer(mcp_app, name="mcp", help="MCP servers exposed by ucode.")
 
 
+def _version_callback(value: bool) -> None:
+    if value:
+        console.print(ucode_version_string())
+        raise typer.Exit()
+
+
+@app.callback()
+def _root(
+    version: Annotated[
+        bool,
+        typer.Option(
+            "--version",
+            "-V",
+            callback=_version_callback,
+            is_eager=True,
+            help="Show the ucode version and exit.",
+        ),
+    ] = False,
+) -> None:
+    """Configure and launch coding agents through Databricks AI Gateway."""
+
+
 @mcp_app.command("web-search")
 def mcp_web_search_cmd() -> None:
     """Run the web_search MCP server over stdio. Invoked as a subprocess by Claude Code."""
@@ -865,6 +889,7 @@ def _launch_tool(
     skip_preflight: bool = False,
 ) -> None:
     try:
+        maybe_warn_if_outdated()
         tool = normalize_tool(tool_name)
         existing = load_state()
         # Workspaces configured with --use-pat export the profile's PAT as

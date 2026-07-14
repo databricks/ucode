@@ -10,8 +10,15 @@
 ## Installation
 
 ```bash
-uv tool install git+https://github.com/databricks/ucode
+uv tool install git+https://github.com/databricks/ucode            # latest (main)
+uv tool install "git+https://github.com/databricks/ucode@v0.2.0"   # a tagged release
+uv tool install "git+https://github.com/databricks/ucode@<sha>"    # an exact commit
 ```
+
+`ucode` is distributed straight from git, so you can pin any published release
+tag (`@vX.Y.Z`) or any commit (`@<sha>`). Check what you're running — and grab
+either handle to pin — with `ucode --version` (e.g. `ucode 0.2.0 (446a24a)`).
+`ucode upgrade` reinstalls the latest `main`.
 
 ---
 
@@ -98,6 +105,8 @@ Discovered external MCP connections are listed directly. MCP auth uses a Databri
 
 | Command | Description |
 |---------|-------------|
+| `ucode --version` | Show the installed version and commit (e.g. `ucode 0.2.0 (446a24a)`) |
+| `ucode upgrade` | Reinstall the latest `main` from GitHub |
 | `ucode status` | Show current workspace, base URLs, managed config files, and selected models |
 | `ucode usage` | Show AI Gateway usage summary |
 | `ucode revert` | Clear saved state and restore backed-up config files |
@@ -167,6 +176,17 @@ uv sync
 - Add `src/ucode/agents/<name>.py` with at least `write_tool_config`, `launch`, `default_model`, and `validate_cmd`.
 - Register it in `src/ucode/agents/__init__.py`.
 - Add focused tests under `tests/`.
+
+### Cutting a release
+
+Releases are git tags — there is no PyPI package. Trigger the **Release tag**
+workflow (Actions → Release tag → Run workflow); it patch-bumps by default, or
+pick `minor`/`major`. The workflow computes the next `vX.Y.Z`, writes it into
+`pyproject.toml`, commits that to `main`, and pushes the tag. Users then install
+it with `uv tool install "git+https://github.com/databricks/ucode@vX.Y.Z"`.
+
+To force a specific minor/major, bump `version` in `pyproject.toml` first — the
+workflow tags whatever is ahead of the latest existing tag.
 
 ## Security
 

@@ -1,0 +1,106 @@
+name: Release tag
+
+# Manually cut a release: compute the next version (patch bump by default),
+# sync pyproject.toml, commit it to main, and push a matching vX.Y.Z tag.
+# The tag *is* the release — users install it with
+# `uv tool install "git+https://github.com/databricks/ucode@vX.Y.Z"`.
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Which part of the version to bump"
+        type: choice
+        default: patch
+        options:
+          - patch
+          - minor
+          - major
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          # Full history + tags so we can find the latest existing tag, and a
+          # token with write access so the bump commit + tag push are allowed.
+          fetch-depth: 0
+
+      - name: Compute next version
+        id: next
+        env:
+          BUMP: ${{ inputs.bump }}
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import os, re, subprocess
+
+          bump = os.environ.get("BUMP", "patch")
+
+          def parse(v):
+              m = re.match(r"v?(\d+)\.(\d+)\.(\d+)", v.strip())
+              return tuple(int(x) for x in m.groups()) if m else (0, 0, 0)
+
+          # Newest existing vX.Y.Z tag (empty repo -> 0.0.0).
+          tags = subprocess.run(
+              ["git", "tag", "--list", "v*.*.*"],
+              capture_output=True, text=True, check=True,
+          ).stdout.split()
+          latest_tag = max((parse(t) for t in tags), default=(0, 0, 0))
+
+          # Current pyproject.toml version.
+          text = open("pyproject.toml", encoding="utf-8").read()
+          proj = parse(re.search(r'(?m)^version = "([^"]+)"', text).group(1))
+
+          # Start from whichever is ahead, then bump the requested part. A
+          # hand-bumped pyproject (minor/major) above the latest tag wins as-is
+          # for that part; otherwise we just increment the patch.
+          base = max(latest_tag, proj)
+          major, minor, patch = base
+          if bump == "major":
+              major, minor, patch = major + 1, 0, 0
+          elif bump == "minor":
+              minor, patch = minor + 1, 0
+          else:
+              # If pyproject already jumped ahead of the tags, tag it as-is;
+              # otherwise increment the patch over the latest release.
+              if proj > latest_tag:
+                  major, minor, patch = proj
+              else:
+                  patch += 1
+
+          version = f"{major}.{minor}.{patch}"
+          tag = f"v{version}"
+          if tag in {f"v{p[0]}.{p[1]}.{p[2]}" for p in map(parse, tags)}:
+              raise SystemExit(f"Tag {tag} already exists — nothing to release.")
+          print(f"version={version}")
+          print(f"tag={tag}")
+          PY
+
+      - name: Sync pyproject.toml, commit, and tag
+        env:
+          VERSION: ${{ steps.next.outputs.version }}
+          TAG: ${{ steps.next.outputs.tag }}
+        run: |
+          python3 - <<'PY'
+          import os, re
+          version = os.environ["VERSION"]
+          path = "pyproject.toml"
+          text = open(path, encoding="utf-8").read()
+          text = re.sub(r'(?m)^version = "[^"]+"', f'version = "{version}"', text, count=1)
+          open(path, "w", encoding="utf-8").write(text)
+          PY
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # Only commit when the version line actually changed (the first
+          # release may already match pyproject.toml). `[skip ci]` keeps the CI
+          # workflow from running on the bot's own bump.
+          if ! git diff --quiet -- pyproject.toml; then
+            git commit -am "ucode: release ${TAG} [skip ci]"
+            git push origin HEAD:main
+          fi
+          git tag "$TAG"
+          git push origin "$TAG"

@@ -25,6 +25,12 @@ Tests live in `tests/`.
 - Add or update focused tests for behavior changes.
 - Do not modify generated or lock files unless the dependency graph intentionally changes.
 
+## Versioning & releases
+
+- `ucode --version` prints `ucode <pyproject version> (<commit>)`. The commit comes from PEP 610 `direct_url.json` (`telemetry.ucode_commit()`): the short SHA for a git install, `editable` for a working checkout.
+- Releases are git tags, not PyPI. The **Release tag** workflow (`.github/workflows/release-tag.yml`, manual dispatch) computes the next `vX.Y.Z`, syncs `pyproject.toml`, commits to `main`, and pushes the tag. To force a minor/major, bump `version` in `pyproject.toml` first.
+- Users pin a version with `uv tool install "git+https://github.com/databricks/ucode@vX.Y.Z"`.
+
 ## Style
 
 - Keep user-facing CLI errors actionable.

@@ -15,6 +15,61 @@ class TestUcodeVersion:
         assert telemetry.ucode_version() != ""
 
 
+class TestUcodeCommit:
+    def setup_method(self):
+        telemetry.ucode_commit.cache_clear()
+
+    def _patch_direct_url(self, payload):
+        # Distribution.from_name(...).read_text("direct_url.json") is the PEP 610
+        # metadata source; stub it to exercise each install shape.
+        import json
+        from importlib.metadata import Distribution
+
+        class _Dist:
+            def read_text(self, name):
+                return json.dumps(payload) if payload is not None else None
+
+        return patch.object(Distribution, "from_name", return_value=_Dist())
+
+    def test_git_install_returns_short_sha(self):
+        payload = {
+            "url": "https://github.com/databricks/ucode",
+            "vcs_info": {"vcs": "git", "commit_id": "446a24a1077eac872fa5bd4c7fedc57666c51ad6"},
+        }
+        with self._patch_direct_url(payload):
+            assert telemetry.ucode_commit() == "446a24a"
+
+    def test_editable_checkout(self):
+        payload = {"url": "file:///home/x/ucode", "dir_info": {"editable": True}}
+        with self._patch_direct_url(payload):
+            assert telemetry.ucode_commit() == "editable"
+
+    def test_missing_direct_url_is_unknown(self):
+        with self._patch_direct_url(None):
+            assert telemetry.ucode_commit() == "unknown"
+
+    def test_non_editable_dir_install_is_unknown(self):
+        payload = {"url": "file:///home/x/ucode", "dir_info": {}}
+        with self._patch_direct_url(payload):
+            assert telemetry.ucode_commit() == "unknown"
+
+    def test_lookup_failure_is_unknown(self):
+        from importlib.metadata import Distribution, PackageNotFoundError
+
+        with patch.object(Distribution, "from_name", side_effect=PackageNotFoundError()):
+            telemetry.ucode_commit.cache_clear()
+            assert telemetry.ucode_commit() == "unknown"
+
+
+class TestUcodeVersionString:
+    def test_composes_version_and_commit(self):
+        with (
+            patch.object(telemetry, "ucode_version", return_value="0.2.0"),
+            patch.object(telemetry, "ucode_commit", return_value="446a24a"),
+        ):
+            assert telemetry.ucode_version_string() == "ucode 0.2.0 (446a24a)"
+
+
 class TestAgentVersion:
     def setup_method(self):
         # The helper is @cache'd; clear between tests so each gets a clean run.
