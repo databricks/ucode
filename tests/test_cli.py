@@ -594,6 +594,52 @@ class TestConfigureAgentFlag:
         )
         mock_cfg.assert_called_once_with("claude")
 
+    def test_disable_fable_alone_implicitly_targets_claude(self):
+        # Fable is Claude-only, so `--disable-fable` on its own should configure
+        # claude directly instead of dropping into the interactive agent picker.
+        with (
+            patch("ucode.cli.install_databricks_cli"),
+            patch("ucode.cli.install_tool_binary") as mock_install,
+            patch("ucode.cli.configure_workspace_command") as mock_cfg,
+        ):
+            result = runner.invoke(app, ["configure", "--disable-fable"])
+        assert result.exit_code == 0, result.output
+        mock_install.assert_called_once_with(
+            "claude", strict=True, update_existing=True, prompt_optional_updates=True
+        )
+        mock_cfg.assert_called_once_with("claude", fable_enabled=False)
+
+    def test_enable_fable_alone_implicitly_targets_claude(self):
+        with (
+            patch("ucode.cli.install_databricks_cli"),
+            patch("ucode.cli.install_tool_binary") as mock_install,
+            patch("ucode.cli.configure_workspace_command") as mock_cfg,
+        ):
+            result = runner.invoke(app, ["configure", "--enable-fable"])
+        assert result.exit_code == 0, result.output
+        mock_install.assert_called_once_with(
+            "claude", strict=True, update_existing=True, prompt_optional_updates=True
+        )
+        mock_cfg.assert_called_once_with("claude", fable_enabled=True)
+
+    def test_enable_fable_with_explicit_agents_does_not_override(self):
+        # An explicit --agents selection wins; the fable flag rides along without
+        # forcing the claude-only single-agent path.
+        with (
+            patch("ucode.cli.install_databricks_cli"),
+            patch("ucode.cli.install_tool_binary"),
+            patch("ucode.cli.configure_workspace_command") as mock_cfg,
+        ):
+            result = runner.invoke(
+                app, ["configure", "--enable-fable", "--agents", "claude,codex"]
+            )
+        assert result.exit_code == 0, result.output
+        mock_cfg.assert_called_once_with(
+            selected_tools=["claude", "codex"],
+            prompt_optional_updates=True,
+            fable_enabled=True,
+        )
+
     def test_skip_upgrade_flag_disables_optional_update_prompt(self):
         with (
             patch("ucode.cli.install_databricks_cli"),
@@ -815,6 +861,7 @@ class TestConfigureAgentsSelection:
             tools=None,
             force_login=False,
             use_pat=False,
+            fable_enabled=None,
         ):
             configured_shared.append(
                 (workspace, profile, tuple(tools) if tools is not None else None, force_login)
@@ -1139,6 +1186,75 @@ class TestConfigureSharedStateUsePat:
         assert state["codex_models"] == ["system.ai.gpt-5"]
         assert legacy_called == []
         assert "uc_enabled" not in state
+
+    def _stub_with_fable(self, monkeypatch):
+        cli_mod, *_ = self._stub_deps(monkeypatch, pat_token="dapi-pat")
+        monkeypatch.setattr(
+            cli_mod,
+            "discover_model_services",
+            lambda w, t: (
+                {"fable": "system.ai.claude-fable-5", "opus": "system.ai.claude-opus-4-8"},
+                [],
+                [],
+                [],
+                None,
+            ),
+        )
+        return cli_mod
+
+    def test_fable_stripped_from_discovery_when_not_enabled(self, monkeypatch):
+        # Discovery buckets fable, but without --enable-fable it's dropped from
+        # the persisted bundle so it never reaches any agent's config.
+        cli_mod = self._stub_with_fable(monkeypatch)
+
+        state = cli_mod.configure_shared_state(self.WS, profile="DEFAULT")
+
+        assert state["claude_models"] == {"opus": "system.ai.claude-opus-4-8"}
+        assert "fable_enabled" not in state
+
+    def test_fable_retained_and_persisted_when_enabled(self, monkeypatch):
+        cli_mod = self._stub_with_fable(monkeypatch)
+
+        state = cli_mod.configure_shared_state(self.WS, profile="DEFAULT", fable_enabled=True)
+
+        assert state["claude_models"]["fable"] == "system.ai.claude-fable-5"
+        assert state["fable_enabled"] is True
+
+    def test_launch_inherits_persisted_fable_opt_in(self, monkeypatch):
+        # A launch re-run passes fable_enabled=None; the persisted opt-in for the
+        # same workspace applies, so fable stays in the discovered bundle.
+        cli_mod, *_ = self._stub_deps(
+            monkeypatch,
+            pat_token="dapi-pat",
+            existing_state={"workspace": self.WS, "profile": "DEFAULT", "fable_enabled": True},
+        )
+        monkeypatch.setattr(
+            cli_mod,
+            "discover_model_services",
+            lambda w, t: ({"fable": "system.ai.claude-fable-5"}, [], [], [], None),
+        )
+
+        state = cli_mod.configure_shared_state(self.WS, profile="DEFAULT")
+
+        assert state["claude_models"]["fable"] == "system.ai.claude-fable-5"
+        assert state["fable_enabled"] is True
+
+    def test_reconfigure_with_disable_fable_clears_opt_in(self, monkeypatch):
+        cli_mod, *_ = self._stub_deps(
+            monkeypatch,
+            pat_token="dapi-pat",
+            existing_state={"workspace": self.WS, "profile": "DEFAULT", "fable_enabled": True},
+        )
+        monkeypatch.setattr(
+            cli_mod,
+            "discover_model_services",
+            lambda w, t: ({"fable": "system.ai.claude-fable-5"}, [], [], [], None),
+        )
+
+        state = cli_mod.configure_shared_state(self.WS, profile="DEFAULT", fable_enabled=False)
+
+        assert "fable_enabled" not in state
+        assert "fable" not in state["claude_models"]
 
     def test_falls_back_to_legacy_when_uc_empty(self, monkeypatch):
         # No UC model-services: each family falls back to the legacy listing.

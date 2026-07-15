@@ -1226,8 +1226,9 @@ def discover_model_services(
 
     Returns (claude_models, codex_models, gemini_models, oss_models, reason):
 
-    - ``claude_models`` maps ``opus``/``sonnet``/``haiku`` to the newest
-      matching ``system.ai.claude-*`` id (mirrors ``discover_claude_models``).
+    - ``claude_models`` maps ``fable``/``opus``/``sonnet``/``haiku`` to the
+      newest matching ``system.ai.claude-*`` id (mirrors
+      ``discover_claude_models``).
     - ``codex_models`` is the list of ``system.ai.*gpt-*`` ids.
     - ``gemini_models`` is the list of ``system.ai.*gemini-*`` ids, newest first.
     - ``oss_models`` is the list of OSS-model ``system.ai.*`` ids.
@@ -1241,7 +1242,7 @@ def discover_model_services(
         return {}, [], [], [], reason
 
     claude_models: dict[str, str] = {}
-    for family in ("opus", "sonnet", "haiku"):
+    for family in ("fable", "opus", "sonnet", "haiku"):
         candidates = sorted(
             [m for m in ids if f"claude-{family}-" in m],
             reverse=True,
@@ -1797,13 +1798,13 @@ def discover_claude_models(workspace: str, token: str) -> tuple[dict[str, str], 
     ]
 
     result: dict[str, str] = {}
-    for family, key in [("opus", "opus"), ("sonnet", "sonnet"), ("haiku", "haiku")]:
+    for family in ("fable", "opus", "sonnet", "haiku"):
         candidates = sorted(
             [m for m in raw_ids if f"databricks-claude-{family}-" in m],
             reverse=True,
         )
         if candidates:
-            result[key] = candidates[0]
+            result[family] = candidates[0]
     if result:
         return result, None
     if not raw_ids:
@@ -1811,7 +1812,7 @@ def discover_claude_models(workspace: str, token: str) -> tuple[dict[str, str], 
     sample = ", ".join(raw_ids[:5])
     return {}, (
         "AI Gateway returned model ids but none matched "
-        f"`databricks-claude-{{opus,sonnet,haiku}}-*` (got: {sample})"
+        f"`databricks-claude-{{fable,opus,sonnet,haiku}}-*` (got: {sample})"
     )
 
 

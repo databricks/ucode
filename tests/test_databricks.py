@@ -134,6 +134,20 @@ class TestDiscoverClaudeModels:
         assert reason is None
         assert models["opus"] == "databricks-claude-opus-4-8"
 
+    def test_buckets_fable_family(self, monkeypatch):
+        payload = {
+            "data": [
+                {"id": "databricks-claude-fable-5"},
+                {"id": "databricks-claude-opus-4-8"},
+            ]
+        }
+        monkeypatch.setattr(db_mod, "_http_get_json", lambda url, token: (payload, None))
+
+        models, reason = db_mod.discover_claude_models(WS, "token")
+
+        assert reason is None
+        assert models["fable"] == "databricks-claude-fable-5"
+
 
 def _model_service(model_id: str) -> dict:
     """A model-services entry whose `name` strips to `model_id`."""
@@ -161,6 +175,7 @@ class TestDiscoverModelServices:
     def test_buckets_families_by_name(self, monkeypatch):
         payload = {
             "model_services": [
+                _model_service("system.ai.claude-fable-5"),
                 _model_service("system.ai.claude-opus-4-7"),
                 _model_service("system.ai.claude-opus-4-8"),
                 _model_service("system.ai.claude-sonnet-4-6"),
@@ -179,8 +194,9 @@ class TestDiscoverModelServices:
         claude, codex, gemini, oss, reason = db_mod.discover_model_services(WS, "token")
 
         assert reason is None
-        # Newest opus wins; sonnet bucketed; haiku absent.
+        # Fable bucketed; newest opus wins; sonnet bucketed; haiku absent.
         assert claude == {
+            "fable": "system.ai.claude-fable-5",
             "opus": "system.ai.claude-opus-4-8",
             "sonnet": "system.ai.claude-sonnet-4-6",
         }
