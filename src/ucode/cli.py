@@ -54,6 +54,7 @@ from ucode.databricks import (
 from ucode.mcp import (
     MCP_CLIENTS,
     configure_mcp_command,
+    configure_skills_command,
     purge_cross_workspace_mcp_residue,
     revert_mcp_configs,
 )
@@ -671,7 +672,7 @@ def status() -> int:
         print_kv("Base URL", base_url)
         if configured and tool in MCP_CLIENTS:
             tool_mcp_servers = [
-                str(server.get("name"))
+                str(server.get("name")) + (" (skills)" if server.get("kind") == "skills" else "")
                 for server in mcp_servers
                 if tool in (server.get("clients") or []) and server.get("name")
             ]
@@ -706,6 +707,9 @@ def status() -> int:
     print_note("Use `ucode configure` to update workspace settings or configure new tools.")
     print_note(
         "Use `ucode configure mcp` to add Databricks MCP servers to configured coding tools."
+    )
+    print_note(
+        "Use `ucode configure skills --location <catalog>.<schema>` to add the UC Skills MCP."
     )
     print_note("Use `ucode configure tracing` to log coding sessions to an MLflow experiment.")
     print_note("Use `ucode revert` to clear managed configs and restore prior files.")
@@ -1214,6 +1218,29 @@ def configure_mcp(
     selected = None if services is None else {s.strip() for s in services.split(",") if s.strip()}
     try:
         configure_mcp_command(location=location, services=selected)
+    except RuntimeError as exc:
+        print_err(str(exc))
+        raise typer.Exit(1) from None
+    except KeyboardInterrupt:
+        print_err("Interrupted.")
+        raise typer.Exit(130) from None
+
+
+@configure_app.command("skills")
+def configure_skills(
+    location: Annotated[
+        str,
+        typer.Option(
+            "--location",
+            help="Unity Catalog `<catalog>.<schema>` whose UC Skills to expose (e.g. "
+            "`main.default`). The skills MCP is added to every configured agent; Claude "
+            "additionally loads it eagerly so skills are discoverable.",
+        ),
+    ],
+) -> None:
+    """Add the Unity Catalog Skills MCP server to installed coding tools."""
+    try:
+        configure_skills_command(location=location)
     except RuntimeError as exc:
         print_err(str(exc))
         raise typer.Exit(1) from None

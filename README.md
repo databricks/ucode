@@ -92,6 +92,18 @@ Options are shown in this order:
 Discovered external MCP connections are listed directly. MCP auth uses a Databricks token that
 `ucode` sets when launching each tool.
 
+### Skills (optional)
+
+```bash
+ucode configure skills --location <catalog>.<schema>
+```
+
+Add the Unity Catalog Skills MCP server for a `<catalog>.<schema>` to every configured
+MCP-capable tool. Claude Code additionally loads it eagerly (`alwaysLoad`) so the skills in that
+schema are discoverable; other agents get the same endpoint without eager loading. Uses the same
+Databricks token as `configure mcp`. Skills and other MCP servers coexist; re-running with a new
+location repoints skills at that schema.
+
 ---
 
 ## Other Commands
@@ -107,6 +119,7 @@ Discovered external MCP connections are listed directly. MCP auth uses a Databri
 | `ucode configure --profiles DEFAULT` | Configure using existing Databricks CLI profiles (hosts come from `~/.databrickscfg`) |
 | `ucode configure --profiles DEFAULT --use-pat` | Authenticate with the profile's personal access token — no browser login |
 | `ucode configure --skip-validate` | Write configs without sending a test message through each agent |
+| `ucode configure skills --location <catalog>.<schema>` | Add the Unity Catalog Skills MCP server to configured tools |
 
 ## Managed Local Files
 

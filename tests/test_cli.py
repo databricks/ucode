@@ -157,6 +157,30 @@ class TestMcpSubcommands:
         assert "web-search" in result.output
 
 
+class TestConfigureSkillsCommand:
+    def test_dispatches_location_to_command(self, monkeypatch):
+        calls: list[str] = []
+        monkeypatch.setattr(
+            "ucode.cli.configure_skills_command", lambda location: calls.append(location) or 0
+        )
+        result = runner.invoke(app, ["configure", "skills", "--location", "main.default"])
+        assert result.exit_code == 0
+        assert calls == ["main.default"]
+
+    def test_requires_location(self):
+        result = runner.invoke(app, ["configure", "skills"])
+        assert result.exit_code != 0
+
+    def test_runtime_error_exits_nonzero(self, monkeypatch):
+        def boom(location):
+            raise RuntimeError("Workspace is not configured.")
+
+        monkeypatch.setattr("ucode.cli.configure_skills_command", boom)
+        result = runner.invoke(app, ["configure", "skills", "--location", "main.default"])
+        assert result.exit_code == 1
+        assert "Workspace is not configured." in result.output
+
+
 class TestAuthTokenCommand:
     """`ucode auth-token` is the cross-platform apiKeyHelper (#116)."""
 

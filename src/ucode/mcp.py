@@ -29,6 +29,7 @@ from ucode.config_io import restore_file
 from ucode.databricks import (
     apply_pat_environment,
     build_mcp_service_url,
+    build_skills_mcp_url,
     ensure_databricks_auth,
     get_databricks_token,
     list_databricks_apps,
@@ -49,6 +50,10 @@ from ucode.ui import (
 )
 
 MCP_AUTH_TOKEN_ENV_VAR = "OAUTH_TOKEN"
+# `kind` tag on a saved MCP entry marking it as a UC Skills server. Skills
+# entries are eagerly loaded in Claude (see `apply_mcp_server_changes`); every
+# other entry is untagged and treated as a plain mcp-service.
+SKILLS_MCP_KIND = "skills"
 MCP_USER_SCOPE = "user"
 MCP_CLEANUP_SCOPES = ("local", "project", MCP_USER_SCOPE)
 MCP_PICKER_VISIBLE_ROWS = 10
@@ -96,14 +101,20 @@ MCP_CONNECTION_MARKERS = (
 )
 
 
-def build_mcp_http_entry(url: str) -> dict:
-    return {
+def build_mcp_http_entry(url: str, *, always_load: bool = False) -> dict:
+    entry: dict = {
         "type": "http",
         "url": url,
         "headers": {
             "Authorization": f"Bearer ${{{MCP_AUTH_TOKEN_ENV_VAR}}}",
         },
     }
+    # `alwaysLoad` makes Claude Code eagerly load the server's tool names and
+    # descriptions, which skills rely on to be discoverable. It is Claude-only;
+    # other agents receive just the URL and never see this field.
+    if always_load:
+        entry["alwaysLoad"] = True
+    return entry
 
 
 def add_claude_mcp_server(name: str, entry: dict, scope: str = MCP_USER_SCOPE) -> None:
@@ -1037,7 +1048,7 @@ def apply_mcp_server_changes(
         url = server.get("url")
         if not isinstance(url, str) or not url:
             continue
-        entry = build_mcp_http_entry(url)
+        entry = build_mcp_http_entry(url, always_load=server.get("kind") == SKILLS_MCP_KIND)
         for client in clients:
             configure_client_mcp_server(client, name, url, entry)
         changed = True
@@ -1125,8 +1136,7 @@ def _resolve_location_mcp_servers(
     since-removed service still configures the rest. An empty set selects
     nothing (every previously-registered service in the location is removed).
     ``None`` keeps the whole schema."""
-    if location.count(".") != 1 or not all(part.strip() for part in location.split(".")):
-        raise RuntimeError(f"--location must be `<catalog>.<schema>`, got `{location}`.")
+    _split_catalog_schema(location, "--location")
 
     token = get_databricks_token(workspace, profile)
     with spinner(f"Discovering MCP services in {location}..."):
@@ -1177,25 +1187,20 @@ def _resolve_location_mcp_servers(
     return working_servers
 
 
-def configure_mcp_command(location: str | None = None, services: set[str] | None = None) -> int:
-    if services is not None and location is None:
-        # `--services` works standalone with full names (`system.ai.github`): the
-        # `<catalog>.<schema>` to configure is derived from them. Bare short names
-        # (`github`) can't be located without `--location`.
-        schemas = {".".join(s.split(".")[:2]) for s in services if s.count(".") >= 2}
-        bare = sorted(s for s in services if s.count(".") < 2)
-        if bare:
-            raise RuntimeError(
-                "--services short names need --location (or pass full names like "
-                f"`system.ai.<name>`): {', '.join(bare)}"
-            )
-        if len(schemas) != 1:
-            raise RuntimeError(
-                "--services without --location must all share one `<catalog>.<schema>` "
-                f"(got: {', '.join(sorted(schemas)) or 'none'}); pass --location instead."
-            )
-        location = next(iter(schemas))
-    state = load_state()
+def _split_catalog_schema(location: str, flag: str) -> tuple[str, str]:
+    """Validate and split a ``<catalog>.<schema>`` location. ``flag`` names the
+    option being parsed so the error points at the right one."""
+    if location.count(".") != 1 or not all(part.strip() for part in location.split(".")):
+        raise RuntimeError(f"{flag} must be `<catalog>.<schema>`, got `{location}`.")
+    catalog, schema = (part.strip() for part in location.split("."))
+    return catalog, schema
+
+
+def _setup_mcp_clients(state: dict, section: str) -> tuple[str, str | None, list[str]]:
+    """Shared setup for the non-interactive MCP commands: validate the workspace,
+    drop cross-workspace residue, resolve the configured-and-installed clients,
+    authenticate, and announce the target agents. Returns
+    ``(workspace, profile, clients)``."""
     workspace = state.get("workspace")
     if not workspace:
         raise RuntimeError("Workspace is not configured. Run `ucode configure` first.")
@@ -1223,7 +1228,7 @@ def configure_mcp_command(location: str | None = None, services: set[str] | None
     apply_pat_environment(state)
     ensure_databricks_auth(workspace, profile)
 
-    print_section("MCP Servers")
+    print_section(section)
     client_names = ", ".join(str(MCP_CLIENTS[client]["display"]) for client in clients)
     print_note(f"Configuring for: {client_names}")
     for client in missing_clients:
@@ -1231,6 +1236,29 @@ def configure_mcp_command(location: str | None = None, services: set[str] | None
             f"{MCP_CLIENTS[client]['display']} is configured in ucode but not installed; "
             "skipping MCP config."
         )
+    return workspace, profile, clients
+
+
+def configure_mcp_command(location: str | None = None, services: set[str] | None = None) -> int:
+    if services is not None and location is None:
+        # `--services` works standalone with full names (`system.ai.github`): the
+        # `<catalog>.<schema>` to configure is derived from them. Bare short names
+        # (`github`) can't be located without `--location`.
+        schemas = {".".join(s.split(".")[:2]) for s in services if s.count(".") >= 2}
+        bare = sorted(s for s in services if s.count(".") < 2)
+        if bare:
+            raise RuntimeError(
+                "--services short names need --location (or pass full names like "
+                f"`system.ai.<name>`): {', '.join(bare)}"
+            )
+        if len(schemas) != 1:
+            raise RuntimeError(
+                "--services without --location must all share one `<catalog>.<schema>` "
+                f"(got: {', '.join(sorted(schemas)) or 'none'}); pass --location instead."
+            )
+        location = next(iter(schemas))
+    state = load_state()
+    workspace, profile, clients = _setup_mcp_clients(state, "MCP Servers")
 
     original_mcp_servers_for_location: list[dict] = list(state.get("mcp_servers") or [])
     if location is not None:
@@ -1334,4 +1362,59 @@ def configure_mcp_command(location: str | None = None, services: set[str] | None
     elif not selections and not original_mcp_servers:
         # User submitted the picker without toggling anything --> make it clear nothing was selected
         print_note("No MCP servers selected. Press space to toggle an item, then enter to save.")
+    return 0
+
+
+def _resolve_skills_mcp_servers(
+    workspace: str,
+    clients: list[str],
+    location: str,
+    original_servers: list[dict],
+) -> list[dict]:
+    """Build the desired MCP server list for ``ucode configure skills``.
+
+    Registers exactly one skills entry for ``location`` (a ``<catalog>.<schema>``)
+    and drops any previously-registered skills entry, so a re-run repoints skills
+    at the new schema. Non-skills entries (plain mcp-services) are preserved:
+    skills and mcp-services can coexist."""
+    catalog, schema = _split_catalog_schema(location, "--location")
+    entry_name = _catalog_schema_server_name("databricks-skills", catalog, schema, set())
+
+    original = _servers_by_name(original_servers).get(entry_name)
+    original_clients = list((original or {}).get("clients") or [])
+    merged_clients = original_clients + [c for c in clients if c not in original_clients]
+    skills_entry = {
+        "name": entry_name,
+        "url": build_skills_mcp_url(workspace, catalog, schema),
+        "auth": f"env:{MCP_AUTH_TOKEN_ENV_VAR}",
+        "clients": merged_clients,
+        "kind": SKILLS_MCP_KIND,
+    }
+    # `apply_mcp_server_changes` compares by value, so re-emitting an unchanged
+    # entry is a no-op; only a genuinely repointed skills entry re-registers.
+    kept = [
+        s
+        for s in original_servers
+        if s.get("kind") != SKILLS_MCP_KIND and _server_name(s) != entry_name
+    ]
+    return [*kept, skills_entry]
+
+
+def configure_skills_command(location: str) -> int:
+    """Register the UC Skills MCP for ``location`` across configured agents.
+
+    Skills are eagerly loaded in Claude (via ``alwaysLoad``); other agents get
+    the same endpoint without eager loading, which their CLIs cannot express."""
+    state = load_state()
+    workspace, _profile, clients = _setup_mcp_clients(state, "Skills MCP")
+
+    original_mcp_servers: list[dict] = list(state.get("mcp_servers") or [])
+    working_mcp_servers = _resolve_skills_mcp_servers(
+        workspace, clients, location, original_mcp_servers
+    )
+    changed = apply_mcp_server_changes(original_mcp_servers, working_mcp_servers, clients)
+    if changed or original_mcp_servers != working_mcp_servers:
+        state["mcp_servers"] = working_mcp_servers
+        save_state(state)
+        print_success("Saved")
     return 0
