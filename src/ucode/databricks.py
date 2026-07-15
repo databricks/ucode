@@ -1323,8 +1323,6 @@ def build_mcp_service_url(workspace: str, full_name: str) -> str:
 
 
 def build_skills_mcp_url(workspace: str, catalog: str, schema: str) -> str:
-    """MCP endpoint that serves the UC Skills in ``catalog.schema``. Unlike the
-    mcp-services route this takes the schema as path segments, not a dotted name."""
     return f"{workspace}/ai-gateway/skills/{catalog}/{schema}"
 
 

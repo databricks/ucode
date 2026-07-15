@@ -119,7 +119,6 @@ location repoints skills at that schema.
 | `ucode configure --profiles DEFAULT` | Configure using existing Databricks CLI profiles (hosts come from `~/.databrickscfg`) |
 | `ucode configure --profiles DEFAULT --use-pat` | Authenticate with the profile's personal access token — no browser login |
 | `ucode configure --skip-validate` | Write configs without sending a test message through each agent |
-| `ucode configure skills --location <catalog>.<schema>` | Add the Unity Catalog Skills MCP server to configured tools |
 
 ## Managed Local Files
 
