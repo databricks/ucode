@@ -661,7 +661,12 @@ class TestConfigureSharedStateOssWiring:
         monkeypatch.setattr(cli_mod, "discover_gemini_models", lambda ws, tok: ([], None))
         monkeypatch.setattr(cli_mod, "discover_codex_models", lambda ws, tok: ([], None))
         monkeypatch.setattr(
-            cli_mod, "discover_oss_models", lambda ws, tok: (["databricks-inkling"], None)
+            cli_mod,
+            "discover_oss_model_specs",
+            lambda ws, tok: (
+                [{"id": "databricks-inkling", "reasoning": True, "context_window": None}],
+                None,
+            ),
         )
         monkeypatch.setattr(cli_mod, "load_state", lambda: {})
         monkeypatch.setattr(cli_mod, "save_state", lambda s: saved.update(s))
@@ -675,6 +680,10 @@ class TestConfigureSharedStateOssWiring:
         state = self._run(monkeypatch, ["opencode"])
         assert state["oss_models"] == ["databricks-inkling"]
         assert state["opencode_models"]["oss"] == ["databricks-inkling"]
+
+    def test_oss_specs_stored_in_state(self, monkeypatch):
+        state = self._run(monkeypatch, ["pi"])
+        assert state["oss_model_specs"][0]["reasoning"] is True
 
     def test_oss_not_fetched_for_unrelated_tool(self, monkeypatch):
         # A claude-only configure should not populate oss_models.

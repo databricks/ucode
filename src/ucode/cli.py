@@ -31,7 +31,7 @@ from ucode.databricks import (
     discover_claude_models,
     discover_codex_models,
     discover_gemini_models,
-    discover_oss_models,
+    discover_oss_model_specs,
     ensure_ai_gateway_v2,
     ensure_databricks_auth,
     get_databricks_profiles,
@@ -171,8 +171,10 @@ def configure_shared_state(
         else:
             codex_models = []
         if want_oss:
-            oss_models, oss_reason = discover_oss_models(workspace, token)
+            oss_specs, oss_reason = discover_oss_model_specs(workspace, token)
+            oss_models = [s["id"] for s in oss_specs]
         else:
+            oss_specs = []
             oss_models = []
     opencode_models: dict[str, list[str]] = {}
     if claude_models:
@@ -194,6 +196,7 @@ def configure_shared_state(
         state["codex_models"] = codex_models
     if want_oss:
         state["oss_models"] = oss_models
+        state["oss_model_specs"] = oss_specs
     if fetch_all or "opencode" in tools:
         state["opencode_models"] = opencode_models
     save_state(state)

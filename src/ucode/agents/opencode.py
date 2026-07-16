@@ -80,11 +80,22 @@ def _resolve_model_selector(model: str, opencode_models: dict[str, list[str]]) -
     return model
 
 
+def _oss_model_entry(ua_header: dict, spec: dict | None) -> dict:
+    """Build an opencode oss model entry. @ai-sdk/openai surfaces reasoning
+    automatically, so only set `limit.context` when the gateway states a
+    context window; omit it otherwise so opencode keeps its default."""
+    entry: dict = {"headers": ua_header}
+    if spec and spec.get("context_window"):
+        entry["limit"] = {"context": spec["context_window"]}
+    return entry
+
+
 def render_overlay(
     model: str,
     token: str,
     opencode_base_urls: dict[str, str],
     opencode_models: dict[str, list[str]],
+    oss_specs: list[dict] | None = None,
 ) -> tuple[dict, list[list[str]]]:
     """Return (overlay, managed_key_paths) for opencode.json."""
     auth_headers = {"Authorization": f"Bearer {token}"}
@@ -139,6 +150,7 @@ def render_overlay(
         # the Responses API (no useResponsesApi), unlike the codex provider.
         # Unlike Pi, opencode's @ai-sdk/openai tolerates the finish_reason the
         # gateway omits for reasoning models (inkling), so no proxy is needed.
+        oss_specs_by_id = {s["id"]: s for s in (oss_specs or [])}
         providers["databricks-oss"] = {
             "npm": "@ai-sdk/openai",
             "options": {
@@ -146,7 +158,7 @@ def render_overlay(
                 "apiKey": token,
                 "headers": auth_headers,
             },
-            "models": {m: {"headers": ua_header} for m in oss_models},
+            "models": {m: _oss_model_entry(ua_header, oss_specs_by_id.get(m)) for m in oss_models},
         }
         keys.append(["provider", "databricks-oss"])
 
@@ -174,6 +186,7 @@ def write_tool_config(
         token,
         opencode_base_urls,
         state.get("opencode_models") or {},
+        state.get("oss_model_specs") or [],
     )
     existing = read_json_safe(OPENCODE_CONFIG_PATH)
     providers = existing.get("provider")

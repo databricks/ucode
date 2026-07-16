@@ -202,6 +202,24 @@ class TestRenderOverlayOss:
     def test_provider_keys_listed_in_module(self):
         assert ["provider", "databricks-oss"] in opencode.PROVIDER_KEYS
 
+    def test_oss_model_sets_limit_context_when_stated(self):
+        models = {"oss": ["databricks-glm-5-2"]}
+        specs = [{"id": "databricks-glm-5-2", "reasoning": True, "context_window": 1_000_000}]
+        overlay, _ = opencode.render_overlay(
+            "databricks-glm-5-2", "tok", _base_urls(), models, specs
+        )
+        entry = overlay["provider"]["databricks-oss"]["models"]["databricks-glm-5-2"]
+        assert entry["limit"] == {"context": 1_000_000}
+
+    def test_oss_model_omits_limit_when_unstated(self):
+        models = {"oss": ["databricks-inkling"]}
+        specs = [{"id": "databricks-inkling", "reasoning": True, "context_window": None}]
+        overlay, _ = opencode.render_overlay(
+            "databricks-inkling", "tok", _base_urls(), models, specs
+        )
+        entry = overlay["provider"]["databricks-oss"]["models"]["databricks-inkling"]
+        assert "limit" not in entry
+
 
 class TestMcpServerConfig:
     def test_builds_remote_server_entry_with_oauth_token_env_header(self):

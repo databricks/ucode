@@ -852,6 +852,69 @@ def discover_oss_models(workspace: str, token: str) -> tuple[list[str], str | No
     return [], "no chat-completions-only endpoints (all served by native providers)"
 
 
+# Matches a stated context length in a foundation-model description, e.g.
+# "context length of 1M tokens" or "context window of 128K". The gateway only
+# states the window in free text (there is no structured field), so this is
+# best-effort: models without a stated length get no contextWindow override.
+_CONTEXT_LENGTH_RE = re.compile(r"context (?:length|window) of ([\d.,]+)\s*([MK])", re.IGNORECASE)
+
+
+def _parse_context_window(description: str) -> int | None:
+    """Extract a context window (in tokens) from a model description, or None."""
+    match = _CONTEXT_LENGTH_RE.search(description or "")
+    if not match:
+        return None
+    value = float(match.group(1).replace(",", ""))
+    multiplier = 1_000_000 if match.group(2).upper() == "M" else 1_000
+    return int(value * multiplier)
+
+
+def discover_oss_model_specs(workspace: str, token: str) -> tuple[list[dict], str | None]:
+    """Discover OSS (mlflow chat-completions-only) models with capability specs.
+
+    Same endpoint selection as `discover_oss_models`, but returns per-model
+    dicts ``{"id", "reasoning", "context_window"}`` so adapters can enrich Pi /
+    OpenCode config. ``reasoning`` comes from the endpoint's structured
+    ``capabilities.openai_reasoning`` (reliable). ``context_window`` is parsed
+    from the free-text description and is ``None`` when not stated (we never
+    fabricate a window we don't know). Returns (specs, reason).
+    """
+    hostname = workspace_hostname(workspace)
+    payload, reason = _http_get_json(
+        f"https://{hostname}/api/2.0/serving-endpoints:foundation-models", token
+    )
+    if payload is None:
+        return [], reason
+
+    data = cast(dict, payload) if isinstance(payload, dict) else {}
+    endpoints = data.get("endpoints", [])
+    specs: list[dict] = []
+    for ep in endpoints:
+        entities = ep.get("config", {}).get("served_entities", [])
+        api_types: set[str] = set()
+        description = ""
+        for se in entities:
+            fm = se.get("foundation_model", {})
+            api_types.update(fm.get("api_types", []))
+            description = description or fm.get("description", "")
+        if "mlflow/v1/chat/completions" not in api_types:
+            continue
+        if api_types & _NATIVE_PROVIDER_API_TYPES:
+            continue
+        specs.append(
+            {
+                "id": ep.get("name", ""),
+                "reasoning": bool(ep.get("capabilities", {}).get("openai_reasoning")),
+                "context_window": _parse_context_window(description),
+            }
+        )
+    if specs:
+        return sorted(specs, key=lambda s: s["id"]), None
+    if not endpoints:
+        return [], "foundation-models listing returned no endpoints"
+    return [], "no chat-completions-only endpoints (all served by native providers)"
+
+
 def fetch_gemini_models(workspace: str, token: str) -> list[str]:
     models, _ = discover_gemini_models(workspace, token)
     return models

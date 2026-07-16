@@ -21,6 +21,7 @@ from ucode.databricks import (
     build_pi_base_urls,
     build_shared_base_urls,
     build_tool_base_url,
+    discover_oss_model_specs,
     discover_oss_models,
     ensure_databricks_cli_version,
     get_databricks_token,
@@ -199,6 +200,104 @@ class TestDiscoverOssModels:
         with self._patch(None, "HTTP 401"):
             models, reason = discover_oss_models(WS, "tok")
         assert models == []
+        assert reason == "HTTP 401"
+
+
+class TestParseContextWindow:
+    def test_millions(self):
+        assert db_mod._parse_context_window("supports a context length of 1M tokens") == 1_000_000
+
+    def test_thousands(self):
+        assert db_mod._parse_context_window("context window of 128K") == 128_000
+
+    def test_decimal_millions(self):
+        assert db_mod._parse_context_window("context length of 1.5M tokens") == 1_500_000
+
+    def test_unstated_returns_none(self):
+        assert db_mod._parse_context_window("a great model for coding") is None
+
+    def test_empty(self):
+        assert db_mod._parse_context_window("") is None
+
+
+class TestDiscoverOssModelSpecs:
+    """discover_oss_model_specs returns per-model reasoning (from structured
+    capabilities) and context_window (parsed from description, None when
+    unstated) for the same chat-completions-only cohort."""
+
+    _PAYLOAD = {
+        "endpoints": [
+            {
+                "name": "databricks-glm-5-2",
+                "capabilities": {"openai_reasoning": True},
+                "config": {
+                    "served_entities": [
+                        {
+                            "foundation_model": {
+                                "api_types": ["mlflow/v1/chat/completions"],
+                                "description": "MoE model with a context length of 1M tokens.",
+                            }
+                        }
+                    ]
+                },
+            },
+            {
+                "name": "databricks-llama-4-maverick",
+                "capabilities": {"openai_reasoning": False},
+                "config": {
+                    "served_entities": [
+                        {
+                            "foundation_model": {
+                                "api_types": ["mlflow/v1/chat/completions"],
+                                "description": "context window of 128K.",
+                            }
+                        }
+                    ]
+                },
+            },
+            {
+                "name": "databricks-inkling",
+                "capabilities": {"openai_reasoning": True},
+                "config": {
+                    "served_entities": [
+                        {
+                            "foundation_model": {
+                                "api_types": ["mlflow/v1/chat/completions"],
+                                "description": "a reasoning model (no window stated).",
+                            }
+                        }
+                    ]
+                },
+            },
+        ]
+    }
+
+    def _patch(self, payload, reason=None):
+        from unittest.mock import patch
+
+        return patch.object(db_mod, "_http_get_json", return_value=(payload, reason))
+
+    def test_reasoning_from_capabilities(self):
+        with self._patch(self._PAYLOAD):
+            specs, _ = discover_oss_model_specs(WS, "tok")
+        by_id = {s["id"]: s for s in specs}
+        assert by_id["databricks-glm-5-2"]["reasoning"] is True
+        assert by_id["databricks-inkling"]["reasoning"] is True
+        assert by_id["databricks-llama-4-maverick"]["reasoning"] is False
+
+    def test_context_window_parsed_or_none(self):
+        with self._patch(self._PAYLOAD):
+            specs, _ = discover_oss_model_specs(WS, "tok")
+        by_id = {s["id"]: s for s in specs}
+        assert by_id["databricks-glm-5-2"]["context_window"] == 1_000_000
+        assert by_id["databricks-llama-4-maverick"]["context_window"] == 128_000
+        # inkling states no window -> None (we never fabricate one).
+        assert by_id["databricks-inkling"]["context_window"] is None
+
+    def test_propagates_http_failure(self):
+        with self._patch(None, "HTTP 401"):
+            specs, reason = discover_oss_model_specs(WS, "tok")
+        assert specs == []
         assert reason == "HTTP 401"
 
 

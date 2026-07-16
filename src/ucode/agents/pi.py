@@ -112,6 +112,23 @@ def _resolve_model_selector(
     return model
 
 
+def _pi_oss_model_entry(model_id: str, spec: dict | None) -> dict:
+    """Build a Pi mlflow model entry, enriched from the gateway capability spec.
+
+    Sets `reasoning: true` when the model reports `openai_reasoning` (Pi renders
+    the gateway's reasoning_content as thinking) and `contextWindow` when the
+    gateway states one. Fields are omitted when unknown so Pi keeps its default.
+    """
+    entry: dict = {"id": model_id}
+    if not spec:
+        return entry
+    if spec.get("reasoning"):
+        entry["reasoning"] = True
+    if spec.get("context_window"):
+        entry["contextWindow"] = spec["context_window"]
+    return entry
+
+
 def render_overlay(
     model: str,
     token: str,
@@ -120,6 +137,7 @@ def render_overlay(
     codex_models: list[str],
     gemini_models: list[str],
     oss_models: list[str],
+    oss_specs: list[dict] | None = None,
 ) -> tuple[dict, list[list[str]]]:
     """Return (overlay, managed_key_paths) for ~/.pi/agent/models.json."""
     providers: dict = {}
@@ -164,6 +182,7 @@ def render_overlay(
         }
         keys.append(["providers", "databricks-gemini"])
     if oss_models:
+        specs_by_id = {s["id"]: s for s in (oss_specs or [])}
         providers["databricks-mlflow"] = {
             "baseUrl": pi_base_urls["oss"],
             "api": "openai-completions",
@@ -173,7 +192,7 @@ def render_overlay(
             # and per-tool `strict`. Pi omits both when these are false.
             "compat": {"supportsStore": False, "supportsStrictMode": False},
             "headers": ua_headers,
-            "models": [{"id": m} for m in oss_models],
+            "models": [_pi_oss_model_entry(m, specs_by_id.get(m)) for m in oss_models],
         }
         keys.append(["providers", "databricks-mlflow"])
     overlay: dict = {
@@ -205,6 +224,7 @@ def write_tool_config(
         state.get("codex_models") or [],
         state.get("gemini_models") or [],
         state.get("oss_models") or [],
+        state.get("oss_model_specs") or [],
     )
     existing = read_json_safe(PI_CONFIG_PATH)
     providers = existing.get("providers")
