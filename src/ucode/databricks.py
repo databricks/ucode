@@ -809,6 +809,49 @@ def discover_codex_models(workspace: str, token: str) -> tuple[list[str], str | 
     return discover_endpoints_with_api_type(workspace, token, "openai/v1/responses")
 
 
+# api_types already served by the claude/openai/gemini Pi providers. Endpoints
+# exposing any of these are reached through their native provider, so the OSS
+# (mlflow chat-completions) provider skips them to avoid listing a model twice.
+_NATIVE_PROVIDER_API_TYPES = frozenset(
+    {"anthropic/v1/messages", "openai/v1/responses", "gemini/v1/generateContent"}
+)
+
+
+def discover_oss_models(workspace: str, token: str) -> tuple[list[str], str | None]:
+    """Discover chat-completions-only endpoints (Llama, Qwen, GLM, inkling, ...).
+
+    Returns (endpoints, reason). Keeps endpoints whose served entities expose
+    `mlflow/v1/chat/completions` but none of the native api_types already served
+    by the dedicated claude/openai/gemini Pi providers, and excludes embedding
+    endpoints. reason is None on success; otherwise it describes the empty list.
+    """
+    hostname = workspace_hostname(workspace)
+    payload, reason = _http_get_json(
+        f"https://{hostname}/api/2.0/serving-endpoints:foundation-models", token
+    )
+    if payload is None:
+        return [], reason
+
+    data = cast(dict, payload) if isinstance(payload, dict) else {}
+    endpoints = data.get("endpoints", [])
+    out: list[str] = []
+    for ep in endpoints:
+        name = ep.get("name", "")
+        api_types: set[str] = set()
+        for se in ep.get("config", {}).get("served_entities", []):
+            api_types.update(se.get("foundation_model", {}).get("api_types", []))
+        if "mlflow/v1/chat/completions" not in api_types:
+            continue
+        if api_types & _NATIVE_PROVIDER_API_TYPES:
+            continue
+        out.append(name)
+    if out:
+        return sorted(out), None
+    if not endpoints:
+        return [], "foundation-models listing returned no endpoints"
+    return [], "no chat-completions-only endpoints (all served by native providers)"
+
+
 def fetch_gemini_models(workspace: str, token: str) -> list[str]:
     models, _ = discover_gemini_models(workspace, token)
     return models
@@ -816,6 +859,11 @@ def fetch_gemini_models(workspace: str, token: str) -> list[str]:
 
 def fetch_codex_models(workspace: str, token: str) -> list[str]:
     models, _ = discover_codex_models(workspace, token)
+    return models
+
+
+def fetch_oss_models(workspace: str, token: str) -> list[str]:
+    models, _ = discover_oss_models(workspace, token)
     return models
 
 
@@ -977,6 +1025,7 @@ def build_pi_base_urls(workspace: str) -> dict[str, str]:
         "claude": build_tool_base_url("claude", workspace),
         "openai": build_tool_base_url("codex", workspace),
         "gemini": build_tool_base_url("gemini", workspace) + "/v1beta",
+        "oss": f"{workspace}/ai-gateway/mlflow/v1",
     }
 
 

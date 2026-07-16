@@ -18,8 +18,10 @@ from ucode.databricks import (
     build_auth_shell_command,
     build_databricks_cli_env,
     build_opencode_base_urls,
+    build_pi_base_urls,
     build_shared_base_urls,
     build_tool_base_url,
+    discover_oss_models,
     ensure_databricks_cli_version,
     get_databricks_token,
     list_databricks_apps,
@@ -96,6 +98,104 @@ class TestBuildSharedBaseUrls:
     def test_codex_url_format(self):
         urls = build_shared_base_urls(WS)
         assert urls["codex"] == f"{WS}/ai-gateway/codex/v1"
+
+
+class TestBuildPiBaseUrls:
+    def test_oss_points_at_mlflow_gateway(self):
+        urls = build_pi_base_urls(WS)
+        assert urls["oss"] == f"{WS}/ai-gateway/mlflow/v1"
+
+
+class TestDiscoverOssModels:
+    """discover_oss_models keeps chat-completions-only endpoints and dedupes
+    anything already served by the native claude/openai/gemini providers."""
+
+    _PAYLOAD = {
+        "endpoints": [
+            # Chat-completions only → kept.
+            {
+                "name": "databricks-inkling",
+                "config": {
+                    "served_entities": [
+                        {"foundation_model": {"api_types": ["mlflow/v1/chat/completions"]}}
+                    ]
+                },
+            },
+            {
+                "name": "databricks-llama-4-maverick",
+                "config": {
+                    "served_entities": [
+                        {"foundation_model": {"api_types": ["mlflow/v1/chat/completions"]}}
+                    ]
+                },
+            },
+            # Also served via openai-responses → skipped (native provider).
+            {
+                "name": "databricks-gpt-5",
+                "config": {
+                    "served_entities": [
+                        {
+                            "foundation_model": {
+                                "api_types": [
+                                    "mlflow/v1/chat/completions",
+                                    "openai/v1/responses",
+                                ]
+                            }
+                        }
+                    ]
+                },
+            },
+            # Also served via anthropic/messages → skipped (native provider).
+            {
+                "name": "databricks-claude-sonnet-5",
+                "config": {
+                    "served_entities": [
+                        {
+                            "foundation_model": {
+                                "api_types": [
+                                    "mlflow/v1/chat/completions",
+                                    "anthropic/v1/messages",
+                                ]
+                            }
+                        }
+                    ]
+                },
+            },
+            # Embeddings → skipped (no chat-completions).
+            {
+                "name": "databricks-bge-large-en",
+                "config": {
+                    "served_entities": [
+                        {"foundation_model": {"api_types": ["mlflow/v1/embeddings"]}}
+                    ]
+                },
+            },
+        ]
+    }
+
+    def _patch(self, payload, reason=None):
+        from unittest.mock import patch
+
+        return patch.object(db_mod, "_http_get_json", return_value=(payload, reason))
+
+    def test_keeps_only_chat_completions_only_endpoints(self):
+        with self._patch(self._PAYLOAD):
+            models, reason = discover_oss_models(WS, "tok")
+        assert models == ["databricks-inkling", "databricks-llama-4-maverick"]
+        assert reason is None
+
+    def test_reports_reason_when_all_served_by_native_providers(self):
+        payload = {"endpoints": [self._PAYLOAD["endpoints"][2]]}  # gpt-5 only
+        with self._patch(payload):
+            models, reason = discover_oss_models(WS, "tok")
+        assert models == []
+        assert reason is not None
+
+    def test_propagates_http_failure(self):
+        with self._patch(None, "HTTP 401"):
+            models, reason = discover_oss_models(WS, "tok")
+        assert models == []
+        assert reason == "HTTP 401"
 
 
 class TestBuildAuthShellCommand:

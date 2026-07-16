@@ -16,6 +16,7 @@ def _base_urls() -> dict[str, str]:
         "claude": f"{WS}/ai-gateway/anthropic",
         "openai": f"{WS}/ai-gateway/codex/v1",
         "gemini": f"{WS}/ai-gateway/gemini/v1beta",
+        "oss": f"{WS}/ai-gateway/mlflow/v1",
     }
 
 
@@ -25,6 +26,7 @@ def _empty() -> dict:
         "claude_models": {},
         "codex_models": [],
         "gemini_models": [],
+        "oss_models": [],
     }
 
 
@@ -38,6 +40,7 @@ def _overlay(model: str, token: str = "tok", **kwargs):
         bundle["claude_models"],
         bundle["codex_models"],
         bundle["gemini_models"],
+        bundle["oss_models"],
     )
 
 
@@ -80,17 +83,30 @@ class TestRenderOverlayProviders:
         assert provider["api"] == "google-generative-ai"
         assert provider["baseUrl"] == f"{WS}/ai-gateway/gemini/v1beta"
 
-    def test_all_three_providers_when_all_present(self):
+    def test_mlflow_provider_uses_openai_completions(self):
+        overlay, _ = _overlay("databricks-inkling", oss_models=["databricks-inkling"])
+        provider = overlay["providers"]["databricks-mlflow"]
+        assert provider["api"] == "openai-completions"
+        assert provider["baseUrl"] == f"{WS}/ai-gateway/mlflow/v1"
+        assert provider["models"] == [{"id": "databricks-inkling"}]
+
+    def test_no_mlflow_provider_when_no_oss_models(self):
+        overlay, _ = _overlay("gpt-5", codex_models=["gpt-5"])
+        assert "databricks-mlflow" not in overlay.get("providers", {})
+
+    def test_all_four_providers_when_all_present(self):
         overlay, _ = _overlay(
             "claude-sonnet",
             claude_models={"sonnet": "claude-sonnet"},
             codex_models=["gpt-5"],
             gemini_models=["gemini-2"],
+            oss_models=["databricks-inkling"],
         )
         assert set(overlay["providers"].keys()) == {
             "databricks-claude",
             "databricks-openai",
             "databricks-gemini",
+            "databricks-mlflow",
         }
 
 
@@ -127,6 +143,14 @@ class TestRenderOverlayCompatFlags:
         )
         assert "compat" not in overlay["providers"]["databricks-openai"]
         assert "compat" not in overlay["providers"]["databricks-gemini"]
+
+    def test_mlflow_disables_store_and_strict_mode(self):
+        # MLflow chat-completions gateway rejects OpenAI's `store` field and
+        # per-tool `strict`; these flags make pi omit both.
+        overlay, _ = _overlay("databricks-inkling", oss_models=["databricks-inkling"])
+        compat = overlay["providers"]["databricks-mlflow"]["compat"]
+        assert compat["supportsStore"] is False
+        assert compat["supportsStrictMode"] is False
 
 
 class TestRenderOverlayAuthAndModels:
@@ -192,6 +216,10 @@ class TestRenderOverlayModelSelector:
         overlay, _ = _overlay("gemini-2", gemini_models=["gemini-2"])
         assert overlay["model"] == "databricks-gemini/gemini-2"
 
+    def test_prefixes_oss_model(self):
+        overlay, _ = _overlay("databricks-inkling", oss_models=["databricks-inkling"])
+        assert overlay["model"] == "databricks-mlflow/databricks-inkling"
+
     def test_preserves_already_prefixed_model(self):
         overlay, _ = _overlay(
             "databricks-claude/claude-sonnet",
@@ -226,6 +254,15 @@ class TestPiDefaultModel:
     def test_falls_back_to_gemini(self):
         state = {"claude_models": {}, "codex_models": [], "gemini_models": ["gemini-2"]}
         assert pi.default_model(state) == "gemini-2"
+
+    def test_falls_back_to_oss_last(self):
+        state = {
+            "claude_models": {},
+            "codex_models": [],
+            "gemini_models": [],
+            "oss_models": ["databricks-inkling"],
+        }
+        assert pi.default_model(state) == "databricks-inkling"
 
     def test_returns_none_when_empty(self):
         assert pi.default_model({}) is None

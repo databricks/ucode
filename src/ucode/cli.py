@@ -31,6 +31,7 @@ from ucode.databricks import (
     discover_claude_models,
     discover_codex_models,
     discover_gemini_models,
+    discover_oss_models,
     ensure_ai_gateway_v2,
     ensure_databricks_auth,
     get_databricks_profiles,
@@ -150,10 +151,12 @@ def configure_shared_state(
     )
     want_gemini = fetch_all or "gemini" in tools or "opencode" in tools or "pi" in tools
     want_codex = fetch_all or "codex" in tools or "copilot" in tools or "pi" in tools
+    want_oss = fetch_all or "pi" in tools
 
     claude_reason: str | None = None
     gemini_reason: str | None = None
     codex_reason: str | None = None
+    oss_reason: str | None = None
     with spinner("Fetching available models..."):
         if want_claude:
             claude_models, claude_reason = discover_claude_models(workspace, token)
@@ -167,6 +170,10 @@ def configure_shared_state(
             codex_models, codex_reason = discover_codex_models(workspace, token)
         else:
             codex_models = []
+        if want_oss:
+            oss_models, oss_reason = discover_oss_models(workspace, token)
+        else:
+            oss_models = []
     opencode_models: dict[str, list[str]] = {}
     if claude_models:
         opencode_models["anthropic"] = list(claude_models.values())
@@ -183,6 +190,8 @@ def configure_shared_state(
         state["gemini_models"] = gemini_models
     if want_codex:
         state["codex_models"] = codex_models
+    if want_oss:
+        state["oss_models"] = oss_models
     if fetch_all or "opencode" in tools:
         state["opencode_models"] = opencode_models
     save_state(state)
@@ -192,6 +201,7 @@ def configure_shared_state(
         "claude": claude_reason,
         "gemini": gemini_reason,
         "codex": codex_reason,
+        "oss": oss_reason,
     }
     return state
 
