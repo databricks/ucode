@@ -116,8 +116,10 @@ def _pi_oss_model_entry(model_id: str, spec: dict | None) -> dict:
     """Build a Pi mlflow model entry, enriched from the gateway capability spec.
 
     Sets `reasoning: true` when the model reports `openai_reasoning` (Pi renders
-    the gateway's reasoning_content as thinking) and `contextWindow` when the
-    gateway states one. Fields are omitted when unknown so Pi keeps its default.
+    the gateway's reasoning_content as thinking), `contextWindow` when the
+    gateway states one, and `maxTokens` to the gateway's per-model output
+    ceiling (so requests don't 400). Fields are omitted when unknown so Pi
+    keeps its default.
     """
     entry: dict = {"id": model_id}
     if not spec:
@@ -126,6 +128,8 @@ def _pi_oss_model_entry(model_id: str, spec: dict | None) -> dict:
         entry["reasoning"] = True
     if spec.get("context_window"):
         entry["contextWindow"] = spec["context_window"]
+    if spec.get("max_tokens"):
+        entry["maxTokens"] = spec["max_tokens"]
     return entry
 
 

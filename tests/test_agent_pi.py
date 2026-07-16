@@ -99,8 +99,15 @@ class TestRenderOverlayProviders:
         overlay, _ = _overlay("databricks-inkling", oss_models=["databricks-inkling"])
         assert overlay["providers"]["databricks-mlflow"]["models"] == [{"id": "databricks-inkling"}]
 
-    def test_mlflow_model_enriched_with_reasoning_and_context(self):
-        specs = [{"id": "databricks-glm-5-2", "reasoning": True, "context_window": 1_000_000}]
+    def test_mlflow_model_enriched_with_reasoning_context_and_max_tokens(self):
+        specs = [
+            {
+                "id": "databricks-glm-5-2",
+                "reasoning": True,
+                "context_window": 1_000_000,
+                "max_tokens": 65536,
+            }
+        ]
         overlay, _ = _overlay(
             "databricks-glm-5-2", oss_models=["databricks-glm-5-2"], oss_specs=specs
         )
@@ -108,22 +115,39 @@ class TestRenderOverlayProviders:
         assert entry["id"] == "databricks-glm-5-2"
         assert entry["reasoning"] is True
         assert entry["contextWindow"] == 1_000_000
+        assert entry["maxTokens"] == 65536
 
-    def test_mlflow_model_omits_context_when_unstated(self):
-        specs = [{"id": "databricks-inkling", "reasoning": True, "context_window": None}]
+    def test_mlflow_model_omits_unknown_fields(self):
+        specs = [
+            {
+                "id": "databricks-inkling",
+                "reasoning": True,
+                "context_window": None,
+                "max_tokens": None,
+            }
+        ]
         overlay, _ = _overlay(
             "databricks-inkling", oss_models=["databricks-inkling"], oss_specs=specs
         )
         entry = overlay["providers"]["databricks-mlflow"]["models"][0]
         assert entry["reasoning"] is True
         assert "contextWindow" not in entry
+        assert "maxTokens" not in entry
 
     def test_mlflow_model_no_reasoning_key_when_false(self):
-        specs = [{"id": "databricks-llama", "reasoning": False, "context_window": 128_000}]
+        specs = [
+            {
+                "id": "databricks-llama",
+                "reasoning": False,
+                "context_window": 128_000,
+                "max_tokens": 8192,
+            }
+        ]
         overlay, _ = _overlay("databricks-llama", oss_models=["databricks-llama"], oss_specs=specs)
         entry = overlay["providers"]["databricks-mlflow"]["models"][0]
         assert "reasoning" not in entry
         assert entry["contextWindow"] == 128_000
+        assert entry["maxTokens"] == 8192
 
     def test_all_four_providers_when_all_present(self):
         overlay, _ = _overlay(

@@ -202,22 +202,45 @@ class TestRenderOverlayOss:
     def test_provider_keys_listed_in_module(self):
         assert ["provider", "databricks-oss"] in opencode.PROVIDER_KEYS
 
-    def test_oss_model_sets_limit_context_when_stated(self):
+    def test_oss_model_sets_limit_context_and_output_when_known(self):
         models = {"oss": ["databricks-glm-5-2"]}
-        specs = [{"id": "databricks-glm-5-2", "reasoning": True, "context_window": 1_000_000}]
+        specs = [
+            {
+                "id": "databricks-glm-5-2",
+                "reasoning": True,
+                "context_window": 1_000_000,
+                "max_tokens": 65536,
+            }
+        ]
         overlay, _ = opencode.render_overlay(
             "databricks-glm-5-2", "tok", _base_urls(), models, specs
         )
         entry = overlay["provider"]["databricks-oss"]["models"]["databricks-glm-5-2"]
-        assert entry["limit"] == {"context": 1_000_000}
+        assert entry["limit"] == {"context": 1_000_000, "output": 65536}
 
-    def test_oss_model_omits_limit_when_unstated(self):
+    def test_oss_model_output_only_when_context_unstated(self):
         models = {"oss": ["databricks-inkling"]}
-        specs = [{"id": "databricks-inkling", "reasoning": True, "context_window": None}]
+        specs = [
+            {
+                "id": "databricks-inkling",
+                "reasoning": True,
+                "context_window": None,
+                "max_tokens": 65536,
+            }
+        ]
         overlay, _ = opencode.render_overlay(
             "databricks-inkling", "tok", _base_urls(), models, specs
         )
         entry = overlay["provider"]["databricks-oss"]["models"]["databricks-inkling"]
+        assert entry["limit"] == {"output": 65536}
+
+    def test_oss_model_omits_limit_when_nothing_known(self):
+        models = {"oss": ["databricks-x"]}
+        specs = [
+            {"id": "databricks-x", "reasoning": False, "context_window": None, "max_tokens": None}
+        ]
+        overlay, _ = opencode.render_overlay("databricks-x", "tok", _base_urls(), models, specs)
+        entry = overlay["provider"]["databricks-oss"]["models"]["databricks-x"]
         assert "limit" not in entry
 
 

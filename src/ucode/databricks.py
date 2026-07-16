@@ -869,15 +869,37 @@ def _parse_context_window(description: str) -> int | None:
     return int(value * multiplier)
 
 
+# Per-model max output-token ceilings enforced by the mlflow gateway. These are
+# NOT exposed by any metadata API — the gateway only reveals them by 400ing an
+# oversized request ("max_tokens (N) cannot exceed <cap>"). Values probed
+# 2026-07-16; if the gateway raises a cap or adds a model, this may go stale, so
+# unknown ids get NO override (client keeps its default) rather than a guess.
+_OSS_MAX_OUTPUT_TOKENS: dict[str, int] = {
+    "databricks-glm-5-2": 65536,
+    "databricks-inkling": 65536,
+    "databricks-kimi-k2-7-code": 65536,
+    "databricks-gpt-oss-120b": 25000,
+    "databricks-gpt-oss-20b": 25000,
+    "databricks-qwen35-122b-a10b": 25000,
+    "databricks-qwen3-next-80b-a3b-instruct": 10000,
+    "databricks-llama-4-maverick": 8192,
+    "databricks-meta-llama-3-1-8b-instruct": 8192,
+    "databricks-meta-llama-3-3-70b-instruct": 8192,
+    "databricks-gemma-3-12b": 8192,
+}
+
+
 def discover_oss_model_specs(workspace: str, token: str) -> tuple[list[dict], str | None]:
     """Discover OSS (mlflow chat-completions-only) models with capability specs.
 
     Same endpoint selection as `discover_oss_models`, but returns per-model
-    dicts ``{"id", "reasoning", "context_window"}`` so adapters can enrich Pi /
-    OpenCode config. ``reasoning`` comes from the endpoint's structured
-    ``capabilities.openai_reasoning`` (reliable). ``context_window`` is parsed
-    from the free-text description and is ``None`` when not stated (we never
-    fabricate a window we don't know). Returns (specs, reason).
+    dicts ``{"id", "reasoning", "context_window", "max_tokens"}`` so adapters
+    can enrich Pi / OpenCode config. ``reasoning`` comes from the endpoint's
+    structured ``capabilities.openai_reasoning`` (reliable). ``context_window``
+    is parsed from the free-text description and is ``None`` when not stated.
+    ``max_tokens`` is the gateway's per-model output ceiling from
+    ``_OSS_MAX_OUTPUT_TOKENS``, or ``None`` for models we haven't probed. We
+    never fabricate a window or cap we don't know. Returns (specs, reason).
     """
     hostname = workspace_hostname(workspace)
     payload, reason = _http_get_json(
@@ -901,11 +923,13 @@ def discover_oss_model_specs(workspace: str, token: str) -> tuple[list[dict], st
             continue
         if api_types & _NATIVE_PROVIDER_API_TYPES:
             continue
+        name = ep.get("name", "")
         specs.append(
             {
-                "id": ep.get("name", ""),
+                "id": name,
                 "reasoning": bool(ep.get("capabilities", {}).get("openai_reasoning")),
                 "context_window": _parse_context_window(description),
+                "max_tokens": _OSS_MAX_OUTPUT_TOKENS.get(name),
             }
         )
     if specs:

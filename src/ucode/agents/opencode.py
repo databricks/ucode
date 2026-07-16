@@ -82,11 +82,19 @@ def _resolve_model_selector(model: str, opencode_models: dict[str, list[str]]) -
 
 def _oss_model_entry(ua_header: dict, spec: dict | None) -> dict:
     """Build an opencode oss model entry. @ai-sdk/openai surfaces reasoning
-    automatically, so only set `limit.context` when the gateway states a
-    context window; omit it otherwise so opencode keeps its default."""
+    automatically, so we only set `limit`: `context` from the gateway's stated
+    context window and `output` from its per-model max-output ceiling. Each is
+    included only when known; omit the whole `limit` if neither is."""
     entry: dict = {"headers": ua_header}
-    if spec and spec.get("context_window"):
-        entry["limit"] = {"context": spec["context_window"]}
+    if not spec:
+        return entry
+    limit = {}
+    if spec.get("context_window"):
+        limit["context"] = spec["context_window"]
+    if spec.get("max_tokens"):
+        limit["output"] = spec["max_tokens"]
+    if limit:
+        entry["limit"] = limit
     return entry
 
 

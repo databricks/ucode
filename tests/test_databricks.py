@@ -294,6 +294,33 @@ class TestDiscoverOssModelSpecs:
         # inkling states no window -> None (we never fabricate one).
         assert by_id["databricks-inkling"]["context_window"] is None
 
+    def test_max_tokens_from_known_caps(self):
+        with self._patch(self._PAYLOAD):
+            specs, _ = discover_oss_model_specs(WS, "tok")
+        by_id = {s["id"]: s for s in specs}
+        # Probed gateway ceilings baked into _OSS_MAX_OUTPUT_TOKENS.
+        assert by_id["databricks-glm-5-2"]["max_tokens"] == 65536
+        assert by_id["databricks-inkling"]["max_tokens"] == 65536
+        assert by_id["databricks-llama-4-maverick"]["max_tokens"] == 8192
+
+    def test_max_tokens_none_for_unprobed_model(self):
+        payload = {
+            "endpoints": [
+                {
+                    "name": "databricks-some-new-model",
+                    "capabilities": {"openai_reasoning": False},
+                    "config": {
+                        "served_entities": [
+                            {"foundation_model": {"api_types": ["mlflow/v1/chat/completions"]}}
+                        ]
+                    },
+                }
+            ]
+        }
+        with self._patch(payload):
+            specs, _ = discover_oss_model_specs(WS, "tok")
+        assert specs[0]["max_tokens"] is None
+
     def test_propagates_http_failure(self):
         with self._patch(None, "HTTP 401"):
             specs, reason = discover_oss_model_specs(WS, "tok")

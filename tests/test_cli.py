@@ -664,7 +664,14 @@ class TestConfigureSharedStateOssWiring:
             cli_mod,
             "discover_oss_model_specs",
             lambda ws, tok: (
-                [{"id": "databricks-inkling", "reasoning": True, "context_window": None}],
+                [
+                    {
+                        "id": "databricks-inkling",
+                        "reasoning": True,
+                        "context_window": None,
+                        "max_tokens": 65536,
+                    }
+                ],
                 None,
             ),
         )
