@@ -642,3 +642,41 @@ class TestConfigureAgentsSelection:
         ]
         assert saved == ["https://first.com"]
         assert configured_tools == [("https://first.com", ["codex"])]
+
+
+class TestConfigureSharedStateOssWiring:
+    """configure_shared_state must fetch mlflow-only (oss) models and route
+    them into both state['oss_models'] (Pi) and opencode_models['oss']
+    (OpenCode) when pi/opencode are requested. Guards the discovery->state seam
+    the mlflow-provider work depends on."""
+
+    def _run(self, monkeypatch, tools):
+        import ucode.cli as cli_mod
+
+        saved = {}
+        monkeypatch.setattr(cli_mod, "ensure_databricks_auth", lambda ws: None)
+        monkeypatch.setattr(cli_mod, "get_databricks_token", lambda ws, **k: "tok")
+        monkeypatch.setattr(cli_mod, "ensure_ai_gateway_v2", lambda ws, tok: None)
+        monkeypatch.setattr(cli_mod, "discover_claude_models", lambda ws, tok: ({}, None))
+        monkeypatch.setattr(cli_mod, "discover_gemini_models", lambda ws, tok: ([], None))
+        monkeypatch.setattr(cli_mod, "discover_codex_models", lambda ws, tok: ([], None))
+        monkeypatch.setattr(
+            cli_mod, "discover_oss_models", lambda ws, tok: (["databricks-inkling"], None)
+        )
+        monkeypatch.setattr(cli_mod, "load_state", lambda: {})
+        monkeypatch.setattr(cli_mod, "save_state", lambda s: saved.update(s))
+        return cli_mod.configure_shared_state("https://ws.databricks.com", tools=tools)
+
+    def test_oss_models_in_state_for_pi(self, monkeypatch):
+        state = self._run(monkeypatch, ["pi"])
+        assert state["oss_models"] == ["databricks-inkling"]
+
+    def test_oss_models_routed_to_opencode(self, monkeypatch):
+        state = self._run(monkeypatch, ["opencode"])
+        assert state["oss_models"] == ["databricks-inkling"]
+        assert state["opencode_models"]["oss"] == ["databricks-inkling"]
+
+    def test_oss_not_fetched_for_unrelated_tool(self, monkeypatch):
+        # A claude-only configure should not populate oss_models.
+        state = self._run(monkeypatch, ["claude"])
+        assert not state.get("oss_models")
