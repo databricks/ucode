@@ -465,8 +465,22 @@ def validate_tool(tool: str) -> tuple[bool, str]:
         except RuntimeError:
             env = None
     try:
+        # stdin=DEVNULL: the validate command is a one-shot smoke test (e.g.
+        # `pi --print "say hi..."`) that never needs interactive input. Some
+        # agent CLIs still open stdin in print mode and block on it; without
+        # this, `subprocess.run` inherits our stdin, so when ucode itself is
+        # launched from a non-interactive parent whose stdin is an open pipe
+        # with no EOF (e.g. an agent harness spawning `ucode <tool>`), the
+        # validation subprocess hangs until the 60s timeout and reports a
+        # spurious "timed out" / "validation failed".
         result = subprocess.run(
-            cmd, check=False, capture_output=True, text=True, timeout=60, env=env
+            cmd,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env=env,
+            stdin=subprocess.DEVNULL,
         )
         if result.returncode == 0:
             return True, ""
