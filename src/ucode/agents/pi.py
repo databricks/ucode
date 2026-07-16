@@ -25,6 +25,11 @@ models (Llama, Qwen, GLM, inkling, ...) that have no native Anthropic /
 OpenAI-responses / Gemini surface. Endpoints already served by one of the
 other three providers are filtered out upstream so they aren't listed twice.
 
+At launch the mlflow provider is routed through a local SSE-repair proxy (see
+`_mlflow_proxy`) that injects the `finish_reason` some models (inkling) omit on
+the streaming terminal chunk, which Pi's parser otherwise rejects. The proxy is
+a no-op for well-behaved models and can be removed once the gateway is fixed.
+
 The bearer token is baked into the file and refreshed by a background thread
 while the session runs (same pattern as OpenCode/Copilot).
 """
@@ -37,6 +42,7 @@ import subprocess
 import threading
 
 from ucode.agent_updates import available_npm_package_update
+from ucode.agents import _mlflow_proxy
 from ucode.config_io import (
     APP_DIR,
     ToolSpec,
@@ -251,7 +257,30 @@ def build_runtime_env(token: str) -> dict[str, str]:
     return env
 
 
+def _start_oss_proxy(state: dict) -> threading.Event | None:
+    """Route the mlflow provider through the local SSE-repair proxy.
+
+    Rewrites ``state["base_urls"]["pi"]["oss"]`` in-memory to the proxy origin
+    so both the initial config write and every token-refresh rewrite point Pi
+    at the proxy. Returns the proxy's stop event, or None when no OSS models
+    are configured (nothing to proxy). See `_mlflow_proxy` for the why.
+    """
+    if not (state.get("oss_models") or []):
+        return None
+    pi_urls = state.setdefault("base_urls", {}).setdefault(
+        "pi", build_pi_base_urls(state["workspace"])
+    )
+    gateway_oss = pi_urls.get("oss") or build_pi_base_urls(state["workspace"])["oss"]
+    # Proxy forwards to the gateway origin; it re-appends the /ai-gateway/... path
+    # Pi sends, so strip the suffix to get the bare origin.
+    origin = gateway_oss.split("/ai-gateway/", 1)[0]
+    proxy_base, stop_event = _mlflow_proxy.start(origin)
+    pi_urls["oss"] = f"{proxy_base}/ai-gateway/mlflow/v1"
+    return stop_event
+
+
 def launch(state: dict, tool_args: list[str]) -> None:
+    proxy_stop = _start_oss_proxy(state)
     token = _refresh_token_once(state)
     env = build_runtime_env(token)
 
@@ -272,6 +301,8 @@ def launch(state: dict, tool_args: list[str]) -> None:
     finally:
         stop_event.set()
         refresher.join(timeout=1)
+        if proxy_stop is not None:
+            proxy_stop.set()
 
     raise SystemExit(returncode)
 

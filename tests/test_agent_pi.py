@@ -271,6 +271,28 @@ class TestPiDefaultModel:
         )
 
 
+class TestStartOssProxy:
+    def test_none_when_no_oss_models(self):
+        state = {"workspace": WS, "oss_models": []}
+        assert pi._start_oss_proxy(state) is None
+
+    def test_rewrites_oss_base_url_to_proxy(self):
+        state = {
+            "workspace": WS,
+            "oss_models": ["databricks-inkling"],
+            "base_urls": {"pi": {"oss": f"{WS}/ai-gateway/mlflow/v1"}},
+        }
+        with patch.object(
+            pi._mlflow_proxy, "start", return_value=("http://127.0.0.1:5000", object())
+        ) as started:
+            stop = pi._start_oss_proxy(state)
+        # Proxy is fed the bare gateway origin (path suffix stripped)...
+        started.assert_called_once_with(WS)
+        # ...and the mlflow provider now targets the local proxy.
+        assert state["base_urls"]["pi"]["oss"] == "http://127.0.0.1:5000/ai-gateway/mlflow/v1"
+        assert stop is not None
+
+
 class TestBuildRuntimeEnv:
     def test_sets_oauth_token(self):
         env = pi.build_runtime_env("tok")
