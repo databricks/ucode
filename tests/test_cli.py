@@ -630,9 +630,7 @@ class TestConfigureAgentFlag:
             patch("ucode.cli.install_tool_binary"),
             patch("ucode.cli.configure_workspace_command") as mock_cfg,
         ):
-            result = runner.invoke(
-                app, ["configure", "--enable-fable", "--agents", "claude,codex"]
-            )
+            result = runner.invoke(app, ["configure", "--enable-fable", "--agents", "claude,codex"])
         assert result.exit_code == 0, result.output
         mock_cfg.assert_called_once_with(
             selected_tools=["claude", "codex"],
