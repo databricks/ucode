@@ -151,7 +151,7 @@ def configure_shared_state(
     )
     want_gemini = fetch_all or "gemini" in tools or "opencode" in tools or "pi" in tools
     want_codex = fetch_all or "codex" in tools or "copilot" in tools or "pi" in tools
-    want_oss = fetch_all or "pi" in tools
+    want_oss = fetch_all or "pi" in tools or "opencode" in tools
 
     claude_reason: str | None = None
     gemini_reason: str | None = None
@@ -179,6 +179,8 @@ def configure_shared_state(
         opencode_models["anthropic"] = list(claude_models.values())
     if gemini_models:
         opencode_models["gemini"] = gemini_models
+    if oss_models:
+        opencode_models["oss"] = oss_models
 
     # Merge into existing workspace state so prior tool configs are preserved.
     state = load_state()

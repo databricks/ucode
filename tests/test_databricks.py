@@ -82,6 +82,10 @@ class TestBuildOpencodeBaseUrls:
         assert urls["anthropic"] == f"{WS}/ai-gateway/anthropic/v1"
         assert urls["gemini"] == f"{WS}/ai-gateway/gemini/v1beta"
 
+    def test_oss_points_at_mlflow_gateway(self):
+        urls = build_opencode_base_urls(WS)
+        assert urls["oss"] == f"{WS}/ai-gateway/mlflow/v1"
+
 
 class TestBuildSharedBaseUrls:
     def test_contains_all_tools(self):

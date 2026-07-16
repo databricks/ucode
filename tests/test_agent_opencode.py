@@ -14,6 +14,7 @@ def _base_urls() -> dict[str, str]:
     return {
         "anthropic": f"{WS}/ai-gateway/anthropic/v1",
         "gemini": f"{WS}/ai-gateway/gemini/v1beta",
+        "oss": f"{WS}/ai-gateway/mlflow/v1",
     }
 
 
@@ -152,6 +153,56 @@ class TestRenderOverlay:
         assert overlay["model"] == "databricks-google/gemini-2"
 
 
+class TestRenderOverlayOss:
+    """mlflow chat-completions-only foundation models (inkling, glm, ...) reach
+    OpenCode via a databricks-oss provider using @ai-sdk/openai in legacy
+    chat-completions mode. No SSE-repair proxy is needed (unlike Pi) because
+    @ai-sdk/openai tolerates the finish_reason inkling omits."""
+
+    def test_oss_provider_added_when_oss_models_present(self):
+        models = {"oss": ["databricks-inkling"]}
+        overlay, _ = opencode.render_overlay("databricks-inkling", "tok", _base_urls(), models)
+        assert "databricks-oss" in overlay["provider"]
+
+    def test_oss_provider_uses_ai_sdk_openai_npm(self):
+        models = {"oss": ["databricks-inkling"]}
+        overlay, _ = opencode.render_overlay("databricks-inkling", "tok", _base_urls(), models)
+        assert overlay["provider"]["databricks-oss"]["npm"] == "@ai-sdk/openai"
+
+    def test_oss_base_url_points_at_mlflow_gateway(self):
+        models = {"oss": ["databricks-inkling"]}
+        overlay, _ = opencode.render_overlay("databricks-inkling", "tok", _base_urls(), models)
+        options = overlay["provider"]["databricks-oss"]["options"]
+        assert options["baseURL"] == f"{WS}/ai-gateway/mlflow/v1"
+
+    def test_oss_does_not_use_responses_api(self):
+        # Distinct from the codex provider: mlflow route is chat-completions,
+        # so useResponsesApi must NOT be set on oss models.
+        models = {"oss": ["databricks-inkling"]}
+        overlay, _ = opencode.render_overlay("databricks-inkling", "tok", _base_urls(), models)
+        entry = overlay["provider"]["databricks-oss"]["models"]["databricks-inkling"]
+        assert "options" not in entry or "useResponsesApi" not in entry.get("options", {})
+
+    def test_oss_authorization_header(self):
+        models = {"oss": ["databricks-inkling"]}
+        overlay, _ = opencode.render_overlay("databricks-inkling", "tok", _base_urls(), models)
+        headers = overlay["provider"]["databricks-oss"]["options"]["headers"]
+        assert headers["Authorization"] == "Bearer tok"
+
+    def test_prefixes_oss_model_with_provider_id(self):
+        models = {"oss": ["databricks-inkling"]}
+        overlay, _ = opencode.render_overlay("databricks-inkling", "tok", _base_urls(), models)
+        assert overlay["model"] == "databricks-oss/databricks-inkling"
+
+    def test_managed_keys_include_oss_provider(self):
+        models = {"oss": ["databricks-inkling"]}
+        _, keys = opencode.render_overlay("databricks-inkling", "tok", _base_urls(), models)
+        assert ["provider", "databricks-oss"] in keys
+
+    def test_provider_keys_listed_in_module(self):
+        assert ["provider", "databricks-oss"] in opencode.PROVIDER_KEYS
+
+
 class TestMcpServerConfig:
     def test_builds_remote_server_entry_with_oauth_token_env_header(self):
         entry = opencode.build_mcp_server_entry(f"{WS}/api/2.0/mcp/external/github")
@@ -267,6 +318,10 @@ class TestOpencodeDefaultModel:
     def test_falls_back_to_gemini(self):
         state = {"opencode_models": {"anthropic": [], "gemini": ["gemini-2"]}}
         assert opencode.default_model(state) == "gemini-2"
+
+    def test_falls_back_to_oss_last(self):
+        state = {"opencode_models": {"anthropic": [], "gemini": [], "oss": ["databricks-inkling"]}}
+        assert opencode.default_model(state) == "databricks-inkling"
 
     def test_returns_none_when_empty(self):
         assert opencode.default_model({}) is None

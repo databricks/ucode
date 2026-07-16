@@ -1006,6 +1006,9 @@ def build_opencode_base_urls(workspace: str) -> dict[str, str]:
     return {
         "anthropic": build_tool_base_url("claude", workspace) + "/v1",
         "gemini": build_tool_base_url("gemini", workspace) + "/v1beta",
+        # @ai-sdk/openai (chat-completions mode) appends `/chat/completions`, so
+        # stop before that suffix. Carries mlflow-only models (inkling, glm, ...).
+        "oss": f"{workspace}/ai-gateway/mlflow/v1",
     }
 
 
