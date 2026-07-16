@@ -84,6 +84,18 @@ class TestRenderOverlay:
         overlay, _ = claude.render_overlay(WS, "s4")
         assert overlay["env"]["CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS"] == "1"
 
+    def test_disables_thinking(self):
+        # Claude Code's `thinking.type=enabled` field is rejected by the
+        # Databricks AI Gateway for adaptive-only models (Opus 4.7 family).
+        # The gateway applies adaptive reasoning server-side regardless, so
+        # ucode disables Claude Code's client-side thinking unconditionally.
+        overlay, _ = claude.render_overlay(WS, "s4")
+        assert overlay["env"]["CLAUDE_CODE_DISABLE_THINKING"] == "1"
+
+    def test_disable_thinking_is_managed(self):
+        _, keys = claude.render_overlay(WS, "s4")
+        assert ["env", "CLAUDE_CODE_DISABLE_THINKING"] in keys
+
     def test_sets_api_key_helper(self):
         overlay, _ = claude.render_overlay(WS, "s4")
         assert "apiKeyHelper" in overlay
