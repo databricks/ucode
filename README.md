@@ -13,6 +13,10 @@
 uv tool install git+https://github.com/databricks/ucode
 ```
 
+Check your version with `ucode --version`. Between releases this looks like
+`0.1.0+14.g93986a8` — the trailing `g<hash>` is the exact commit the build came
+from, so include it when reporting a bug.
+
 ---
 
 ## Usage
@@ -38,6 +42,17 @@ ucode codex --full-auto
 ```
 
 All agents route through Databricks AI Gateway using your workspace credentials — no API keys required.
+
+### Codex desktop app
+
+`ucode codex-app` points the Codex desktop app (macOS/Windows) at Databricks and opens it. The app reads only the root `~/.codex/config.toml`, so ucode backs that file up and edits it in place (unlike `ucode codex`, which uses an isolated profile). If Codex is already running, ucode offers to restart it so the change takes effect.
+
+```bash
+ucode codex-app             # configure + open the desktop app
+ucode codex-app --restore   # put the app's config back
+```
+
+`ucode revert` also restores the desktop app config.
 
 To configure all tools at once:
 
