@@ -270,10 +270,11 @@ def _start_oss_proxy(state: dict) -> threading.Event | None:
     pi_urls = state.setdefault("base_urls", {}).setdefault(
         "pi", build_pi_base_urls(state["workspace"])
     )
-    gateway_oss = pi_urls.get("oss") or build_pi_base_urls(state["workspace"])["oss"]
-    # Proxy forwards to the gateway origin; it re-appends the /ai-gateway/... path
-    # Pi sends, so strip the suffix to get the bare origin.
-    origin = gateway_oss.split("/ai-gateway/", 1)[0]
+    # Always derive the gateway origin from the workspace, NOT from the
+    # persisted `oss` URL: a prior session may have baked a now-dead proxy port
+    # (http://127.0.0.1:<port>) into state/config. Trusting it would proxy a
+    # dead proxy. build_pi_base_urls always yields the real gateway URL.
+    origin = build_pi_base_urls(state["workspace"])["oss"].split("/ai-gateway/", 1)[0]
     proxy_base, stop_event = _mlflow_proxy.start(origin)
     pi_urls["oss"] = f"{proxy_base}/ai-gateway/mlflow/v1"
     return stop_event

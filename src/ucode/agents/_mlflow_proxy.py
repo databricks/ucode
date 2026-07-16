@@ -7,11 +7,14 @@ Strict clients — Pi's ``openai-completions`` parser among them — reject this
 with "Stream ended without finish_reason", so the model is unusable.
 
 This proxy sits between Pi and the gateway. It forwards every request verbatim
-and passes every response byte through unchanged, except that when a streaming
-response reaches ``[DONE]`` without any chunk having carried a ``finish_reason``
-it injects a synthetic ``finish_reason: "stop"`` chunk first. Models that
-already terminate correctly (glm, llama, qwen, ...) never trigger the injection,
-so the proxy is a no-op for them.
+and passes every response byte through unchanged, except that it repairs the
+stream terminator: when a streaming response ends — cleanly at ``[DONE]`` OR
+abnormally (an upstream drop / mid-stream 429, which otherwise reaches Pi as
+"Stream ended without finish_reason") — after some data but without a
+``finish_reason``, it synthesizes a ``finish_reason: "stop"`` chunk (and a
+``[DONE]`` if the upstream never sent one). Models that already terminate
+correctly (glm, llama, qwen, ...) never trigger the injection, so the proxy is
+a no-op for them.
 
 Tracked upstream as the gateway bug that should make this unnecessary; once the
 gateway emits ``finish_reason`` this module can be deleted.
@@ -60,25 +63,44 @@ def _make_handler(upstream: str) -> type[BaseHTTPRequestHandler]:
 
         def _relay_stream(self, upstream_resp) -> None:
             saw_finish = False
+            saw_done = False
+            saw_data = False
             last_id: str | None = None
-            for raw in upstream_resp:  # yields line-by-line as bytes arrive
-                stripped = raw.strip()
-                if stripped.startswith(b"data: ") and stripped[6:] != b"[DONE]":
-                    try:
-                        obj = json.loads(stripped[6:])
-                        last_id = obj.get("id", last_id)
-                        choice = (obj.get("choices") or [{}])[0]
-                        if choice.get("finish_reason"):
+            try:
+                for raw in upstream_resp:  # yields line-by-line as bytes arrive
+                    stripped = raw.strip()
+                    if stripped.startswith(b"data: ") and stripped[6:] != b"[DONE]":
+                        saw_data = True
+                        try:
+                            obj = json.loads(stripped[6:])
+                            last_id = obj.get("id", last_id)
+                            choice = (obj.get("choices") or [{}])[0]
+                            if choice.get("finish_reason"):
+                                saw_finish = True
+                        except (ValueError, AttributeError, IndexError):
+                            pass
+                        self._write(raw)
+                    elif stripped == b"data: [DONE]":
+                        if not saw_finish:
+                            self._write(b"data: " + _finish_chunk(last_id) + b"\n\n")
                             saw_finish = True
-                    except (ValueError, AttributeError, IndexError):
-                        pass
-                    self._write(raw)
-                elif stripped == b"data: [DONE]":
-                    if not saw_finish:
-                        self._write(b"data: " + _finish_chunk(last_id) + b"\n\n")
-                    self._write(raw)
-                else:
-                    self._write(raw)
+                        self._write(raw)
+                        saw_done = True
+                    else:
+                        self._write(raw)
+            except OSError:
+                # Upstream stream dropped mid-flight (throttle/reset). Fall
+                # through to the terminator repair below so the client still
+                # sees a well-formed end instead of a truncated stream.
+                pass
+            # If the stream ended (cleanly or abnormally) after some data but
+            # without a finish_reason and/or [DONE], synthesize the terminator
+            # so strict clients (Pi) don't error on an incomplete stream. A
+            # gateway 429 mid-stream is the common trigger.
+            if saw_data and not saw_finish:
+                self._write(b"data: " + _finish_chunk(last_id) + b"\n\n")
+            if saw_data and not saw_done:
+                self._write(b"data: [DONE]\n\n")
 
         def _write(self, data: bytes) -> None:
             self.wfile.write(data)

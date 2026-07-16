@@ -18,6 +18,9 @@ _STREAM_WITH_FINISH = (
     b'data: {"id":"c2","choices":[{"delta":{},"finish_reason":"stop","index":0}]}\n\n'
     b"data: [DONE]\n\n"
 )
+# An abnormally-terminated stream: content delta, then the upstream just stops —
+# no finish_reason AND no [DONE] (what a mid-stream 429/drop looks like).
+_STREAM_ABRUPT_END = b'data: {"id":"c3","choices":[{"delta":{"content":"ok"},"index":0}]}\n\n'
 
 
 def _make_fake_gateway(payload: bytes) -> tuple[str, HTTPServer]:
@@ -81,6 +84,19 @@ class TestFinishReasonInjection:
             out = _post_through_proxy(upstream)
         finally:
             server.shutdown()
+        assert '"content":"ok"' in out
+
+    def test_repairs_abrupt_end_with_finish_and_done(self):
+        # Upstream stopped after content with no finish_reason and no [DONE]
+        # (mid-stream 429/drop). Proxy must synthesize BOTH so a strict client
+        # doesn't error on a truncated stream.
+        upstream, server = _make_fake_gateway(_STREAM_ABRUPT_END)
+        try:
+            out = _post_through_proxy(upstream)
+        finally:
+            server.shutdown()
+        assert "finish_reason" in out
+        assert out.rstrip().endswith("[DONE]")
         assert '"content":"ok"' in out
 
 

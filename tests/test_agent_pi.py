@@ -292,6 +292,22 @@ class TestStartOssProxy:
         assert state["base_urls"]["pi"]["oss"] == "http://127.0.0.1:5000/ai-gateway/mlflow/v1"
         assert stop is not None
 
+    def test_ignores_stale_persisted_proxy_url_as_origin(self):
+        # A prior session baked a now-dead proxy port into state["...]["oss"].
+        # The proxy must forward to the real gateway, NOT the stale proxy URL,
+        # or it would proxy a dead port (the cross-session finish_reason bug).
+        state = {
+            "workspace": WS,
+            "oss_models": ["databricks-inkling"],
+            "base_urls": {"pi": {"oss": "http://127.0.0.1:58793/ai-gateway/mlflow/v1"}},
+        }
+        with patch.object(
+            pi._mlflow_proxy, "start", return_value=("http://127.0.0.1:6000", object())
+        ) as started:
+            pi._start_oss_proxy(state)
+        # Origin is the gateway derived from workspace, never the stale localhost.
+        started.assert_called_once_with(WS)
+
 
 class TestBuildRuntimeEnv:
     def test_sets_oauth_token(self):
