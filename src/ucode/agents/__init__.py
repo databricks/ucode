@@ -466,7 +466,13 @@ def validate_tool(tool: str) -> tuple[bool, str]:
             env = None
     try:
         result = subprocess.run(
-            cmd, check=False, capture_output=True, text=True, timeout=60, env=env
+            cmd,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env=env,
+            stdin=subprocess.DEVNULL,
         )
         if result.returncode == 0:
             return True, ""

@@ -567,3 +567,37 @@ class TestValidateAllToolsVerbosity:
         assert "Ready" not in out
         # Per-tool success line is still printed.
         assert "Codex is working" in out
+
+
+class TestValidateTool:
+    def test_runs_validate_command_with_stdin_devnull(self, monkeypatch):
+        # Regression guard: the validation smoke test must never inherit the
+        # caller's stdin, or it hangs to the timeout when ucode is launched
+        # from a non-interactive parent whose stdin is an open pipe.
+        captured: dict = {}
+
+        def fake_run(cmd, **kwargs):
+            captured["cmd"] = cmd
+            captured["kwargs"] = kwargs
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        monkeypatch.setattr("ucode.agents.subprocess.run", fake_run)
+        monkeypatch.setattr(agents_mod, "load_state", lambda: {})
+
+        ok, err = agents_mod.validate_tool("codex")
+
+        assert ok is True
+        assert err == ""
+        assert captured["kwargs"].get("stdin") is subprocess.DEVNULL
+
+    def test_reports_timed_out_on_timeout(self, monkeypatch):
+        def fake_run(cmd, **kwargs):
+            raise subprocess.TimeoutExpired(cmd, 60)
+
+        monkeypatch.setattr("ucode.agents.subprocess.run", fake_run)
+        monkeypatch.setattr(agents_mod, "load_state", lambda: {})
+
+        ok, err = agents_mod.validate_tool("codex")
+
+        assert ok is False
+        assert err == "timed out"
