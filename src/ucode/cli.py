@@ -217,6 +217,7 @@ def configure_shared_state(
     use_pat: bool | None = None,
     skip_model_discovery: bool = False,
     skip_preflight: bool = False,
+    fable_enabled: bool | None = None,
 ) -> dict:
     """Log into Databricks, enforce AI Gateway v2, fetch model lists, persist state.
 
@@ -236,12 +237,18 @@ def configure_shared_state(
     in ``_launch_tool``) and the gateway was verified by that earlier configure.
     Only the local profile resolution and the shared state assembly still run;
     the saved model lists are preserved.
+    ``fable_enabled`` opts the premium Claude Fable family into Claude Code's
+    ``ANTHROPIC_DEFAULT_FABLE_MODEL`` pin (default off). ``None`` means "inherit":
+    a launch re-run keeps whatever the workspace was configured with; ``True``/
+    ``False`` come from an explicit ``configure --enable-fable``/``--disable-fable``.
     """
     workspace = normalize_workspace_url(workspace)
     prior_state = load_state()
     previous_workspace = prior_state.get("workspace")
     if use_pat is None:
         use_pat = bool(prior_state.get("use_pat")) and previous_workspace == workspace
+    if fable_enabled is None:
+        fable_enabled = bool(prior_state.get("fable_enabled")) and previous_workspace == workspace
     fetch_all = tools is None
 
     # Assemble the shared workspace state that doesn't depend on model discovery:
@@ -265,6 +272,12 @@ def configure_shared_state(
         state["use_pat"] = True
     else:
         state.pop("use_pat", None)
+    # Persist the Fable opt-in so launches keep pinning the family; an explicit
+    # `configure --disable-fable` (fable_enabled=False) clears it.
+    if fable_enabled:
+        state["fable_enabled"] = True
+    else:
+        state.pop("fable_enabled", None)
     state["base_urls"] = build_shared_base_urls(workspace)
 
     if skip_preflight:
@@ -360,6 +373,12 @@ def configure_shared_state(
                 claude_models, claude_reason = ms_claude, ms_reason
                 if not claude_models:
                     claude_models, claude_reason = discover_claude_models(workspace, token)
+                # Fable is opt-in (`configure --enable-fable`). Unless enabled,
+                # drop it from the discovered bundle entirely so it never becomes
+                # part of any agent's config — not claude's family pins, nor the
+                # opencode/pi/copilot model lists built from claude_models.
+                if not fable_enabled:
+                    claude_models.pop("fable", None)
             if want_gemini:
                 gemini_models, gemini_reason = ms_gemini, ms_reason
                 if not gemini_models:
@@ -416,6 +435,7 @@ def _configure_shared_workspace_states(
     *,
     force_login: bool,
     use_pat: bool = False,
+    fable_enabled: bool | None = None,
 ) -> list[dict]:
     if not workspaces:
         raise RuntimeError("At least one workspace must be provided.")
@@ -428,6 +448,7 @@ def _configure_shared_workspace_states(
                 tools=tools,
                 force_login=force_login,
                 use_pat=use_pat,
+                fable_enabled=fable_enabled,
             )
         )
     return states
@@ -507,6 +528,7 @@ def configure_workspace_command(
     prompt_optional_updates: bool = True,
     use_pat: bool = False,
     skip_validate: bool = False,
+    fable_enabled: bool | None = None,
 ) -> int:
     if tool is not None and selected_tools is not None:
         raise RuntimeError("Use either --agent or --agents, not both.")
@@ -524,6 +546,7 @@ def configure_workspace_command(
             [tool],
             force_login=True,
             use_pat=use_pat,
+            fable_enabled=fable_enabled,
         )
         state = states[0]
         state = configure_single_tool(tool, state)
@@ -560,6 +583,7 @@ def configure_workspace_command(
         selected_tools,
         force_login=True,
         use_pat=use_pat,
+        fable_enabled=fable_enabled,
     )
     state = states[0]
     save_state(state)
@@ -1066,6 +1090,18 @@ def configure(
             "freshly discovered models.",
         ),
     ] = False,
+    enable_fable: Annotated[
+        bool | None,
+        typer.Option(
+            "--enable-fable/--disable-fable",
+            help="Pin the premium Claude Fable family via ANTHROPIC_DEFAULT_FABLE_MODEL "
+            "for Claude Code (opt-in; off by default). Only takes effect when the "
+            "workspace's AI Gateway actually advertises a Claude Fable model. "
+            "--disable-fable clears a prior opt-in. Omitting both keeps the "
+            "workspace's existing setting. Passed on its own (no --agent/--agents), "
+            "it configures Claude Code directly since Fable is Claude-only.",
+        ),
+    ] = None,
     tracing: Annotated[
         bool,
         typer.Option(
@@ -1121,6 +1157,16 @@ def configure(
             skip_kwargs["use_pat"] = True
         if skip_validate:
             skip_kwargs["skip_validate"] = True
+        # Only forward the Fable opt-in when the user passed the flag; `None`
+        # (neither flag given) lets configure_shared_state inherit the prior
+        # workspace setting instead of clobbering it.
+        if enable_fable is not None:
+            skip_kwargs["fable_enabled"] = enable_fable
+        # Fable is a Claude-only model family, so `--enable-fable`/`--disable-fable`
+        # only makes sense for Claude Code. When passed on its own, implicitly
+        # target claude instead of dropping into the interactive agent picker.
+        if enable_fable is not None and agent is None and agents is None:
+            agent = "claude"
         if agent is not None:
             tool = normalize_tool(agent)
             install_tool_binary(
