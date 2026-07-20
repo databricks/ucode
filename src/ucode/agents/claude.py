@@ -51,9 +51,21 @@ def is_update_available() -> tuple[str, str] | None:
 def _resolve_web_search_model(state: dict) -> str | None:
     """Pick the model the web_search MCP server should call. Prefers an
     explicit override in state, otherwise the first endpoint discovered as
-    Responses-API-capable. Returns None if no GPT endpoint is available —
-    callers should skip the MCP wiring in that case."""
+    Responses-API-capable. Returns None if no GPT endpoint is available, or
+    if `web_search_model` is explicitly set to `False` to opt out — callers
+    should skip the MCP wiring in that case.
+
+    The `False` opt-out exists because Responses-API-shaped discovery
+    (`codex_models`) can only tell that an endpoint speaks the wire protocol,
+    not that it has real OpenAI backing for server-side tools like
+    `web_search`. A self-hosted model served through Databricks' Open
+    Responses API wrapper (e.g. gpt-oss) matches the wire-protocol filter but
+    has no such backing, so calling it 400s with "No OpenAI Response API
+    backing." When that's the only candidate, set `web_search_model: false`
+    in ucode's state to stop auto-discovery from picking it."""
     override = state.get("web_search_model")
+    if override is False:
+        return None
     if isinstance(override, str) and override.strip():
         return override.strip()
     codex_models = state.get("codex_models") or []
@@ -347,6 +359,11 @@ def write_tool_config(
 
     if web_search_model:
         _register_web_search_mcp(state["workspace"], web_search_model, state.get("profile"))
+    else:
+        # Clean up a stale registration from a prior run — e.g. the workspace's
+        # only codex model was removed, or `web_search_model` was just set to
+        # `False` to opt out of a previously-registered broken endpoint.
+        _unregister_web_search_mcp()
 
     state = mark_tool_managed(state, "claude", managed_keys)
     save_state(state)

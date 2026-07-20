@@ -289,6 +289,17 @@ class TestResolveWebSearchModel:
         state = {"web_search_model": "winner", "codex_models": ["loser"]}
         assert claude._resolve_web_search_model(state) == "winner"
 
+    def test_explicit_false_disables_regardless_of_codex_models(self):
+        # A self-hosted model (e.g. gpt-oss) can be the only discovered codex
+        # model yet have no real OpenAI backing for the web_search tool. An
+        # explicit `False` opts out instead of silently picking it.
+        state = {"web_search_model": False, "codex_models": ["mirion_ai_bronze"]}
+        assert claude._resolve_web_search_model(state) is None
+
+    def test_explicit_false_beats_string_codex_model(self):
+        state = {"web_search_model": False, "codex_models": ["m1"]}
+        assert claude._resolve_web_search_model(state) is None
+
 
 class TestClaudeDefaultModel:
     def test_prefers_opus(self):
@@ -339,6 +350,11 @@ class TestWriteToolConfigMcpRegistration:
             "_register_web_search_mcp",
             lambda ws, model, profile=None: calls.append(("register", ws, model)),
         )
+        monkeypatch.setattr(
+            claude,
+            "_unregister_web_search_mcp",
+            lambda: calls.append(("unregister",)),
+        )
 
     def test_registers_mcp_when_codex_model_available(self, monkeypatch):
         calls: list = []
@@ -352,7 +368,10 @@ class TestWriteToolConfigMcpRegistration:
         self._common_patches(monkeypatch, calls)
         state = {"workspace": WS, "codex_models": []}
         claude.write_tool_config(state, "databricks-claude-sonnet-4")
-        assert calls == []
+        # No candidate model exists, so any stale registration from a prior
+        # run (e.g. the workspace's only GPT endpoint was decommissioned)
+        # gets cleaned up rather than left dangling.
+        assert calls == [("unregister",)]
 
     def test_explicit_override_used_over_codex_models(self, monkeypatch):
         calls: list = []
@@ -364,6 +383,23 @@ class TestWriteToolConfigMcpRegistration:
         }
         claude.write_tool_config(state, "databricks-claude-sonnet-4")
         assert calls == [("register", WS, "explicit-model")]
+
+    def test_explicit_false_unregisters_instead_of_registering(self, monkeypatch):
+        # Regression: a workspace whose only Responses-API-shaped endpoint is
+        # a self-hosted model (e.g. gpt-oss served through Databricks' Open
+        # Responses API wrapper) has no real OpenAI backing for the
+        # web_search tool, so calling it 400s with "No OpenAI Response API
+        # backing." `web_search_model: false` opts out and any previously
+        # registered (broken) entry is removed.
+        calls: list = []
+        self._common_patches(monkeypatch, calls)
+        state = {
+            "workspace": WS,
+            "web_search_model": False,
+            "codex_models": ["mirion_ai_bronze"],
+        }
+        claude.write_tool_config(state, "databricks-claude-sonnet-4")
+        assert calls == [("unregister",)]
 
 
 class TestRegisterWebSearchMcp:
