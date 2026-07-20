@@ -694,7 +694,6 @@ def _scrolling_checkbox(
         control.error_message = None
         return True
 
-    prompt_session: PromptSession = PromptSession(get_prompt_tokens, reserve_space_for_menu=0)
     visible_rows = min(MCP_PICKER_VISIBLE_ROWS, max(1, len(choices)))
     has_more_choices = len(choices) > MCP_PICKER_VISIBLE_ROWS
 
@@ -703,10 +702,16 @@ def _scrolling_checkbox(
         return control.get_search_string_tokens() is not None
 
     validation_prompt: PromptSession = PromptSession(bottom_toolbar=lambda: control.error_message)
+    # Render the prompt as a fixed 1-row window rather than a PromptSession
+    # container: the latter expands to fill the terminal height, which in a tall
+    # window pushes the choices list to the very bottom (a large blank gap).
     layout = Layout(
         HSplit(
             [
-                prompt_session.layout.container,
+                Window(
+                    height=Dimension.exact(1),
+                    content=FormattedTextControl(get_prompt_tokens),
+                ),
                 ConditionalContainer(
                     Window(control, height=Dimension(preferred=visible_rows, max=visible_rows)),
                     filter=~IsDone(),
