@@ -40,6 +40,7 @@ CODEX_MODEL_PROVIDER_NAME = "ucode-databricks"
 MINIMUM_CODEX_VERSION = (0, 134, 0)
 MINIMUM_CODEX_VERSION_TEXT = "0.134.0"
 MLFLOW_CODEX_PACKAGE = "@mlflow/codex"
+# npm integration for Codex, built on the @mlflow/core TypeScript tracing SDK.
 MLFLOW_CODEX_PACKAGE_SPEC = f"{MLFLOW_CODEX_PACKAGE}@^0.3.0"
 MLFLOW_CODEX_BINARY = "mlflow-codex"
 MINIMUM_MLFLOW_CODEX_VERSION = (0, 3, 0)

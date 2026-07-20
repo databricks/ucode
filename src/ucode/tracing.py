@@ -10,8 +10,7 @@ reuses the workspace profile ucode already configures in ``~/.databrickscfg``.
 Scope: Claude Code and Codex. Claude uses the Python MLflow CLI Stop hook.
 Codex uses the `@mlflow/codex` TypeScript package, which needs the UC
 destination routed through ``MLFLOW_TRACE_LOCATION`` to use the UC table path.
-Gemini's exporter is OTLP-only and OpenCode is intentionally left for a
-follow-up.
+Gemini's exporter is OTLP-only and is not wired here.
 
 This module must not import ``mlflow`` (the heavy optional dependency) or
 ``ucode.agents`` at import time: agents import the small helpers here, and the
