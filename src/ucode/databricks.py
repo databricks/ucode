@@ -1131,6 +1131,17 @@ def model_token_limits(model_id: str) -> dict[str, int] | None:
     return None
 
 
+def is_oss_model(model_id: str | None) -> bool:
+    """Return True when ``model_id`` belongs to a supported OSS chat family.
+
+    Matches the same ``kimi-``/``glm-`` substrings used by discovery so callers
+    (e.g. codex OSS routing, the harness map) stay in sync with what
+    ``discover_model_services`` buckets as OSS."""
+    if not model_id:
+        return False
+    return any(family in model_id for family in _OSS_MODEL_FAMILIES)
+
+
 def _model_service_id(service: dict) -> str | None:
     """Extract the `system.ai.<model-name>` id from one model-service entry.
 
@@ -1274,6 +1285,56 @@ def discover_model_services(
             ),
         )
     return claude_models, codex_models, gemini_models, oss_models, None
+
+
+def recommend_coding_agent_models(
+    workspace: str, token: str, available_models: list[str]
+) -> tuple[list[str], str | None]:
+    """Ask the AI Gateway which of ``available_models`` this user may use.
+
+    A workspace admin defines usage-based tiers via a "coding agent config"; the
+    ``recommendModel`` endpoint filters/orders the caller's ``available_models``
+    down to what their tier allows. Returns ``(models, reason)``:
+
+    - ``(models, None)`` on success — ``models`` may be empty, meaning the tier
+      recommends nothing (the caller should guide the user to pick a harness
+      manually rather than fall back to the full list).
+    - ``([], reason)`` on transport/parse failure — distinct from an intentional
+      empty recommendation so the caller can surface the error.
+    """
+    url = (
+        f"https://{workspace_hostname(workspace)}"
+        "/api/ai-gateway/v2/coding-agent-configs:recommendModel"
+    )
+    payload, reason = _http_post_json(url, token, {"available_models": available_models})
+    if reason is not None:
+        return [], reason
+    models = _extract_recommended_models(payload)
+    if models is None:
+        return [], "recommendModel response did not contain a model list"
+    return models, None
+
+
+def _extract_recommended_models(payload: dict | list | None) -> list[str] | None:
+    """Pull the recommended-model list out of a recommendModel response.
+
+    Tolerates either a bare JSON array or an object wrapping the list under a
+    common key. Returns None when the shape is unrecognized so the caller can
+    distinguish a malformed response from an empty recommendation."""
+    if isinstance(payload, list):
+        candidate: list | None = payload
+    elif isinstance(payload, dict):
+        candidate = None
+        for key in ("models", "recommended_models", "available_models"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                candidate = value
+                break
+    else:
+        candidate = None
+    if candidate is None:
+        return None
+    return [m for m in candidate if isinstance(m, str) and m]
 
 
 # --- MCP services (parallel to model services) -----------------------------
@@ -2117,11 +2178,18 @@ def build_tool_base_url(tool: str, workspace: str) -> str:
     raise RuntimeError(f"Unsupported tool '{tool}'.")
 
 
+def build_oss_base_url(workspace: str) -> str:
+    # OSS chat models (kimi/glm) are served by the OpenAI-compatible MLflow
+    # chat-completions gateway, not the family-specific routes. Shared by every
+    # agent that speaks chat-completions to OSS models.
+    return f"{workspace}/ai-gateway/mlflow/v1"
+
+
 def build_opencode_base_urls(workspace: str) -> dict[str, str]:
     return {
         "anthropic": build_tool_base_url("claude", workspace) + "/v1",
         "gemini": build_tool_base_url("gemini", workspace) + "/v1beta",
-        "oss": f"{workspace}/ai-gateway/mlflow/v1",
+        "oss": build_oss_base_url(workspace),
     }
 
 

@@ -45,6 +45,28 @@ class TestRenderOverlay:
         provider = overlay["model_providers"]["ucode-databricks"]
         assert provider["wire_api"] == "responses"
 
+    def test_oss_model_routes_to_mlflow_chat(self):
+        overlay = codex.render_overlay(WS, "system.ai.kimi-k2")
+        provider = overlay["model_providers"]["ucode-databricks"]
+        assert provider["base_url"] == f"{WS}/ai-gateway/mlflow/v1"
+        assert provider["wire_api"] == "chat"
+
+    def test_oss_glm_model_routes_to_mlflow_chat(self):
+        overlay = codex.render_overlay(WS, "system.ai.glm-4-6")
+        provider = overlay["model_providers"]["ucode-databricks"]
+        assert provider["base_url"] == f"{WS}/ai-gateway/mlflow/v1"
+        assert provider["wire_api"] == "chat"
+
+    def test_oss_model_pinned_verbatim(self):
+        overlay = codex.render_overlay(WS, "system.ai.kimi-k2")
+        assert overlay["model"] == "system.ai.kimi-k2"
+
+    def test_gpt_model_still_uses_responses_route(self):
+        overlay = codex.render_overlay(WS, "system.ai.gpt-5")
+        provider = overlay["model_providers"]["ucode-databricks"]
+        assert provider["base_url"] == f"{WS}/ai-gateway/codex/v1"
+        assert provider["wire_api"] == "responses"
+
     def test_auth_runs_ucode_auth_token(self):
         # The auth command runs the `ucode auth-token` executable directly
         # (not `sh -c`), so it works on Windows where there is no POSIX shell.

@@ -20,14 +20,17 @@ from ucode.databricks import (
     build_auth_token_argv,
     build_databricks_cli_env,
     build_opencode_base_urls,
+    build_oss_base_url,
     build_shared_base_urls,
     build_tool_base_url,
     ensure_databricks_cli_version,
     ensure_pat_bearer,
     get_databricks_token,
+    is_oss_model,
     list_databricks_apps,
     list_databricks_connections,
     list_genie_spaces,
+    recommend_coding_agent_models,
     workspace_hostname,
 )
 
@@ -1699,3 +1702,83 @@ class TestRunUsageQuery:
             db_mod.run_usage_query(WS, "/sql/1.0/warehouses/abc", "tok", "SELECT 1")
         assert "Ask your workspace admin" not in str(exc_info.value)
         assert str(exc_info.value).startswith("Usage query failed:")
+
+
+class TestIsOSSModel:
+    def test_kimi(self):
+        assert is_oss_model("system.ai.kimi-k2") is True
+
+    def test_glm(self):
+        assert is_oss_model("system.ai.glm-4-6") is True
+
+    def test_non_oss(self):
+        assert is_oss_model("system.ai.gpt-5") is False
+
+    def test_none(self):
+        assert is_oss_model(None) is False
+
+
+class TestBuildOSSBaseUrl:
+    def test_mlflow_route(self):
+        assert build_oss_base_url(WS) == f"{WS}/ai-gateway/mlflow/v1"
+
+
+class TestRecommendCodingAgentModels:
+    URL = "https://example.databricks.com/api/ai-gateway/v2/coding-agent-configs:recommendModel"
+
+    def test_bare_list_response(self, monkeypatch):
+        captured = {}
+
+        def fake_post(url, token, payload, timeout=10):
+            captured["url"] = url
+            captured["payload"] = payload
+            return ["system.ai.claude-opus-4-8", "system.ai.gpt-5"], None
+
+        monkeypatch.setattr(db_mod, "_http_post_json", fake_post)
+        models, reason = recommend_coding_agent_models(
+            WS, "tok", ["system.ai.claude-opus-4-8", "system.ai.gpt-5"]
+        )
+        assert models == ["system.ai.claude-opus-4-8", "system.ai.gpt-5"]
+        assert reason is None
+        assert captured["url"] == self.URL
+        assert captured["payload"] == {
+            "available_models": ["system.ai.claude-opus-4-8", "system.ai.gpt-5"]
+        }
+
+    def test_wrapped_models_key(self, monkeypatch):
+        monkeypatch.setattr(
+            db_mod,
+            "_http_post_json",
+            lambda url, token, payload, timeout=10: ({"models": ["system.ai.gpt-5"]}, None),
+        )
+        models, reason = recommend_coding_agent_models(WS, "tok", ["system.ai.gpt-5"])
+        assert models == ["system.ai.gpt-5"]
+        assert reason is None
+
+    def test_empty_recommendation_is_success(self, monkeypatch):
+        monkeypatch.setattr(
+            db_mod, "_http_post_json", lambda url, token, payload, timeout=10: ([], None)
+        )
+        models, reason = recommend_coding_agent_models(WS, "tok", ["system.ai.gpt-5"])
+        assert models == []
+        assert reason is None
+
+    def test_transport_error(self, monkeypatch):
+        monkeypatch.setattr(
+            db_mod,
+            "_http_post_json",
+            lambda url, token, payload, timeout=10: (None, "HTTP 500 Server Error"),
+        )
+        models, reason = recommend_coding_agent_models(WS, "tok", ["system.ai.gpt-5"])
+        assert models == []
+        assert reason == "HTTP 500 Server Error"
+
+    def test_unrecognized_shape_is_error(self, monkeypatch):
+        monkeypatch.setattr(
+            db_mod,
+            "_http_post_json",
+            lambda url, token, payload, timeout=10: ({"unexpected": True}, None),
+        )
+        models, reason = recommend_coding_agent_models(WS, "tok", ["system.ai.gpt-5"])
+        assert models == []
+        assert reason is not None

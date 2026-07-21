@@ -21,6 +21,7 @@ from ucode.databricks import (
     BEDROCK_PROVIDER_TYPES,
     get_databricks_token,
     install_databricks_cli,
+    is_oss_model,
     map_bedrock_claude_models,
     resolve_provider_service,
 )
@@ -73,6 +74,34 @@ def normalize_tool(tool: str) -> str:
             f"Unsupported tool '{tool}'. Use one of: codex, claude, gemini, opencode, copilot, pi."
         )
     return normalized
+
+
+def harness_for_model(model_id: str) -> str | None:
+    """Map a model id to the coding-agent harness that can serve it.
+
+    Used by `ucode run` to pick a harness from the model the user selected:
+
+    - claude models  -> claude (Claude Code)
+    - gpt models     -> codex
+    - OSS (kimi/glm)  -> codex
+    - gemini models  -> gemini
+
+    Returns None when no harness maps to the model so the caller can surface a
+    clear error instead of launching the wrong tool. OSS is checked before the
+    generic families via the shared `is_oss_model` substrings so the map stays in
+    sync with discovery.
+    """
+    if not model_id:
+        return None
+    if is_oss_model(model_id):
+        return "codex"
+    if "claude" in model_id:
+        return "claude"
+    if "gpt-" in model_id:
+        return "codex"
+    if "gemini-" in model_id:
+        return "gemini"
+    return None
 
 
 def _update_installed_tool_binary(tool: str, version: str | None = None) -> bool:
