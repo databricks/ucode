@@ -2135,12 +2135,14 @@ def build_pi_base_urls(workspace: str) -> dict[str, str]:
     # - openai-completions       appends `/chat/completions`
     #
     # So the baseUrls below stop just before the suffix Pi will tack on.
-    # Compat flags applied per-provider in agents/pi.py; required for `oss`
-    # only (MLflow rejects `store` and `tools[].function.strict`).
+    # OSS families (kimi, glm) speak openai-completions to the MLflow route;
+    # compat flags applied per-provider in agents/pi.py (MLflow rejects `store`
+    # and `tools[].function.strict`).
     return {
         "claude": build_tool_base_url("claude", workspace),
         "openai": build_tool_base_url("codex", workspace),
         "gemini": build_tool_base_url("gemini", workspace) + "/v1beta",
+        "oss": f"{workspace}/ai-gateway/mlflow/v1",
     }
 
 

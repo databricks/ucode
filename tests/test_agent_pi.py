@@ -20,12 +20,17 @@ def _base_urls() -> dict[str, str]:
     }
 
 
+def _base_urls_with_oss() -> dict[str, str]:
+    return {**_base_urls(), "oss": f"{WS}/ai-gateway/mlflow/v1"}
+
+
 def _empty() -> dict:
     """No-models input bundle for render_overlay."""
     return {
         "claude_models": {},
         "codex_models": [],
         "gemini_models": [],
+        "oss_models": [],
     }
 
 
@@ -35,10 +40,11 @@ def _overlay(model: str, token: str = "tok", **kwargs):
     return pi.render_overlay(
         model,
         token,
-        _base_urls(),
+        _base_urls_with_oss(),
         bundle["claude_models"],
         bundle["codex_models"],
         bundle["gemini_models"],
+        bundle["oss_models"],
     )
 
 
@@ -81,17 +87,25 @@ class TestRenderOverlayProviders:
         assert provider["api"] == "google-generative-ai"
         assert provider["baseUrl"] == f"{WS}/ai-gateway/gemini/v1beta"
 
-    def test_all_three_providers_when_all_present(self):
+    def test_oss_provider_uses_openai_completions(self):
+        overlay, _ = _overlay("system.ai.kimi-k2-7-code", oss_models=["system.ai.kimi-k2-7-code"])
+        provider = overlay["providers"]["databricks-oss"]
+        assert provider["api"] == "openai-completions"
+        assert provider["baseUrl"] == f"{WS}/ai-gateway/mlflow/v1"
+
+    def test_all_providers_when_all_present(self):
         overlay, _ = _overlay(
             "claude-sonnet",
             claude_models={"sonnet": "claude-sonnet"},
             codex_models=["gpt-5"],
             gemini_models=["gemini-2"],
+            oss_models=["system.ai.kimi-k2-7-code"],
         )
         assert set(overlay["providers"].keys()) == {
             "databricks-claude",
             "databricks-openai",
             "databricks-gemini",
+            "databricks-oss",
         }
 
 
@@ -129,6 +143,14 @@ class TestRenderOverlayCompatFlags:
         assert "compat" not in overlay["providers"]["databricks-openai"]
         assert "compat" not in overlay["providers"]["databricks-gemini"]
 
+    def test_oss_disables_store_and_strict_mode(self):
+        # The MLflow chat-completions route rejects `store` and
+        # `tools[].function.strict`.
+        overlay, _ = _overlay("system.ai.kimi-k2-7-code", oss_models=["system.ai.kimi-k2-7-code"])
+        compat = overlay["providers"]["databricks-oss"]["compat"]
+        assert compat["supportsStore"] is False
+        assert compat["supportsStrictMode"] is False
+
 
 class TestRenderOverlayAuthAndModels:
     def test_token_in_api_key(self):
@@ -163,6 +185,29 @@ class TestRenderOverlayAuthAndModels:
         ids = {m["id"] for m in overlay["providers"]["databricks-gemini"]["models"]}
         assert ids == {"gemini-2", "gemini-2-pro"}
 
+    def test_oss_models_listed(self):
+        oss = ["system.ai.kimi-k2-7-code", "system.ai.glm-5-2"]
+        overlay, _ = _overlay("system.ai.kimi-k2-7-code", oss_models=oss)
+        ids = {m["id"] for m in overlay["providers"]["databricks-oss"]["models"]}
+        assert ids == {"system.ai.kimi-k2-7-code", "system.ai.glm-5-2"}
+
+    def test_oss_glm_carries_token_limits(self):
+        # GLM's output is capped well below pi's 16k default on the MLflow route;
+        # pin contextWindow/maxTokens from the shared limits table.
+        overlay, _ = _overlay("system.ai.glm-5-2", oss_models=["system.ai.glm-5-2"])
+        entry = next(
+            m for m in overlay["providers"]["databricks-oss"]["models"] if "glm" in m["id"]
+        )
+        assert entry["contextWindow"] == 200_000
+        assert entry["maxTokens"] == 25_000
+
+    def test_oss_kimi_omits_limits_when_unknown(self):
+        # Kimi has no entry in the limits table, so pi uses its own defaults.
+        overlay, _ = _overlay("system.ai.kimi-k2-7-code", oss_models=["system.ai.kimi-k2-7-code"])
+        entry = overlay["providers"]["databricks-oss"]["models"][0]
+        assert "contextWindow" not in entry
+        assert "maxTokens" not in entry
+
 
 class TestRenderOverlayManagedKeys:
     def test_managed_keys_include_model(self):
@@ -192,6 +237,10 @@ class TestRenderOverlayModelSelector:
     def test_prefixes_gemini_model(self):
         overlay, _ = _overlay("gemini-2", gemini_models=["gemini-2"])
         assert overlay["model"] == "databricks-gemini/gemini-2"
+
+    def test_prefixes_oss_model(self):
+        overlay, _ = _overlay("system.ai.kimi-k2-7-code", oss_models=["system.ai.kimi-k2-7-code"])
+        assert overlay["model"] == "databricks-oss/system.ai.kimi-k2-7-code"
 
     def test_preserves_already_prefixed_model(self):
         overlay, _ = _overlay(
@@ -228,10 +277,22 @@ class TestPiDefaultModel:
         state = {"claude_models": {}, "codex_models": [], "gemini_models": ["gemini-2"]}
         assert pi.default_model(state) == "gemini-2"
 
+    def test_falls_back_to_oss(self):
+        state = {
+            "claude_models": {},
+            "codex_models": [],
+            "gemini_models": [],
+            "oss_models": ["system.ai.kimi-k2-7-code"],
+        }
+        assert pi.default_model(state) == "system.ai.kimi-k2-7-code"
+
     def test_returns_none_when_empty(self):
         assert pi.default_model({}) is None
         assert (
-            pi.default_model({"claude_models": {}, "codex_models": [], "gemini_models": []}) is None
+            pi.default_model(
+                {"claude_models": {}, "codex_models": [], "gemini_models": [], "oss_models": []}
+            )
+            is None
         )
 
 
@@ -279,10 +340,11 @@ class TestWriteToolConfig:
     def _state(self, **overrides) -> dict:
         state = {
             "workspace": WS,
-            "base_urls": {"pi": _base_urls()},
+            "base_urls": {"pi": _base_urls_with_oss()},
             "claude_models": {"sonnet": "claude-sonnet"},
             "codex_models": [],
             "gemini_models": [],
+            "oss_models": [],
             "managed_configs": {},
         }
         state.update(overrides)
@@ -315,8 +377,9 @@ class TestWriteToolConfig:
 
     def test_legacy_providers_removed_on_upgrade(self, tmp_path, monkeypatch):
         """Earlier ucode versions wrote `databricks-anthropic`, `databricks-codex`,
-        and `databricks-oss` providers. They must be stripped on the next write
-        so users don't end up with stale entries pointing at routes that 400."""
+        and `databricks-kimi` providers. They must be stripped on the next write
+        so users don't end up with stale entries pointing at routes that 400 (or
+        carrying a frozen, never-refreshed token)."""
         pi_mod, config_file, _, _ = self._setup(tmp_path, monkeypatch)
 
         config_file.write_text(
@@ -325,7 +388,7 @@ class TestWriteToolConfig:
                     "providers": {
                         "databricks-anthropic": {"api": "anthropic-messages"},
                         "databricks-codex": {"api": "openai-responses"},
-                        "databricks-oss": {"api": "openai-completions"},
+                        "databricks-kimi": {"api": "openai-responses"},
                     }
                 }
             ),
@@ -339,7 +402,7 @@ class TestWriteToolConfig:
             pi_mod.write_tool_config(self._state(), "claude-sonnet", token="tok")
 
         written_providers = json.loads(config_file.read_text()).get("providers", {})
-        for legacy in ("databricks-anthropic", "databricks-codex", "databricks-oss"):
+        for legacy in ("databricks-anthropic", "databricks-codex", "databricks-kimi"):
             assert legacy not in written_providers
         assert "databricks-claude" in written_providers
 

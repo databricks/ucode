@@ -7,6 +7,7 @@ that family's gateway path:
 - `databricks-claude`  (api: anthropic-messages)       → /ai-gateway/anthropic
 - `databricks-openai`  (api: openai-responses)         → /ai-gateway/codex/v1
 - `databricks-gemini`  (api: google-generative-ai)     → /ai-gateway/gemini/v1beta
+- `databricks-oss`     (api: openai-completions)       → /ai-gateway/mlflow/v1
 
 Per-provider `compat` flags work around fields the gateway translators reject:
 
@@ -15,11 +16,11 @@ Per-provider `compat` flags work around fields the gateway translators reject:
   pi uses for every request. With this flag pi omits the per-tool field and
   sends the legacy `anthropic-beta: fine-grained-tool-streaming-...` header
   instead, which the gateway accepts.
-
-OSS / Databricks-foundation models (Llama, Qwen, etc.) are not exposed via
-pi today — they live behind /ai-gateway/mlflow/v1 with per-model
-`max_tokens` caps that pi has no global way to honor without per-model
-config we don't currently maintain.
+- oss: `supportsStore: false` + `supportsStrictMode: false` — the MLflow
+  chat-completions route rejects the OpenAI `store` field and
+  `tools[].function.strict`. OSS models also carry per-model `contextWindow`
+  and `maxTokens` (from `model_token_limits`) so pi clamps output to a value
+  the gateway accepts (e.g. GLM's 25k cap) instead of pi's 16k default.
 
 The bearer token is baked into the file and refreshed by a background thread
 while the session runs (same pattern as OpenCode/Copilot).
@@ -45,6 +46,7 @@ from ucode.databricks import (
     TOKEN_REFRESH_INTERVAL_SECONDS,
     build_pi_base_urls,
     get_databricks_token,
+    model_token_limits,
 )
 from ucode.state import mark_tool_managed, save_state
 from ucode.telemetry import agent_version, ucode_version
@@ -68,13 +70,17 @@ PROVIDER_NAMES = (
     "databricks-claude",
     "databricks-openai",
     "databricks-gemini",
+    "databricks-oss",
 )
 
 PROVIDER_KEYS: list[list[str]] = [["providers", name] for name in PROVIDER_NAMES]
 
 # Old provider names earlier ucode versions wrote; cleaned up on each write so
 # users don't end up with stale entries pointing at routes that 400.
-LEGACY_PROVIDER_NAMES = ("databricks-anthropic", "databricks-codex", "databricks-oss")
+# `databricks-kimi` was written by an early build with `api: openai-responses`
+# against the MLflow route (which speaks openai-completions), so its requests
+# 404/401 and its baked token was never refreshed — strip it on every write.
+LEGACY_PROVIDER_NAMES = ("databricks-anthropic", "databricks-codex", "databricks-kimi")
 
 
 def is_update_available() -> tuple[str, str] | None:
@@ -86,6 +92,7 @@ def _resolve_model_selector(
     claude_models: dict[str, str],
     codex_models: list[str],
     gemini_models: list[str],
+    oss_models: list[str],
 ) -> str:
     """Return a Pi model selector in `<provider>/<model>` form when possible."""
     for name in PROVIDER_NAMES:
@@ -97,7 +104,24 @@ def _resolve_model_selector(
         return f"databricks-openai/{model}"
     if model in gemini_models:
         return f"databricks-gemini/{model}"
+    if model in oss_models:
+        return f"databricks-oss/{model}"
     return model
+
+
+def _oss_model_entry(model: str) -> dict:
+    """Per-model entry for an OSS model.
+
+    Pins `contextWindow`/`maxTokens` from the shared limits table when known so
+    pi clamps `max_tokens` to a value the MLflow route accepts (e.g. GLM's 25k
+    output cap) rather than pi's 16k default. Both fields are supplied together
+    because the limits table always provides both."""
+    entry: dict = {"id": model}
+    limits = model_token_limits(model)
+    if limits is not None:
+        entry["contextWindow"] = limits["context"]
+        entry["maxTokens"] = limits["output"]
+    return entry
 
 
 def render_overlay(
@@ -107,6 +131,7 @@ def render_overlay(
     claude_models: dict[str, str],
     codex_models: list[str],
     gemini_models: list[str],
+    oss_models: list[str],
 ) -> tuple[dict, list[list[str]]]:
     """Return (overlay, managed_key_paths) for ~/.pi/agent/models.json."""
     providers: dict = {}
@@ -150,8 +175,23 @@ def render_overlay(
             "models": [{"id": m} for m in gemini_models],
         }
         keys.append(["providers", "databricks-gemini"])
+    if oss_models:
+        providers["databricks-oss"] = {
+            "baseUrl": pi_base_urls["oss"],
+            "api": "openai-completions",
+            "apiKey": token,
+            "authHeader": True,
+            # The MLflow chat-completions route rejects the OpenAI `store` field
+            # and `tools[].function.strict`; opt out of both.
+            "compat": {"supportsStore": False, "supportsStrictMode": False},
+            "headers": ua_headers,
+            "models": [_oss_model_entry(m) for m in oss_models],
+        }
+        keys.append(["providers", "databricks-oss"])
     overlay: dict = {
-        "model": _resolve_model_selector(model, claude_models, codex_models, gemini_models),
+        "model": _resolve_model_selector(
+            model, claude_models, codex_models, gemini_models, oss_models
+        ),
     }
     if providers:
         overlay["providers"] = providers
@@ -178,6 +218,7 @@ def write_tool_config(
         state.get("claude_models") or {},
         state.get("codex_models") or [],
         state.get("gemini_models") or [],
+        state.get("oss_models") or [],
     )
     existing = read_json_safe(PI_CONFIG_PATH)
     providers = existing.get("providers")
@@ -206,7 +247,7 @@ def _write_settings(model_selector: str) -> None:
 
 
 def default_model(state: dict) -> str | None:
-    """Prefer Claude opus → sonnet → haiku; fall back to codex, gemini."""
+    """Prefer Claude opus → sonnet → haiku; fall back to codex, gemini, oss."""
     claude_models = state.get("claude_models") or {}
     for family in ("opus", "sonnet", "haiku"):
         if claude_models.get(family):
@@ -215,7 +256,10 @@ def default_model(state: dict) -> str | None:
     if codex_models:
         return codex_models[0]
     gemini_models = state.get("gemini_models") or []
-    return gemini_models[0] if gemini_models else None
+    if gemini_models:
+        return gemini_models[0]
+    oss_models = state.get("oss_models") or []
+    return oss_models[0] if oss_models else None
 
 
 def _refresh_token_once(state: dict, *, force_refresh: bool = False) -> str:
