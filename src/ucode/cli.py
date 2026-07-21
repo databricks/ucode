@@ -1057,6 +1057,39 @@ def _available_models(state: dict) -> list[str]:
     return unique
 
 
+def _launch_args(tool: str, resolved_model: str | None, tool_args: list[str]) -> list[str]:
+    """Pin the model the user picked in `ucode run` onto the launch argv.
+
+    The claude harness deliberately doesn't pin a model in its settings (doing so
+    dupes rows in Claude Code's /model picker — see claude.render_overlay), so
+    Claude Code would otherwise boot on its own default instead of the model the
+    user selected. Prepend `--model <resolved_model>` for claude so the session
+    starts on the selected model.
+
+    `ucode run` owns model selection via the recommendation flow, so a
+    caller-supplied `--model` is rejected up front (see `_reject_model_override`)
+    rather than reaching here.
+    """
+    if tool != "claude" or not resolved_model:
+        return tool_args
+    return ["--model", resolved_model, *tool_args]
+
+
+def _reject_model_override(tool_args: list[str]) -> None:
+    """`ucode run` selects the model itself, so `--model` on the argv is invalid.
+
+    Fail fast with actionable guidance rather than silently letting a caller
+    `--model` fight the recommendation flow.
+    """
+    if any(arg == "--model" or arg.startswith("--model=") for arg in tool_args):
+        raise RuntimeError(
+            "`ucode run` selects the model for you — passing `--model` is not "
+            "supported. Run `ucode run` and pick from the recommended models, or "
+            "use `ucode <harness>` (e.g. `ucode claude`) to launch a specific "
+            "harness directly."
+        )
+
+
 def _run_session(ctx: typer.Context, skip_preflight: bool = False) -> None:
     """Recommend a model for the user's tier, then launch the matching harness.
 
@@ -1065,6 +1098,7 @@ def _run_session(ctx: typer.Context, skip_preflight: bool = False) -> None:
     to a harness (claude/codex/gemini) and launches that tool pinned to the model.
     """
     try:
+        _reject_model_override(ctx.args)
         existing = load_state()
         apply_pat_environment(existing)
         # Ensure a workspace is configured. Without one, fall back to the same
@@ -1135,7 +1169,7 @@ def _run_session(ctx: typer.Context, skip_preflight: bool = False) -> None:
                 f"every 30 minutes while the session is running."
             )
         print_success(f"Starting {TOOL_SPECS[tool]['display']}")
-        launch_agent(tool, state, ctx.args)
+        launch_agent(tool, state, _launch_args(tool, resolved_model, ctx.args))
     except typer.Exit:
         # Intentional exits (empty recommendation, cancelled selection) subclass
         # RuntimeError, so re-raise them before the error handler below rewrites

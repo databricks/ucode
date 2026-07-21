@@ -188,6 +188,92 @@ class TestRunCommand:
         mock_launch.assert_called_once()
         assert mock_launch.call_args[0][0] == "claude"
 
+    def test_claude_launch_pins_selected_model(self):
+        # The claude harness doesn't pin a model in settings, so `ucode run`
+        # must pass `--model <selected>` on the argv or Claude Code boots on its
+        # own default instead of the model the user picked.
+        patches = self._patch_run(
+            recommended=["system.ai.claude-sonnet-5", "system.ai.gpt-5"],
+            chosen="system.ai.claude-sonnet-5",
+        )
+        with (
+            patches[0],
+            patches[1],
+            patches[2],
+            patches[3],
+            patches[4],
+            patches[5],
+            patches[6],
+            patches[7],
+            patches[8] as mock_launch,
+        ):
+            result = runner.invoke(app, ["run"])
+        assert result.exit_code == 0, result.output
+        assert mock_launch.call_args[0][0] == "claude"
+        assert mock_launch.call_args[0][2] == ["--model", "system.ai.claude-sonnet-5"]
+
+    def test_caller_model_override_is_rejected(self):
+        # `ucode run` selects the model itself, so a caller `--model` is invalid.
+        patches = self._patch_run(
+            recommended=["system.ai.claude-sonnet-5"],
+            chosen=None,
+        )
+        with (
+            patches[0],
+            patches[1],
+            patches[2],
+            patches[3],
+            patches[4],
+            patches[5],
+            patches[6],
+            patches[7],
+            patches[8] as mock_launch,
+        ):
+            result = runner.invoke(app, ["run", "--", "--model", "system.ai.claude-opus-4-8"])
+        assert result.exit_code == 1
+        assert "--model" in _strip_ansi(result.output)
+        mock_launch.assert_not_called()
+
+    def test_caller_model_override_equals_form_is_rejected(self):
+        patches = self._patch_run(
+            recommended=["system.ai.claude-sonnet-5"],
+            chosen=None,
+        )
+        with (
+            patches[0],
+            patches[1],
+            patches[2],
+            patches[3],
+            patches[4],
+            patches[5],
+            patches[6],
+            patches[7],
+            patches[8] as mock_launch,
+        ):
+            result = runner.invoke(app, ["run", "--", "--model=system.ai.claude-opus-4-8"])
+        assert result.exit_code == 1
+        mock_launch.assert_not_called()
+
+    def test_codex_launch_does_not_pin_model(self):
+        # Non-claude harnesses already pin the model in their own config, so the
+        # argv stays untouched.
+        patches = self._patch_run(recommended=["system.ai.gpt-5"], chosen="system.ai.gpt-5")
+        with (
+            patches[0],
+            patches[1],
+            patches[2],
+            patches[3],
+            patches[4],
+            patches[5],
+            patches[6],
+            patches[7],
+            patches[8] as mock_launch,
+        ):
+            result = runner.invoke(app, ["run"])
+        assert result.exit_code == 0, result.output
+        assert mock_launch.call_args[0][0] == "codex"
+        assert mock_launch.call_args[0][2] == []
+
     def test_gpt_launches_codex(self):
         patches = self._patch_run(recommended=["system.ai.gpt-5"], chosen="system.ai.gpt-5")
         with (
