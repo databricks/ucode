@@ -1102,8 +1102,6 @@ def _run_session(ctx: typer.Context, skip_preflight: bool = False) -> None:
         print_section("ucode")
         if len(recommended) == 1:
             # Only one model recommended — no point prompting; launch it directly.
-            # Keep the console quiet (the Model/Harness banner below still shows
-            # what launched); note it only in the debug log.
             chosen = recommended[0]
             _debug("recommend", f"single recommended model, auto-launching {chosen}")
         else:
