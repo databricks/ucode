@@ -14,6 +14,7 @@ from ucode.agents import (
     configure_selected_tools,
     default_model_for_tool,
     ensure_tool_binary_available,
+    install_ai_tools_for_agents,
     install_tool_binary,
     normalize_tool,
     provider_permission_error,
@@ -58,6 +59,44 @@ class TestToolSpecs:
     def test_each_agent_exposes_update_check(self):
         for tool, module in agents_mod._MODULES.items():
             assert callable(module.is_update_available), f"{tool} missing is_update_available"
+
+
+class TestInstallAiToolsForAgents:
+    def test_maps_supported_tools_and_drops_others(self, monkeypatch):
+        captured = {}
+        monkeypatch.setattr(
+            agents_mod,
+            "install_ai_tools",
+            lambda tokens, profile: captured.update(tokens=tokens, profile=profile),
+        )
+        # gemini and pi aren't supported by `databricks aitools`, so they drop.
+        install_ai_tools_for_agents(["claude", "codex", "gemini", "pi"], "prof")
+        assert captured == {"tokens": ["claude-code", "codex"], "profile": "prof"}
+
+
+class TestConfigureWiresAiToolsInstall:
+    """Both configure chokepoints must trigger AI Tools install."""
+
+    def _stub_configure(self, monkeypatch):
+        captured = {}
+        monkeypatch.setattr(agents_mod, "configure_tool", lambda tool, state, model=None: state)
+        monkeypatch.setattr(agents_mod, "save_state", lambda state: None)
+        monkeypatch.setattr(
+            agents_mod,
+            "install_ai_tools",
+            lambda tokens, profile: captured.update(tokens=tokens, profile=profile),
+        )
+        return captured
+
+    def test_configure_single_tool_triggers_install(self, monkeypatch):
+        captured = self._stub_configure(monkeypatch)
+        agents_mod.configure_single_tool("codex", {"codex_models": ["m"], "profile": "myprof"})
+        assert captured == {"tokens": ["codex"], "profile": "myprof"}
+
+    def test_configure_selected_tools_triggers_install(self, monkeypatch):
+        captured = self._stub_configure(monkeypatch)
+        agents_mod.configure_selected_tools({"profile": "myprof"}, ["codex"])
+        assert captured == {"tokens": ["codex"], "profile": "myprof"}
 
 
 class TestNormalizeTool:

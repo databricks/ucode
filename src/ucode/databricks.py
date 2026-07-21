@@ -50,6 +50,8 @@ WINDOWS_DATABRICKS_INSTALL_URL = (
 )
 AI_GATEWAY_V2_DOCS_URL = "https://docs.databricks.com/aws/en/ai-gateway/overview-beta"
 MIN_DATABRICKS_CLI_VERSION = (0, 298, 0)
+# Minimum CLI version that ships `databricks aitools` (Databricks AI Tools).
+AITOOLS_MIN_CLI_VERSION = (1, 1, 0)
 TOKEN_REFRESH_INTERVAL_SECONDS = 1800
 
 
@@ -546,6 +548,44 @@ def install_databricks_cli() -> None:
             "Databricks CLI install completed, but `databricks` is still not on PATH."
         )
     ensure_databricks_cli_version()
+
+
+def install_ai_tools(agent_tokens: list[str], profile: str | None = None) -> None:
+    """Install Databricks AI Tools for the given agents (e.g. ``claude-code``).
+
+    Databricks AI Tools is the set of skills and plugins that teach coding
+    agents how to work with Databricks (installed via ``databricks aitools``).
+    Idempotent and best-effort: any failure only warns (surfacing the CLI's
+    own error), since AI Tools aren't required to launch an agent."""
+    if not agent_tokens:
+        return
+
+    agents_arg = ",".join(agent_tokens)
+    try:
+        with spinner(f"Installing Databricks AI Tools for {agents_arg}..."):
+            run(
+                ["databricks", "aitools", "install", "--agents", agents_arg, "--scope", "global"]
+                + _profile_args(profile),
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=300,
+            )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
+        # Surface the CLI's own error rather than assuming a version cause:
+        # `aitools` also fails when an agent binary isn't on PATH, etc. An old
+        # CLI (before `aitools` shipped) is only one possible reason, offered
+        # as a hint rather than asserted as the cause.
+        required = ".".join(str(n) for n in AITOOLS_MIN_CLI_VERSION)
+        detail = (getattr(exc, "stderr", None) or "").strip()
+        reason = detail.splitlines()[-1] if detail else str(exc)
+        print_warning(
+            f"Could not install Databricks AI Tools: {reason}. "
+            f"This needs Databricks CLI v{required}+ (`databricks aitools`); "
+            "upgrade the CLI if needed, then re-run `ucode configure` to add them."
+        )
+    else:
+        print_success("Databricks AI Tools installed")
 
 
 def _profile_args(profile: str | None) -> list[str]:
