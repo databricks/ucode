@@ -84,6 +84,8 @@ CLAUDE_TRACING_ENV_KEYS = (
 # every launch, so stale values from older ucode versions never linger.
 CLAUDE_MANAGED_MODEL_ENV_KEYS = (
     "ANTHROPIC_MODEL",
+    "ANTHROPIC_DEFAULT_FABLE_MODEL",
+    "ANTHROPIC_DEFAULT_FABLE_MODEL_NAME",
     "ANTHROPIC_DEFAULT_OPUS_MODEL",
     "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME",
     "ANTHROPIC_DEFAULT_SONNET_MODEL",
@@ -137,6 +139,7 @@ def render_overlay(
     use_pat: bool = False,
     provider: str | None = None,
     provider_models: dict[str, str] | None = None,
+    fable_enabled: bool = False,
 ) -> tuple[dict, list[list[str]]]:
     """Return (overlay, managed_key_paths) for Claude settings.json.
 
@@ -199,6 +202,14 @@ def render_overlay(
         # so users can see which gateway-routable model is behind each shortcut.
         # We deliberately don't set the `_NAME` companion env vars — the raw id
         # is more useful than a friendly label for debugging gateway routing.
+        #
+        # Fable is opt-in only (`ucode configure --enable-fable`): it's a premium
+        # model, so we don't pin the family alias unless the user asked for it.
+        # When off, ANTHROPIC_DEFAULT_FABLE_MODEL is simply never written — and
+        # since it's in CLAUDE_MANAGED_MODEL_ENV_KEYS, any stale value from a
+        # prior `--enable-fable` run is pruned from settings.json on next launch.
+        if fable_enabled and claude_models.get("fable"):
+            env["ANTHROPIC_DEFAULT_FABLE_MODEL"] = claude_models["fable"]
         if claude_models.get("opus"):
             env["ANTHROPIC_DEFAULT_OPUS_MODEL"] = _maybe_add_1m_suffix(claude_models["opus"])
         if claude_models.get("sonnet"):
@@ -303,6 +314,7 @@ def write_tool_config(
         use_pat=bool(state.get("use_pat")),
         provider=provider,
         provider_models=provider_models,
+        fable_enabled=bool(state.get("fable_enabled")),
     )
     tracing_env_vars = tracing_env(state, "claude")
     stop_hook_command = claude_tracing_stop_hook_command() if tracing_env_vars else None

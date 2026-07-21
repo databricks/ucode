@@ -122,6 +122,37 @@ class TestRenderOverlay:
         env = overlay["env"]
         assert "ANTHROPIC_DEFAULT_SONNET_MODEL" not in env
 
+    def test_fable_not_pinned_by_default(self):
+        # Fable is opt-in: even when the workspace advertises it, the env var is
+        # absent unless fable_enabled is passed.
+        models = {"fable": "databricks-claude-fable-5", "opus": "databricks-claude-opus-4-8"}
+        overlay, _ = claude.render_overlay(WS, "s4", claude_models=models)
+        env = overlay["env"]
+        assert "ANTHROPIC_DEFAULT_FABLE_MODEL" not in env
+        assert env["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "databricks-claude-opus-4-8[1m]"
+
+    def test_fable_pinned_when_enabled_and_discovered(self):
+        models = {"fable": "system.ai.claude-fable-5"}
+        overlay, _ = claude.render_overlay(WS, "s4", claude_models=models, fable_enabled=True)
+        env = overlay["env"]
+        # Fable 5 is 1M-context by default, so no `[1m]` suffix is appended.
+        assert env["ANTHROPIC_DEFAULT_FABLE_MODEL"] == "system.ai.claude-fable-5"
+
+    def test_fable_not_pinned_when_enabled_but_not_discovered(self):
+        # --enable-fable is a no-op when the workspace advertises no fable model,
+        # mirroring the opus/sonnet/haiku "only if discovered" behavior.
+        models = {"opus": "databricks-claude-opus-4-8"}
+        overlay, _ = claude.render_overlay(WS, "s4", claude_models=models, fable_enabled=True)
+        assert "ANTHROPIC_DEFAULT_FABLE_MODEL" not in overlay["env"]
+
+    def test_fable_not_pinned_under_provider(self):
+        # A Model Provider Service routes by header and pins no Databricks model.
+        models = {"fable": "databricks-claude-fable-5"}
+        overlay, _ = claude.render_overlay(
+            WS, "s4", claude_models=models, fable_enabled=True, provider="main.x.claude-svc"
+        )
+        assert "ANTHROPIC_DEFAULT_FABLE_MODEL" not in overlay["env"]
+
     def test_provider_adds_routing_header(self):
         overlay, _ = claude.render_overlay(WS, "s4", provider="main.aarushi.aarushi-claude")
         assert (

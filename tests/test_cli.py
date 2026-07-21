@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from typer.testing import CliRunner
@@ -593,6 +594,50 @@ class TestConfigureAgentFlag:
         )
         mock_cfg.assert_called_once_with("claude")
 
+    def test_disable_fable_alone_implicitly_targets_claude(self):
+        # Fable is Claude-only, so `--disable-fable` on its own should configure
+        # claude directly instead of dropping into the interactive agent picker.
+        with (
+            patch("ucode.cli.install_databricks_cli"),
+            patch("ucode.cli.install_tool_binary") as mock_install,
+            patch("ucode.cli.configure_workspace_command") as mock_cfg,
+        ):
+            result = runner.invoke(app, ["configure", "--disable-fable"])
+        assert result.exit_code == 0, result.output
+        mock_install.assert_called_once_with(
+            "claude", strict=True, update_existing=True, prompt_optional_updates=True
+        )
+        mock_cfg.assert_called_once_with("claude", fable_enabled=False)
+
+    def test_enable_fable_alone_implicitly_targets_claude(self):
+        with (
+            patch("ucode.cli.install_databricks_cli"),
+            patch("ucode.cli.install_tool_binary") as mock_install,
+            patch("ucode.cli.configure_workspace_command") as mock_cfg,
+        ):
+            result = runner.invoke(app, ["configure", "--enable-fable"])
+        assert result.exit_code == 0, result.output
+        mock_install.assert_called_once_with(
+            "claude", strict=True, update_existing=True, prompt_optional_updates=True
+        )
+        mock_cfg.assert_called_once_with("claude", fable_enabled=True)
+
+    def test_enable_fable_with_explicit_agents_does_not_override(self):
+        # An explicit --agents selection wins; the fable flag rides along without
+        # forcing the claude-only single-agent path.
+        with (
+            patch("ucode.cli.install_databricks_cli"),
+            patch("ucode.cli.install_tool_binary"),
+            patch("ucode.cli.configure_workspace_command") as mock_cfg,
+        ):
+            result = runner.invoke(app, ["configure", "--enable-fable", "--agents", "claude,codex"])
+        assert result.exit_code == 0, result.output
+        mock_cfg.assert_called_once_with(
+            selected_tools=["claude", "codex"],
+            prompt_optional_updates=True,
+            fable_enabled=True,
+        )
+
     def test_skip_upgrade_flag_disables_optional_update_prompt(self):
         with (
             patch("ucode.cli.install_databricks_cli"),
@@ -814,6 +859,7 @@ class TestConfigureAgentsSelection:
             tools=None,
             force_login=False,
             use_pat=False,
+            fable_enabled=None,
         ):
             configured_shared.append(
                 (workspace, profile, tuple(tools) if tools is not None else None, force_login)
@@ -1139,6 +1185,75 @@ class TestConfigureSharedStateUsePat:
         assert legacy_called == []
         assert "uc_enabled" not in state
 
+    def _stub_with_fable(self, monkeypatch):
+        cli_mod, *_ = self._stub_deps(monkeypatch, pat_token="dapi-pat")
+        monkeypatch.setattr(
+            cli_mod,
+            "discover_model_services",
+            lambda w, t: (
+                {"fable": "system.ai.claude-fable-5", "opus": "system.ai.claude-opus-4-8"},
+                [],
+                [],
+                [],
+                None,
+            ),
+        )
+        return cli_mod
+
+    def test_fable_stripped_from_discovery_when_not_enabled(self, monkeypatch):
+        # Discovery buckets fable, but without --enable-fable it's dropped from
+        # the persisted bundle so it never reaches any agent's config.
+        cli_mod = self._stub_with_fable(monkeypatch)
+
+        state = cli_mod.configure_shared_state(self.WS, profile="DEFAULT")
+
+        assert state["claude_models"] == {"opus": "system.ai.claude-opus-4-8"}
+        assert "fable_enabled" not in state
+
+    def test_fable_retained_and_persisted_when_enabled(self, monkeypatch):
+        cli_mod = self._stub_with_fable(monkeypatch)
+
+        state = cli_mod.configure_shared_state(self.WS, profile="DEFAULT", fable_enabled=True)
+
+        assert state["claude_models"]["fable"] == "system.ai.claude-fable-5"
+        assert state["fable_enabled"] is True
+
+    def test_launch_inherits_persisted_fable_opt_in(self, monkeypatch):
+        # A launch re-run passes fable_enabled=None; the persisted opt-in for the
+        # same workspace applies, so fable stays in the discovered bundle.
+        cli_mod, *_ = self._stub_deps(
+            monkeypatch,
+            pat_token="dapi-pat",
+            existing_state={"workspace": self.WS, "profile": "DEFAULT", "fable_enabled": True},
+        )
+        monkeypatch.setattr(
+            cli_mod,
+            "discover_model_services",
+            lambda w, t: ({"fable": "system.ai.claude-fable-5"}, [], [], [], None),
+        )
+
+        state = cli_mod.configure_shared_state(self.WS, profile="DEFAULT")
+
+        assert state["claude_models"]["fable"] == "system.ai.claude-fable-5"
+        assert state["fable_enabled"] is True
+
+    def test_reconfigure_with_disable_fable_clears_opt_in(self, monkeypatch):
+        cli_mod, *_ = self._stub_deps(
+            monkeypatch,
+            pat_token="dapi-pat",
+            existing_state={"workspace": self.WS, "profile": "DEFAULT", "fable_enabled": True},
+        )
+        monkeypatch.setattr(
+            cli_mod,
+            "discover_model_services",
+            lambda w, t: ({"fable": "system.ai.claude-fable-5"}, [], [], [], None),
+        )
+
+        state = cli_mod.configure_shared_state(self.WS, profile="DEFAULT", fable_enabled=False)
+
+        assert "fable_enabled" not in state
+        assert "fable" not in state["claude_models"]
+
     def test_falls_back_to_legacy_when_uc_empty(self, monkeypatch):
         # No UC model-services: each family falls back to the legacy listing.
         cli_mod, *_ = self._stub_deps(monkeypatch, pat_token="dapi-pat")
@@ -1313,3 +1428,105 @@ class TestConfigureSharedStateSkipDiscovery:
         assert state["web_search_model"] == "databricks-gpt-5"
         # Existing model list preserved, not overwritten to {}.
         assert state["claude_models"] == {"opus": "databricks-claude-opus-4-8"}
+
+
+class TestConfigureSharedStateSkipPreflight:
+    """With skip_preflight (--skip-preflight), a prior configure is trusted:
+    no auth login, token fetch, gateway probe, or model discovery runs — but the
+    profile and base URLs are still resolved and state is persisted."""
+
+    WS = "https://cfg.databricks.com"
+
+    @staticmethod
+    def _stub(monkeypatch):
+        import ucode.cli as cli_mod
+
+        def _boom(name):
+            def _f(*a, **k):
+                raise AssertionError(f"{name} must not run under skip_preflight")
+
+            return _f
+
+        monkeypatch.setattr(cli_mod, "normalize_workspace_url", lambda w: w)
+        # Any network round-trip is a hard failure in this mode.
+        monkeypatch.setattr(cli_mod, "ensure_databricks_auth", _boom("ensure_databricks_auth"))
+        monkeypatch.setattr(cli_mod, "run_databricks_login", _boom("run_databricks_login"))
+        monkeypatch.setattr(cli_mod, "ensure_pat_bearer", _boom("ensure_pat_bearer"))
+        monkeypatch.setattr(cli_mod, "get_databricks_token", _boom("get_databricks_token"))
+        monkeypatch.setattr(cli_mod, "ensure_ai_gateway_v2", _boom("ensure_ai_gateway_v2"))
+        monkeypatch.setattr(cli_mod, "discover_model_services", _boom("discover_model_services"))
+        monkeypatch.setattr(cli_mod, "discover_codex_models", _boom("discover_codex_models"))
+        monkeypatch.setattr(cli_mod, "find_profile_name_for_host", lambda w: "resolved")
+        monkeypatch.setattr(cli_mod, "build_shared_base_urls", lambda w: {"codex": "u/codex"})
+        saved: list[dict] = []
+        monkeypatch.setattr(cli_mod, "save_state", lambda s: saved.append(dict(s)))
+        return cli_mod, saved
+
+    def test_skips_auth_gateway_and_discovery_but_persists(self, monkeypatch):
+        cli_mod, saved = self._stub(monkeypatch)
+        monkeypatch.setattr(
+            cli_mod,
+            "load_state",
+            lambda: {"workspace": self.WS, "codex_models": ["databricks-gpt-5"]},
+        )
+
+        state = cli_mod.configure_shared_state(
+            self.WS, profile="DEFAULT", tools=["codex"], skip_preflight=True
+        )
+
+        # base_urls rebuilt and state saved, but the prior model list is left intact.
+        assert state["base_urls"] == {"codex": "u/codex"}
+        assert state["codex_models"] == ["databricks-gpt-5"]
+        assert saved and saved[-1]["base_urls"] == {"codex": "u/codex"}
+
+    def test_resolves_profile_locally_when_missing(self, monkeypatch):
+        cli_mod, _ = self._stub(monkeypatch)
+        monkeypatch.setattr(cli_mod, "load_state", lambda: {"workspace": self.WS})
+
+        state = cli_mod.configure_shared_state(self.WS, profile=None, skip_preflight=True)
+
+        # find_profile_name_for_host is a local ~/.databrickscfg lookup (no network).
+        assert state["profile"] == "resolved"
+
+
+class TestSkipPreflightFlag:
+    """`--skip-preflight` on a launch command threads through _launch_tool to
+    configure_shared_state as skip_preflight."""
+
+    LAUNCH_TOOLS = ["codex", "claude", "gemini", "opencode", "copilot", "pi"]
+
+    @staticmethod
+    def _patches(cfg):
+        return [
+            patch("ucode.cli.ensure_bootstrap_dependencies"),
+            patch("ucode.cli._auto_configure_tool"),
+            patch("ucode.cli.load_state", return_value=MINIMAL_STATE),
+            patch("ucode.cli.ensure_provider_state", return_value=MINIMAL_STATE),
+            patch("ucode.cli.configure_shared_state", cfg),
+            patch(
+                "ucode.cli.resolve_launch_model",
+                return_value=(MINIMAL_STATE, "databricks-claude-sonnet-4"),
+            ),
+            patch("ucode.cli.configure_tool", return_value=MINIMAL_STATE),
+            patch("ucode.cli.launch_agent"),
+        ]
+
+    @pytest.mark.parametrize("tool", LAUNCH_TOOLS)
+    def test_flag_sets_skip_preflight_true(self, tool):
+        cfg = MagicMock(return_value=MINIMAL_STATE)
+        with contextlib.ExitStack() as stack:
+            for p in self._patches(cfg):
+                stack.enter_context(p)
+            result = runner.invoke(app, [tool, "--skip-preflight"])
+        assert result.exit_code == 0, result.output
+        assert cfg.call_args.kwargs["skip_preflight"] is True
+
+    @pytest.mark.parametrize("tool", ["codex", "gemini"])
+    def test_absent_flag_defaults_false(self, tool):
+        cfg = MagicMock(return_value=MINIMAL_STATE)
+        with contextlib.ExitStack() as stack:
+            for p in self._patches(cfg):
+                stack.enter_context(p)
+            result = runner.invoke(app, [tool])
+        assert result.exit_code == 0, result.output
+        assert cfg.call_args.kwargs["skip_preflight"] is False

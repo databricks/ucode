@@ -1100,6 +1100,12 @@ _MODEL_SERVICE_REQUIRED_PREFIX = "system.ai."
 # support a new family.
 _OSS_MODEL_FAMILIES = ("kimi-", "glm-")
 
+# Claude model families ucode buckets, newest tier first. Each maps to a
+# Claude Code family alias (ANTHROPIC_DEFAULT_<FAMILY>_MODEL). Add an entry to
+# support a new family in both discovery paths (`claude-<family>-*` via the
+# model-services listing and `databricks-claude-<family>-*` via the AI Gateway).
+ANTHROPIC_FAMILIES = ("fable", "opus", "sonnet", "haiku")
+
 # Per-family token limits (context window + max output tokens). These are a
 # property of the model + its `/ai-gateway/mlflow/v1` route (the gateway rejects
 # requests whose output exceeds the cap), not of any one agent — so every agent
@@ -1226,8 +1232,9 @@ def discover_model_services(
 
     Returns (claude_models, codex_models, gemini_models, oss_models, reason):
 
-    - ``claude_models`` maps ``opus``/``sonnet``/``haiku`` to the newest
-      matching ``system.ai.claude-*`` id (mirrors ``discover_claude_models``).
+    - ``claude_models`` maps ``fable``/``opus``/``sonnet``/``haiku`` to the
+      newest matching ``system.ai.claude-*`` id (mirrors
+      ``discover_claude_models``).
     - ``codex_models`` is the list of ``system.ai.*gpt-*`` ids.
     - ``gemini_models`` is the list of ``system.ai.*gemini-*`` ids, newest first.
     - ``oss_models`` is the list of OSS-model ``system.ai.*`` ids.
@@ -1241,7 +1248,7 @@ def discover_model_services(
         return {}, [], [], [], reason
 
     claude_models: dict[str, str] = {}
-    for family in ("opus", "sonnet", "haiku"):
+    for family in ANTHROPIC_FAMILIES:
         candidates = sorted(
             [m for m in ids if f"claude-{family}-" in m],
             reverse=True,
@@ -1797,21 +1804,22 @@ def discover_claude_models(workspace: str, token: str) -> tuple[dict[str, str], 
     ]
 
     result: dict[str, str] = {}
-    for family, key in [("opus", "opus"), ("sonnet", "sonnet"), ("haiku", "haiku")]:
+    for family in ANTHROPIC_FAMILIES:
         candidates = sorted(
             [m for m in raw_ids if f"databricks-claude-{family}-" in m],
             reverse=True,
         )
         if candidates:
-            result[key] = candidates[0]
+            result[family] = candidates[0]
     if result:
         return result, None
     if not raw_ids:
         return {}, "AI Gateway returned no Claude model ids"
     sample = ", ".join(raw_ids[:5])
+    families = ",".join(ANTHROPIC_FAMILIES)
     return {}, (
         "AI Gateway returned model ids but none matched "
-        f"`databricks-claude-{{opus,sonnet,haiku}}-*` (got: {sample})"
+        f"`databricks-claude-{{{families}}}-*` (got: {sample})"
     )
 
 
