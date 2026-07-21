@@ -174,7 +174,8 @@ def render_overlay(
         # Claude Code only sends when experimental betas are enabled — so we must
         # not set CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS (see CLAUDE_REMOVED_ENV_KEYS).
         "ENABLE_PROMPT_CACHING_1H": "1",
-        "ENABLE_TOOL_SEARCH": "true",
+        "ENABLE_TOOL_SEARCH": "1",
+        "CLAUDE_CODE_USE_GATEWAY": "1",
     }
     # Intentionally NOT setting ANTHROPIC_MODEL. Setting it produces a duplicate
     # catalog row in Claude Code's /model picker (e.g. "Opus 4.8 (1M context) ✓")

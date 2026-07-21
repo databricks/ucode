@@ -155,7 +155,8 @@ def build_agent_state(state: dict) -> dict[str, dict]:
                 "CLAUDE_CODE_API_KEY_HELPER_TTL_MS": str(AUTH_REFRESH_INTERVAL_MS),
                 # Kept in sync with agents/claude.py render_overlay.
                 "ENABLE_PROMPT_CACHING_1H": "1",
-                "ENABLE_TOOL_SEARCH": "true",
+                "ENABLE_TOOL_SEARCH": "1",
+                "CLAUDE_CODE_USE_GATEWAY": "1",
             },
         },
         "codex": {
