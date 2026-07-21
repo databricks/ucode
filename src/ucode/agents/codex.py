@@ -17,10 +17,8 @@ from ucode.config_io import (
 )
 from ucode.databricks import (
     build_auth_token_argv,
-    build_oss_base_url,
     build_tool_base_url,
     get_databricks_token,
-    is_oss_model,
 )
 from ucode.launcher import exec_or_spawn
 from ucode.state import mark_tool_managed, save_state
@@ -109,14 +107,9 @@ def _provider_block(
     databricks_profile: str | None,
     use_pat: bool = False,
     provider: str | None = None,
-    model: str | None = None,
 ) -> dict:
     auth_argv = build_auth_token_argv(workspace, databricks_profile, use_pat=use_pat)
-    # OSS chat models (kimi/glm) don't speak the Responses API — they're served
-    # by the OpenAI-compatible MLflow chat-completions gateway. Route them there
-    # with `wire_api = "chat"`; everything else uses the codex Responses route.
-    oss = is_oss_model(model)
-    base_url = build_oss_base_url(workspace) if oss else build_tool_base_url("codex", workspace)
+    base_url = build_tool_base_url("codex", workspace)
     http_headers = {
         "User-Agent": f"ucode/{ucode_version()} codex/{agent_version('codex')}",
     }
@@ -127,7 +120,7 @@ def _provider_block(
     return {
         "name": "Databricks AI Gateway",
         "base_url": base_url,
-        "wire_api": "chat" if oss else "responses",
+        "wire_api": "responses",
         "http_headers": http_headers,
         # Run the `ucode auth-token` executable directly (not via `sh -c`) so the
         # helper works on Windows, where there is no POSIX shell (issue #116).
@@ -152,7 +145,7 @@ def render_overlay(
         overlay["model"] = model
     overlay["model_providers"] = {
         CODEX_MODEL_PROVIDER_NAME: _provider_block(
-            workspace, databricks_profile, use_pat, provider, model
+            workspace, databricks_profile, use_pat, provider
         ),
     }
     return overlay
@@ -178,7 +171,7 @@ def render_legacy_overlay(
         "profiles": {CODEX_PROFILE_NAME: profile_block},
         "model_providers": {
             CODEX_MODEL_PROVIDER_NAME: _provider_block(
-                workspace, databricks_profile, use_pat, provider, model
+                workspace, databricks_profile, use_pat, provider
             ),
         },
     }
