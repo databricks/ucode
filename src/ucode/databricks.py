@@ -1287,6 +1287,9 @@ def discover_model_services(
     return claude_models, codex_models, gemini_models, oss_models, None
 
 
+_RECOMMEND_MODEL_API_PATH = "/api/ai-gateway/v2/coding-agent-configs:recommendModel"
+
+
 def recommend_coding_agent_models(
     workspace: str, token: str, available_models: list[str]
 ) -> tuple[list[str], str | None]:
@@ -1302,10 +1305,7 @@ def recommend_coding_agent_models(
     - ``([], reason)`` on transport/parse failure — distinct from an intentional
       empty recommendation so the caller can surface the error.
     """
-    url = (
-        f"https://{workspace_hostname(workspace)}"
-        "/api/ai-gateway/v2/coding-agent-configs:recommendModel"
-    )
+    url = f"https://{workspace_hostname(workspace)}{_RECOMMEND_MODEL_API_PATH}"
     payload, reason = _http_post_json(url, token, {"available_models": available_models})
     if reason is not None:
         return [], reason
@@ -2178,18 +2178,11 @@ def build_tool_base_url(tool: str, workspace: str) -> str:
     raise RuntimeError(f"Unsupported tool '{tool}'.")
 
 
-def build_oss_base_url(workspace: str) -> str:
-    # OSS chat models (kimi/glm) are served by the OpenAI-compatible MLflow
-    # chat-completions gateway, not the family-specific routes. Shared by every
-    # agent that speaks chat-completions to OSS models.
-    return f"{workspace}/ai-gateway/mlflow/v1"
-
-
 def build_opencode_base_urls(workspace: str) -> dict[str, str]:
     return {
         "anthropic": build_tool_base_url("claude", workspace) + "/v1",
         "gemini": build_tool_base_url("gemini", workspace) + "/v1beta",
-        "oss": build_oss_base_url(workspace),
+        "oss": f"{workspace}/ai-gateway/mlflow/v1",
     }
 
 

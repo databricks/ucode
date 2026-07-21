@@ -20,7 +20,6 @@ from ucode.databricks import (
     build_auth_token_argv,
     build_databricks_cli_env,
     build_opencode_base_urls,
-    build_oss_base_url,
     build_shared_base_urls,
     build_tool_base_url,
     ensure_databricks_cli_version,
@@ -1716,11 +1715,6 @@ class TestIsOSSModel:
 
     def test_none(self):
         assert is_oss_model(None) is False
-
-
-class TestBuildOSSBaseUrl:
-    def test_mlflow_route(self):
-        assert build_oss_base_url(WS) == f"{WS}/ai-gateway/mlflow/v1"
 
 
 class TestRecommendCodingAgentModels:
