@@ -49,9 +49,8 @@ WINDOWS_DATABRICKS_INSTALL_URL = (
     "https://raw.githubusercontent.com/databricks/setup-cli/main/install.ps1"
 )
 AI_GATEWAY_V2_DOCS_URL = "https://docs.databricks.com/aws/en/ai-gateway/overview-beta"
-MIN_DATABRICKS_CLI_VERSION = (0, 298, 0)
-# Minimum CLI version that ships `databricks aitools` (Databricks AI Tools).
-AITOOLS_MIN_CLI_VERSION = (1, 1, 0)
+# v1.0.0 is the release that ships `databricks aitools`.
+MIN_DATABRICKS_CLI_VERSION = (1, 0, 0)
 TOKEN_REFRESH_INTERVAL_SECONDS = 1800
 
 
@@ -572,18 +571,12 @@ def install_ai_tools(agent_tokens: list[str], profile: str | None = None) -> Non
                 timeout=300,
             )
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
-        # Surface the CLI's own error rather than assuming a version cause:
-        # `aitools` also fails when an agent binary isn't on PATH, etc. An old
-        # CLI (before `aitools` shipped) is only one possible reason, offered
-        # as a hint rather than asserted as the cause.
-        required = ".".join(str(n) for n in AITOOLS_MIN_CLI_VERSION)
+        # The CLI version is already guaranteed by ensure_databricks_cli_version,
+        # so any failure here is something else (e.g. an agent binary missing
+        # from PATH). Surface the CLI's own error rather than guessing a cause.
         detail = (getattr(exc, "stderr", None) or "").strip()
         reason = detail.splitlines()[-1] if detail else str(exc)
-        print_warning(
-            f"Could not install Databricks AI Tools: {reason}. "
-            f"This needs Databricks CLI v{required}+ (`databricks aitools`); "
-            "upgrade the CLI if needed, then re-run `ucode configure` to add them."
-        )
+        print_warning(f"Could not install Databricks AI Tools: {reason}")
     else:
         print_success("Databricks AI Tools installed")
 
