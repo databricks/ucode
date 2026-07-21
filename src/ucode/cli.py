@@ -16,6 +16,7 @@ from ucode.agents import (
     configure_tool,
     ensure_bootstrap_dependencies,
     ensure_provider_state,
+    harness_for_model,
     install_tool_binary,
     normalize_tool,
     provider_permission_error,
@@ -31,6 +32,7 @@ from ucode.agents.codex import revert_legacy_shared_config
 from ucode.agents.pi import PI_SETTINGS_BACKUP_PATH, PI_SETTINGS_PATH
 from ucode.config_io import restore_file, set_dry_run
 from ucode.databricks import (
+    _debug,
     apply_pat_environment,
     build_shared_base_urls,
     discover_claude_models,
@@ -48,6 +50,7 @@ from ucode.databricks import (
     list_profile_entries,
     list_tool_provider_services,
     normalize_workspace_url,
+    recommend_coding_agent_models,
     resolve_pat_token,
     run_databricks_login,
 )
@@ -1032,6 +1035,158 @@ def copilot_cmd(ctx: typer.Context, skip_preflight: SkipPreflightOption = False)
 def pi_cmd(ctx: typer.Context, skip_preflight: SkipPreflightOption = False) -> None:
     """Launch Pi coding agent via Databricks."""
     _launch_tool("pi", ctx, skip_preflight=skip_preflight)
+
+
+def _available_models(state: dict) -> list[str]:
+    """Collect every Databricks model id discovered for this workspace.
+
+    Flattens the per-family state buckets (claude by family alias, plus the flat
+    codex/gemini/oss lists) into a single de-duplicated, order-preserving list to
+    send to the recommendModel endpoint.
+    """
+    models: list[str] = []
+    models.extend((state.get("claude_models") or {}).values())
+    for key in ("codex_models", "gemini_models", "oss_models"):
+        models.extend(state.get(key) or [])
+    seen: set[str] = set()
+    unique: list[str] = []
+    for model in models:
+        if model and model not in seen:
+            seen.add(model)
+            unique.append(model)
+    return unique
+
+
+def _launch_args(tool: str, resolved_model: str | None, tool_args: list[str]) -> list[str]:
+    """Pin the model the user picked in `ucode run` onto the launch argv.
+
+    The claude harness deliberately doesn't pin a model in its settings (doing so
+    dupes rows in Claude Code's /model picker — see claude.render_overlay), so
+    Claude Code would otherwise boot on its own default instead of the model the
+    user selected. Prepend `--model <resolved_model>` for claude so the session
+    starts on the selected model.
+
+    `ucode run` owns model selection via the recommendation flow, so a
+    caller-supplied `--model` is rejected up front (see `_reject_model_override`)
+    rather than reaching here.
+    """
+    if tool != "claude" or not resolved_model:
+        return tool_args
+    return ["--model", resolved_model, *tool_args]
+
+
+def _reject_model_override(tool_args: list[str]) -> None:
+    """`ucode run` selects the model itself, so `--model` on the argv is invalid.
+
+    Fail fast with actionable guidance rather than silently letting a caller
+    `--model` fight the recommendation flow.
+    """
+    if any(arg == "--model" or arg.startswith("--model=") for arg in tool_args):
+        raise RuntimeError(
+            "`ucode run` selects the model for you — passing `--model` is not "
+            "supported. Run `ucode run` and pick from the recommended models, or "
+            "use `ucode <harness>` (e.g. `ucode claude`) to launch a specific "
+            "harness directly."
+        )
+
+
+def _run_session(ctx: typer.Context, skip_preflight: bool = False) -> None:
+    """Recommend a model for the user's tier, then launch the matching harness.
+
+    Discovers the workspace's models, asks the AI Gateway's recommendModel
+    endpoint which ones the caller's tier allows, lets the user pick one, maps it
+    to a harness (claude/codex/gemini) and launches that tool pinned to the model.
+    """
+    try:
+        _reject_model_override(ctx.args)
+        existing = load_state()
+        apply_pat_environment(existing)
+        # Ensure a workspace is configured. Without one, fall back to the same
+        # first-run configuration prompt the per-tool launchers use, defaulting to
+        # the codex harness for the bootstrap install.
+        if not existing.get("workspace"):
+            ensure_bootstrap_dependencies("codex", update_existing=True)
+            _auto_configure_tool("codex")
+        # Refresh model discovery for every family so recommendModel sees the full
+        # set the workspace exposes (tools=None => fetch_all).
+        state = configure_shared_state(
+            load_state()["workspace"],
+            profile=load_state().get("profile"),
+            skip_preflight=skip_preflight,
+        )
+        available = _available_models(state)
+        if not available:
+            raise RuntimeError(
+                "No models available for this workspace. Run `ucode configure` to set it up."
+            )
+        with spinner("Requesting recommended models..."):
+            token = get_databricks_token(state["workspace"], state.get("profile"))
+            recommended, reason = recommend_coding_agent_models(
+                state["workspace"], token, available
+            )
+        if reason is not None:
+            raise RuntimeError(f"Could not fetch recommended models: {reason}")
+        if not recommended:
+            print_warning(
+                "No recommended models — use `ucode <harness>` "
+                "(e.g. `ucode claude` or `ucode codex`) to boot up your preferred harness."
+            )
+            raise typer.Exit(0)
+
+        print_section("ucode")
+        if len(recommended) == 1:
+            # Only one model recommended — no point prompting; launch it directly.
+            chosen = recommended[0]
+            _debug("recommend", f"single recommended model, auto-launching {chosen}")
+        else:
+            chosen = prompt_for_selection(
+                "Select a model", [(model, model) for model in recommended]
+            )
+            if not chosen:
+                print_err("No model selected.")
+                raise typer.Exit(130)
+
+        tool = harness_for_model(chosen)
+        if not tool:
+            raise RuntimeError(
+                f"No coding-agent harness maps to model '{chosen}'. "
+                "Supported families: claude, gpt, kimi/glm, gemini."
+            )
+
+        # A newly-picked harness may not have been configured/installed yet.
+        ensure_bootstrap_dependencies(tool, update_existing=True)
+        if tool not in (state.get("available_tools") or []):
+            _auto_configure_tool(tool)
+            state = load_state()
+
+        state, resolved_model = resolve_launch_model(tool, state, chosen)
+        state = configure_tool(tool, state, resolved_model)
+        print_kv("Model", resolved_model or chosen)
+        print_kv("Harness", TOOL_SPECS[tool]["display"])
+        if tool in ("gemini", "opencode", "copilot", "pi"):
+            print_note(
+                f"{TOOL_SPECS[tool]['display']} token refresh is managed automatically "
+                f"every 30 minutes while the session is running."
+            )
+        print_success(f"Starting {TOOL_SPECS[tool]['display']}")
+        launch_agent(tool, state, _launch_args(tool, resolved_model, ctx.args))
+    except typer.Exit:
+        # Intentional exits (empty recommendation, cancelled selection) subclass
+        # RuntimeError, so re-raise them before the error handler below rewrites
+        # them to a generic exit code 1.
+        raise
+    except RuntimeError as exc:
+        print_err(str(exc))
+        raise typer.Exit(1) from None
+    except KeyboardInterrupt:
+        print_err("Interrupted.")
+        raise typer.Exit(130) from None
+
+
+@app.command("run", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
+def run_cmd(ctx: typer.Context, skip_preflight: SkipPreflightOption = False) -> None:
+    """Recommend a model for your usage tier, then launch the matching harness."""
+    _run_session(ctx, skip_preflight=skip_preflight)
 
 
 @configure_app.callback(invoke_without_command=True)

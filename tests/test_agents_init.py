@@ -14,11 +14,35 @@ from ucode.agents import (
     configure_selected_tools,
     default_model_for_tool,
     ensure_tool_binary_available,
+    harness_for_model,
     install_tool_binary,
     normalize_tool,
     provider_permission_error,
     resolve_launch_model,
 )
+
+
+class TestHarnessForModel:
+    def test_claude_maps_to_claude(self):
+        assert harness_for_model("system.ai.claude-opus-4-8") == "claude"
+
+    def test_gpt_maps_to_codex(self):
+        assert harness_for_model("system.ai.gpt-5-5") == "codex"
+
+    def test_kimi_maps_to_codex(self):
+        assert harness_for_model("system.ai.kimi-k2") == "codex"
+
+    def test_glm_maps_to_codex(self):
+        assert harness_for_model("system.ai.glm-4-6") == "codex"
+
+    def test_gemini_maps_to_gemini(self):
+        assert harness_for_model("system.ai.gemini-2-5-pro") == "gemini"
+
+    def test_unknown_returns_none(self):
+        assert harness_for_model("system.ai.mystery-model") is None
+
+    def test_empty_returns_none(self):
+        assert harness_for_model("") is None
 
 
 class TestProviderPermissionError:

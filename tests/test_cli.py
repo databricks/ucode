@@ -145,6 +145,243 @@ class TestSubcommandRouting:
         assert result.exit_code != 0
 
 
+class TestRunCommand:
+    """`ucode run` recommends a model, then launches the matching harness."""
+
+    def _patch_run(self, *, recommended, reason=None, chosen=None):
+        return [
+            patch("ucode.cli.ensure_bootstrap_dependencies"),
+            patch("ucode.cli.load_state", return_value=MINIMAL_STATE),
+            patch("ucode.cli.configure_shared_state", return_value=MINIMAL_STATE),
+            patch("ucode.cli.get_databricks_token", return_value="tok"),
+            patch(
+                "ucode.cli.recommend_coding_agent_models",
+                return_value=(recommended, reason),
+            ),
+            patch("ucode.cli.prompt_for_selection", return_value=chosen),
+            patch(
+                "ucode.cli.resolve_launch_model",
+                side_effect=lambda tool, state, model: (state, model),
+            ),
+            patch("ucode.cli.configure_tool", return_value=MINIMAL_STATE),
+            patch("ucode.cli.launch_agent"),
+        ]
+
+    def test_recommends_and_launches_claude(self):
+        patches = self._patch_run(
+            recommended=["system.ai.claude-opus-4-8", "system.ai.gpt-5"],
+            chosen="system.ai.claude-opus-4-8",
+        )
+        with (
+            patches[0],
+            patches[1],
+            patches[2],
+            patches[3],
+            patches[4],
+            patches[5],
+            patches[6],
+            patches[7],
+            patches[8] as mock_launch,
+        ):
+            result = runner.invoke(app, ["run"])
+        assert result.exit_code == 0, result.output
+        mock_launch.assert_called_once()
+        assert mock_launch.call_args[0][0] == "claude"
+
+    def test_claude_launch_pins_selected_model(self):
+        # The claude harness doesn't pin a model in settings, so `ucode run`
+        # must pass `--model <selected>` on the argv or Claude Code boots on its
+        # own default instead of the model the user picked.
+        patches = self._patch_run(
+            recommended=["system.ai.claude-sonnet-5", "system.ai.gpt-5"],
+            chosen="system.ai.claude-sonnet-5",
+        )
+        with (
+            patches[0],
+            patches[1],
+            patches[2],
+            patches[3],
+            patches[4],
+            patches[5],
+            patches[6],
+            patches[7],
+            patches[8] as mock_launch,
+        ):
+            result = runner.invoke(app, ["run"])
+        assert result.exit_code == 0, result.output
+        assert mock_launch.call_args[0][0] == "claude"
+        assert mock_launch.call_args[0][2] == ["--model", "system.ai.claude-sonnet-5"]
+
+    def test_caller_model_override_is_rejected(self):
+        # `ucode run` selects the model itself, so a caller `--model` is invalid.
+        patches = self._patch_run(
+            recommended=["system.ai.claude-sonnet-5"],
+            chosen=None,
+        )
+        with (
+            patches[0],
+            patches[1],
+            patches[2],
+            patches[3],
+            patches[4],
+            patches[5],
+            patches[6],
+            patches[7],
+            patches[8] as mock_launch,
+        ):
+            result = runner.invoke(app, ["run", "--", "--model", "system.ai.claude-opus-4-8"])
+        assert result.exit_code == 1
+        assert "--model" in _strip_ansi(result.output)
+        mock_launch.assert_not_called()
+
+    def test_caller_model_override_equals_form_is_rejected(self):
+        patches = self._patch_run(
+            recommended=["system.ai.claude-sonnet-5"],
+            chosen=None,
+        )
+        with (
+            patches[0],
+            patches[1],
+            patches[2],
+            patches[3],
+            patches[4],
+            patches[5],
+            patches[6],
+            patches[7],
+            patches[8] as mock_launch,
+        ):
+            result = runner.invoke(app, ["run", "--", "--model=system.ai.claude-opus-4-8"])
+        assert result.exit_code == 1
+        mock_launch.assert_not_called()
+
+    def test_codex_launch_does_not_pin_model(self):
+        # Non-claude harnesses already pin the model in their own config, so the
+        # argv stays untouched.
+        patches = self._patch_run(recommended=["system.ai.gpt-5"], chosen="system.ai.gpt-5")
+        with (
+            patches[0],
+            patches[1],
+            patches[2],
+            patches[3],
+            patches[4],
+            patches[5],
+            patches[6],
+            patches[7],
+            patches[8] as mock_launch,
+        ):
+            result = runner.invoke(app, ["run"])
+        assert result.exit_code == 0, result.output
+        assert mock_launch.call_args[0][0] == "codex"
+        assert mock_launch.call_args[0][2] == []
+
+    def test_gpt_launches_codex(self):
+        patches = self._patch_run(recommended=["system.ai.gpt-5"], chosen="system.ai.gpt-5")
+        with (
+            patches[0],
+            patches[1],
+            patches[2],
+            patches[3],
+            patches[4],
+            patches[5],
+            patches[6],
+            patches[7],
+            patches[8] as mock_launch,
+        ):
+            result = runner.invoke(app, ["run"])
+        assert result.exit_code == 0, result.output
+        assert mock_launch.call_args[0][0] == "codex"
+
+    def test_oss_launches_codex(self):
+        patches = self._patch_run(recommended=["system.ai.kimi-k2"], chosen="system.ai.kimi-k2")
+        with (
+            patches[0],
+            patches[1],
+            patches[2],
+            patches[3],
+            patches[4],
+            patches[5],
+            patches[6],
+            patches[7],
+            patches[8] as mock_launch,
+        ):
+            result = runner.invoke(app, ["run"])
+        assert result.exit_code == 0, result.output
+        assert mock_launch.call_args[0][0] == "codex"
+
+    def test_single_recommendation_auto_launches_without_prompt(self):
+        patches = self._patch_run(recommended=["system.ai.claude-opus-4-8"], chosen=None)
+        with (
+            patches[0],
+            patches[1],
+            patches[2],
+            patches[3],
+            patches[4],
+            patches[5] as mock_prompt,
+            patches[6],
+            patches[7],
+            patches[8] as mock_launch,
+        ):
+            result = runner.invoke(app, ["run"])
+        assert result.exit_code == 0, result.output
+        mock_prompt.assert_not_called()
+        assert mock_launch.call_args[0][0] == "claude"
+
+    def test_empty_recommendation_exits_zero_with_guidance(self):
+        patches = self._patch_run(recommended=[])
+        with (
+            patches[0],
+            patches[1],
+            patches[2],
+            patches[3],
+            patches[4],
+            patches[5],
+            patches[6],
+            patches[7],
+            patches[8] as mock_launch,
+        ):
+            result = runner.invoke(app, ["run"])
+        assert result.exit_code == 0, result.output
+        assert "No recommended models" in _strip_ansi(result.output)
+        mock_launch.assert_not_called()
+
+    def test_endpoint_failure_exits_nonzero(self):
+        patches = self._patch_run(recommended=[], reason="HTTP 500 Server Error")
+        with (
+            patches[0],
+            patches[1],
+            patches[2],
+            patches[3],
+            patches[4],
+            patches[5],
+            patches[6],
+            patches[7],
+            patches[8] as mock_launch,
+        ):
+            result = runner.invoke(app, ["run"])
+        assert result.exit_code == 1
+        mock_launch.assert_not_called()
+
+    def test_cancelled_selection_exits(self):
+        # Two models => the picker is shown; a None result means the user cancelled.
+        patches = self._patch_run(
+            recommended=["system.ai.gpt-5", "system.ai.claude-opus-4-8"], chosen=None
+        )
+        with (
+            patches[0],
+            patches[1],
+            patches[2],
+            patches[3],
+            patches[4],
+            patches[5],
+            patches[6],
+            patches[7],
+            patches[8] as mock_launch,
+        ):
+            result = runner.invoke(app, ["run"])
+        assert result.exit_code == 130
+        mock_launch.assert_not_called()
+
+
 class TestMcpSubcommands:
     def test_web_search_subcommand_help(self):
         result = runner.invoke(app, ["mcp", "web-search", "--help"])
