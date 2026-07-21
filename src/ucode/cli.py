@@ -32,6 +32,7 @@ from ucode.agents.codex import revert_legacy_shared_config
 from ucode.agents.pi import PI_SETTINGS_BACKUP_PATH, PI_SETTINGS_PATH
 from ucode.config_io import restore_file, set_dry_run
 from ucode.databricks import (
+    _debug,
     apply_pat_environment,
     build_shared_base_urls,
     discover_claude_models,
@@ -1101,8 +1102,10 @@ def _run_session(ctx: typer.Context, skip_preflight: bool = False) -> None:
         print_section("ucode")
         if len(recommended) == 1:
             # Only one model recommended — no point prompting; launch it directly.
+            # Keep the console quiet (the Model/Harness banner below still shows
+            # what launched); note it only in the debug log.
             chosen = recommended[0]
-            print_note(f"Only one recommended model — launching {chosen}.")
+            _debug("recommend", f"single recommended model, auto-launching {chosen}")
         else:
             chosen = prompt_for_selection(
                 "Select a model", [(model, model) for model in recommended]
