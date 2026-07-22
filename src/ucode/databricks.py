@@ -574,7 +574,10 @@ def install_ai_tools(agent_tokens: list[str], profile: str | None = None) -> Non
         # The CLI version is already guaranteed by ensure_databricks_cli_version,
         # so any failure here is something else (e.g. an agent binary missing
         # from PATH). Surface the CLI's own error rather than guessing a cause.
-        detail = (getattr(exc, "stderr", None) or "").strip()
+        detail = getattr(exc, "stderr", None) or ""
+        if isinstance(detail, bytes):  # TimeoutExpired.stderr is bytes even with text=True
+            detail = detail.decode(errors="replace")
+        detail = detail.strip()
         reason = detail.splitlines()[-1] if detail else str(exc)
         print_warning(f"Could not install Databricks AI Tools: {reason}")
     else:

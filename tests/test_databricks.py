@@ -1745,6 +1745,19 @@ class TestInstallAiTools:
         self._capture_run(monkeypatch, raises=subprocess.TimeoutExpired("databricks", 300))
         install_ai_tools(["claude-code"])
 
+    def test_timeout_stderr_bytes_decoded_in_warning(self, monkeypatch):
+        # TimeoutExpired.stderr is bytes even with text=True; the warning must
+        # decode it, not render a `b'...'` repr.
+        err = subprocess.TimeoutExpired("databricks", 300)
+        err.stderr = b"resolving agents...\ninstall timed out"
+        self._capture_run(monkeypatch, raises=err)
+        warnings = []
+        monkeypatch.setattr(db_mod, "print_warning", warnings.append)
+        install_ai_tools(["claude-code"])
+        assert len(warnings) == 1
+        assert "install timed out" in warnings[0]
+        assert "b'" not in warnings[0]
+
     def test_failure_surfaces_cli_stderr(self, monkeypatch):
         # A modern CLI can still fail (e.g. an agent binary missing from PATH);
         # the warning must show the CLI's real error, not blame the version.
