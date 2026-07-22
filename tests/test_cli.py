@@ -493,10 +493,41 @@ class TestConfigureAgentFlag:
             patch("ucode.cli.install_databricks_cli"),
             patch("ucode.cli.install_tool_binary"),
             patch("ucode.cli.configure_workspace_command") as mock_cfg,
+            # Fully-interactive configure ends by offering the MCP step; decline it.
+            patch("ucode.cli.prompt_yes_no", return_value=False) as mock_mcp_prompt,
+            patch("ucode.cli.configure_mcp_command") as mock_mcp,
         ):
             result = runner.invoke(app, ["configure"])
         assert result.exit_code == 0, result.output
         mock_cfg.assert_called_once_with(prompt_optional_updates=True)
+        mock_mcp_prompt.assert_called_once()
+        mock_mcp.assert_not_called()
+
+    def test_interactive_accepting_mcp_prompt_runs_mcp_config(self):
+        with (
+            patch("ucode.cli.install_databricks_cli"),
+            patch("ucode.cli.install_tool_binary"),
+            patch("ucode.cli.configure_workspace_command"),
+            patch("ucode.cli.prompt_yes_no", return_value=True),
+            patch("ucode.cli.configure_mcp_command") as mock_mcp,
+        ):
+            result = runner.invoke(app, ["configure"])
+        assert result.exit_code == 0, result.output
+        mock_mcp.assert_called_once_with()
+
+    def test_agents_flag_skips_mcp_prompt(self):
+        # Flag-driven (non-interactive) runs must stay scriptable: no MCP prompt.
+        with (
+            patch("ucode.cli.install_databricks_cli"),
+            patch("ucode.cli.install_tool_binary"),
+            patch("ucode.cli.configure_workspace_command"),
+            patch("ucode.cli.prompt_yes_no") as mock_prompt,
+            patch("ucode.cli.configure_mcp_command") as mock_mcp,
+        ):
+            result = runner.invoke(app, ["configure", "--agents", "claude,codex"])
+        assert result.exit_code == 0, result.output
+        mock_prompt.assert_not_called()
+        mock_mcp.assert_not_called()
 
     def test_agents_flag_calls_configure_with_tools(self):
         with (
@@ -643,6 +674,9 @@ class TestConfigureAgentFlag:
             patch("ucode.cli.install_databricks_cli"),
             patch("ucode.cli.install_tool_binary"),
             patch("ucode.cli.configure_workspace_command") as mock_cfg,
+            # Fully-interactive configure ends by offering the MCP step; decline it.
+            patch("ucode.cli.prompt_yes_no", return_value=False),
+            patch("ucode.cli.configure_mcp_command"),
         ):
             result = runner.invoke(app, ["configure", "--skip-upgrade"])
         assert result.exit_code == 0, result.output
