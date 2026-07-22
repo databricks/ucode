@@ -13,6 +13,7 @@ import platform
 import re
 import shlex
 import shutil
+import ssl
 import subprocess
 import time
 from concurrent.futures import (
@@ -202,6 +203,27 @@ def _log_auth_diagnostics() -> None:
         _debug(f"databrickscfg ({cfg_path})", f"read error: {exc}")
 
 
+def _make_ssl_context() -> ssl.SSLContext:
+    """Return an SSL context that trusts the system CA bundle plus any custom CA
+    pointed to by REQUESTS_CA_BUNDLE or CURL_CA_BUNDLE.
+
+    Enterprise environments often inject a self-signed certificate via an SSL
+    inspection proxy. curl picks it up from the system store automatically;
+    Python's default ssl context doesn't on all platforms. Honoring the same
+    env vars that curl and the `requests` library use lets customers point ucode
+    at their enterprise CA bundle without patching the system Python install."""
+    ctx = ssl.create_default_context()
+    for env_var in ("REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "SSL_CERT_FILE"):
+        ca_bundle = os.environ.get(env_var, "").strip()
+        if ca_bundle and Path(ca_bundle).is_file():
+            try:
+                ctx.load_verify_locations(cafile=ca_bundle)
+            except ssl.SSLError:
+                pass
+            break
+    return ctx
+
+
 def _http_get_json(
     url: str, token: str, *, timeout: int = 10
 ) -> tuple[dict | list | None, str | None]:
@@ -214,7 +236,9 @@ def _http_get_json(
         headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
     )
     try:
-        with urllib_request.urlopen(request, timeout=timeout) as response:
+        with urllib_request.urlopen(
+            request, timeout=timeout, context=_make_ssl_context()
+        ) as response:
             body = response.read().decode("utf-8")
         _debug(f"GET {url}", f"HTTP 200, {len(body)} bytes")
         if _debug_enabled():
@@ -261,7 +285,9 @@ def _http_post_json(
         },
     )
     try:
-        with urllib_request.urlopen(request, timeout=timeout) as response:
+        with urllib_request.urlopen(
+            request, timeout=timeout, context=_make_ssl_context()
+        ) as response:
             body = response.read().decode("utf-8")
         _debug(f"POST {url}", f"HTTP {response.status}, {len(body)} bytes")
         if _debug_enabled():
@@ -2000,7 +2026,7 @@ def discover_sql_warehouse_http_path(
     )
 
     try:
-        with urllib_request.urlopen(request, timeout=20) as response:
+        with urllib_request.urlopen(request, timeout=20, context=_make_ssl_context()) as response:
             payload = json.loads(response.read().decode("utf-8"))
     except urllib_error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace") if exc.fp else ""
