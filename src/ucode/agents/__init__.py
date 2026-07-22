@@ -75,13 +75,20 @@ AITOOLS_AGENT_TOKENS = {
 }
 
 
-def install_ai_tools_for_agents(tools: list[str], profile: str | None) -> None:
+def install_ai_tools_for_agents(tools: list[str], state: dict) -> None:
     """Install Databricks AI Tools for the coding agents that support them.
 
-    ``tools`` are ucode tool keys (e.g. ``"claude"``); we map each to its
-    ``databricks aitools`` agent id and drop the unsupported ones (gemini, pi)."""
-    tokens = [AITOOLS_AGENT_TOKENS[tool] for tool in tools if tool in AITOOLS_AGENT_TOKENS]
-    install_ai_tools(tokens, profile)
+    Persists an ``ai_tools_installed`` marker so an already-installed agent is
+    skipped without shelling out, making repeat calls (e.g. on every launch) cheap."""
+    installed = set(state.get("ai_tools_installed") or [])
+    mapped = (AITOOLS_AGENT_TOKENS.get(tool) for tool in tools)
+    tokens = [tok for tok in mapped if tok and tok not in installed]
+    if not tokens:
+        return
+    newly_installed = install_ai_tools(tokens, state.get("profile"))
+    if newly_installed:
+        state["ai_tools_installed"] = sorted(installed | set(newly_installed))
+        save_state(state)
 
 
 def normalize_tool(tool: str) -> str:
@@ -398,7 +405,7 @@ def configure_single_tool(tool: str, state: dict) -> dict:
     available_tools = list(set((state.get("available_tools") or []) + [tool]))
     state["available_tools"] = available_tools
     save_state(state)
-    install_ai_tools_for_agents([tool], state.get("profile"))
+    install_ai_tools_for_agents([tool], state)
     return state
 
 
@@ -429,7 +436,7 @@ def configure_selected_tools(state: dict, tools: list[str]) -> dict:
     existing = state.get("available_tools") or []
     state["available_tools"] = sorted(set(existing) | set(tools))
     save_state(state)
-    install_ai_tools_for_agents(tools, state.get("profile"))
+    install_ai_tools_for_agents(tools, state)
     return state
 
 

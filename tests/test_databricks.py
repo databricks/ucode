@@ -1717,12 +1717,13 @@ class TestInstallAiTools:
 
     def test_no_tokens_skips_entirely(self, monkeypatch):
         calls = self._capture_run(monkeypatch)
-        install_ai_tools([])
+        assert install_ai_tools([]) == []
         assert calls == []
 
     def test_invokes_aitools_install(self, monkeypatch):
         calls = self._capture_run(monkeypatch)
-        install_ai_tools(["claude-code", "codex"])
+        # Returns the tokens it installed, so callers can record a marker.
+        assert install_ai_tools(["claude-code", "codex"]) == ["claude-code", "codex"]
         assert len(calls) == 1
         cmd = calls[0]
         assert cmd[:3] == ["databricks", "aitools", "install"]
@@ -1738,8 +1739,8 @@ class TestInstallAiTools:
 
     def test_install_failure_is_non_fatal(self, monkeypatch):
         self._capture_run(monkeypatch, raises=subprocess.CalledProcessError(1, "databricks"))
-        # Must not raise — AI Tools are best-effort.
-        install_ai_tools(["claude-code"])
+        # Must not raise, and returns [] so no marker is recorded — best-effort.
+        assert install_ai_tools(["claude-code"]) == []
 
     def test_timeout_is_non_fatal(self, monkeypatch):
         self._capture_run(monkeypatch, raises=subprocess.TimeoutExpired("databricks", 300))

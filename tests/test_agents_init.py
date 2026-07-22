@@ -62,16 +62,52 @@ class TestToolSpecs:
 
 
 class TestInstallAiToolsForAgents:
+    def _stub_install(self, monkeypatch):
+        """Stub install_ai_tools to record calls and echo tokens back as installed."""
+        calls = []
+
+        def fake(tokens, profile):
+            calls.append({"tokens": tokens, "profile": profile})
+            return list(tokens)  # pretend every token installed successfully
+
+        monkeypatch.setattr(agents_mod, "install_ai_tools", fake)
+        monkeypatch.setattr(agents_mod, "save_state", lambda state: None)
+        return calls
+
     def test_maps_supported_tools_and_drops_others(self, monkeypatch):
-        captured = {}
-        monkeypatch.setattr(
-            agents_mod,
-            "install_ai_tools",
-            lambda tokens, profile: captured.update(tokens=tokens, profile=profile),
-        )
+        calls = self._stub_install(monkeypatch)
         # gemini and pi aren't supported by `databricks aitools`, so they drop.
-        install_ai_tools_for_agents(["claude", "codex", "gemini", "pi"], "prof")
-        assert captured == {"tokens": ["claude-code", "codex"], "profile": "prof"}
+        install_ai_tools_for_agents(["claude", "codex", "gemini", "pi"], {"profile": "prof"})
+        assert calls == [{"tokens": ["claude-code", "codex"], "profile": "prof"}]
+
+    def test_records_marker_on_success(self, monkeypatch):
+        self._stub_install(monkeypatch)
+        state = {"profile": "prof"}
+        install_ai_tools_for_agents(["claude", "codex"], state)
+        assert state["ai_tools_installed"] == ["claude-code", "codex"]
+
+    def test_skips_already_marked_tokens(self, monkeypatch):
+        calls = self._stub_install(monkeypatch)
+        state = {"profile": "prof", "ai_tools_installed": ["claude-code"]}
+        install_ai_tools_for_agents(["claude", "codex"], state)
+        # claude-code already marked -> only codex is installed.
+        assert calls == [{"tokens": ["codex"], "profile": "prof"}]
+        assert state["ai_tools_installed"] == ["claude-code", "codex"]
+
+    def test_no_install_when_all_marked(self, monkeypatch):
+        calls = self._stub_install(monkeypatch)
+        state = {"profile": "prof", "ai_tools_installed": ["claude-code"]}
+        install_ai_tools_for_agents(["claude"], state)
+        assert calls == []  # membership check only, no subprocess
+
+    def test_failed_install_not_recorded(self, monkeypatch):
+        # install_ai_tools returns [] on failure -> marker must not be written,
+        # so the next run retries.
+        monkeypatch.setattr(agents_mod, "install_ai_tools", lambda tokens, profile: [])
+        monkeypatch.setattr(agents_mod, "save_state", lambda state: None)
+        state = {"profile": "prof"}
+        install_ai_tools_for_agents(["claude"], state)
+        assert "ai_tools_installed" not in state
 
 
 class TestConfigureWiresAiToolsInstall:
@@ -84,7 +120,7 @@ class TestConfigureWiresAiToolsInstall:
         monkeypatch.setattr(
             agents_mod,
             "install_ai_tools",
-            lambda tokens, profile: captured.update(tokens=tokens, profile=profile),
+            lambda tokens, profile: captured.update(tokens=tokens, profile=profile) or list(tokens),
         )
         return captured
 

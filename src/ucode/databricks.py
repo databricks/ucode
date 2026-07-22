@@ -549,17 +549,20 @@ def install_databricks_cli() -> None:
     ensure_databricks_cli_version()
 
 
-def install_ai_tools(agent_tokens: list[str], profile: str | None = None) -> None:
+def install_ai_tools(agents: list[str], profile: str | None = None) -> list[str]:
     """Install Databricks AI Tools for the given agents (e.g. ``claude-code``).
 
     Databricks AI Tools is the set of skills and plugins that teach coding
     agents how to work with Databricks (installed via ``databricks aitools``).
     Idempotent and best-effort: any failure only warns (surfacing the CLI's
-    own error), since AI Tools aren't required to launch an agent."""
-    if not agent_tokens:
-        return
+    own error), since AI Tools aren't required to launch an agent.
 
-    agents_arg = ",".join(agent_tokens)
+    Returns the agents that were installed (empty on failure or when ``agents``
+    is empty), so callers can record a one-time marker."""
+    if not agents:
+        return []
+
+    agents_arg = ",".join(agents)
     try:
         with spinner(f"Installing Databricks AI Tools for {agents_arg}..."):
             run(
@@ -580,8 +583,10 @@ def install_ai_tools(agent_tokens: list[str], profile: str | None = None) -> Non
         detail = detail.strip()
         reason = detail.splitlines()[-1] if detail else str(exc)
         print_warning(f"Could not install Databricks AI Tools: {reason}")
+        return []
     else:
         print_success("Databricks AI Tools installed")
+        return list(agents)
 
 
 def _profile_args(profile: str | None) -> list[str]:

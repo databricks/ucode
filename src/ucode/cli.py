@@ -16,6 +16,7 @@ from ucode.agents import (
     configure_tool,
     ensure_bootstrap_dependencies,
     ensure_provider_state,
+    install_ai_tools_for_agents,
     install_tool_binary,
     normalize_tool,
     provider_permission_error,
@@ -927,6 +928,7 @@ def _launch_tool(
             skip_model_discovery=bool(provider),
             skip_preflight=skip_preflight,
         )
+        install_ai_tools_for_agents([tool], state)
         if provider:
             # Routing through a Model Provider Service pins no Databricks model;
             # the agent uses its own canonical model names (header selects the
