@@ -342,6 +342,191 @@ class TestStatus:
         assert "https://example.databricks.com/ai-gateway/gemini" not in result.output
 
 
+class TestConfigureSkillsCommand:
+    def test_default_calls_configure_skills_command(self):
+        with (
+            patch("ucode.cli.configure_skills_command") as mock_default,
+            patch("ucode.cli.configure_skills_mcp_command") as mock_mcp,
+        ):
+            result = runner.invoke(app, ["configure", "skills", "--location", "a.b"])
+        assert result.exit_code == 0, result.output
+        mock_default.assert_called_once_with(["a.b"])
+        mock_mcp.assert_not_called()
+
+    def test_mcp_flag_dispatches_add_mode(self):
+        with patch("ucode.cli.configure_skills_mcp_command") as mock_mcp:
+            result = runner.invoke(app, ["configure", "skills", "--location", "a.b", "--mcp"])
+        assert result.exit_code == 0, result.output
+        mock_mcp.assert_called_once_with(["a.b"], mode="add")
+
+    def test_mcp_remove_dispatches_remove_mode(self):
+        with patch("ucode.cli.configure_skills_mcp_command") as mock_mcp:
+            result = runner.invoke(
+                app, ["configure", "skills", "--location", "a.b", "--mcp", "--remove"]
+            )
+        assert result.exit_code == 0, result.output
+        mock_mcp.assert_called_once_with(["a.b"], mode="remove")
+
+    def test_mcp_replace_dispatches_replace_mode(self):
+        with patch("ucode.cli.configure_skills_mcp_command") as mock_mcp:
+            result = runner.invoke(
+                app, ["configure", "skills", "--location", "a.b", "--mcp", "--replace"]
+            )
+        assert result.exit_code == 0, result.output
+        mock_mcp.assert_called_once_with(["a.b"], mode="replace")
+
+    def test_comma_location_yields_multiple_schemas(self):
+        with patch("ucode.cli.configure_skills_mcp_command") as mock_mcp:
+            result = runner.invoke(app, ["configure", "skills", "--location", "a.b, c.d", "--mcp"])
+        assert result.exit_code == 0, result.output
+        mock_mcp.assert_called_once_with(["a.b", "c.d"], mode="add")
+
+    def test_remove_and_replace_together_exit_1(self):
+        with patch("ucode.cli.configure_skills_mcp_command") as mock_mcp:
+            result = runner.invoke(
+                app,
+                ["configure", "skills", "--location", "a.b", "--mcp", "--remove", "--replace"],
+            )
+        assert result.exit_code == 1
+        mock_mcp.assert_not_called()
+
+    def test_remove_without_mcp_exit_1(self):
+        with patch("ucode.cli.configure_skills_command") as mock_default:
+            result = runner.invoke(app, ["configure", "skills", "--location", "a.b", "--remove"])
+        assert result.exit_code == 1
+        mock_default.assert_not_called()
+
+    def test_path_with_mcp_exit_1(self):
+        with patch("ucode.cli.configure_skills_mcp_command") as mock_mcp:
+            result = runner.invoke(
+                app, ["configure", "skills", "--location", "a.b", "--mcp", "--path", "/tmp/p"]
+            )
+        assert result.exit_code == 1
+        mock_mcp.assert_not_called()
+
+    def test_three_part_with_mcp_exit_1(self):
+        with patch("ucode.cli.configure_skills_mcp_command") as mock_mcp:
+            result = runner.invoke(app, ["configure", "skills", "--location", "a.b.c", "--mcp"])
+        assert result.exit_code == 1
+        mock_mcp.assert_not_called()
+
+    def test_three_part_without_mcp_is_download_only_exit_1(self):
+        with patch("ucode.cli.configure_skills_command") as mock_default:
+            result = runner.invoke(app, ["configure", "skills", "--location", "a.b.c"])
+        assert result.exit_code == 1
+        mock_default.assert_not_called()
+
+    def test_path_without_mcp_is_download_only_exit_1(self):
+        with patch("ucode.cli.configure_skills_command") as mock_default:
+            result = runner.invoke(
+                app, ["configure", "skills", "--location", "a.b", "--path", "/tmp/p"]
+            )
+        assert result.exit_code == 1
+        mock_default.assert_not_called()
+
+    def test_yes_without_mcp_is_download_only_exit_1(self):
+        with patch("ucode.cli.configure_skills_command") as mock_default:
+            result = runner.invoke(app, ["configure", "skills", "--location", "a.b", "--yes"])
+        assert result.exit_code == 1
+        mock_default.assert_not_called()
+
+    def test_malformed_location_exit_1_names_location(self):
+        with patch("ucode.cli.configure_skills_command") as mock_default:
+            result = runner.invoke(app, ["configure", "skills", "--location", "justone"])
+        assert result.exit_code == 1
+        assert "--location" in _strip_ansi(result.output)
+        mock_default.assert_not_called()
+
+    def test_missing_location_is_typer_usage_error(self):
+        result = runner.invoke(app, ["configure", "skills"])
+        assert result.exit_code == 2
+
+
+class TestStatusSkillsSection:
+    def _run(self, state):
+        with patch("ucode.cli.load_state", return_value=state):
+            return runner.invoke(app, ["status"])
+
+    def test_not_configured_when_no_skills_entry(self):
+        result = self._run(MINIMAL_STATE)
+        assert result.exit_code == 0, result.output
+        out = _strip_ansi(result.output)
+        assert "Skills" in out
+        assert "not configured" in out
+
+    def test_mcp_mode_rendering(self):
+        state = {
+            **MINIMAL_STATE,
+            "mcp_servers": [
+                {
+                    "name": "databricks-skill-registry",
+                    "kind": "skills",
+                    "skill_locations": ["main.default", "ml.prod"],
+                    "url": "https://example.databricks.com/ai-gateway/skills/?schema=main.default&schema=ml.prod",
+                    "auth": "env:OAUTH_TOKEN",
+                    "clients": ["claude", "codex"],
+                }
+            ],
+        }
+        result = self._run(state)
+        assert result.exit_code == 0, result.output
+        out = _strip_ansi(result.output)
+        assert "Connection: databricks-skill-registry" in out
+        assert "Mode: mcp" in out
+        assert "Locations: main.default, ml.prod" in out
+        assert "Configured: Claude Code, Codex" in out
+
+    def test_download_mode_rendering(self):
+        state = {
+            **MINIMAL_STATE,
+            "mcp_servers": [
+                {
+                    "name": "databricks-skill-registry",
+                    "kind": "skills",
+                    "skill_locations": [],
+                    "url": "https://example.databricks.com/ai-gateway/skills/",
+                    "auth": "env:OAUTH_TOKEN",
+                    "clients": ["claude"],
+                }
+            ],
+        }
+        result = self._run(state)
+        assert result.exit_code == 0, result.output
+        out = _strip_ansi(result.output)
+        assert "Mode: download" in out
+        assert "none — utility tools only" in out
+
+    def test_skills_entry_absent_from_per_client_mcp_lines(self):
+        state = {
+            **MINIMAL_STATE,
+            "mcp_servers": [
+                {
+                    "name": "github-mcp",
+                    "url": "https://example.databricks.com/api/2.0/mcp/external/github-mcp",
+                    "auth": "env:OAUTH_TOKEN",
+                    "clients": ["claude"],
+                },
+                {
+                    "name": "databricks-skill-registry",
+                    "kind": "skills",
+                    "skill_locations": ["main.default"],
+                    "url": "https://example.databricks.com/ai-gateway/skills/?schema=main.default",
+                    "auth": "env:OAUTH_TOKEN",
+                    "clients": ["claude"],
+                },
+            ],
+        }
+        result = self._run(state)
+        assert result.exit_code == 0, result.output
+        out = _strip_ansi(result.output)
+        # The skills registry appears only in the Skills section, never on a
+        # per-client "MCP servers:" line.
+        for line in out.splitlines():
+            if "MCP servers:" in line:
+                assert "databricks-skill-registry" not in line
+        assert "Connection: databricks-skill-registry" in out
+
+
 class TestRevert:
     def test_reverts_mcp_configs_before_clearing_state(self):
         state = {

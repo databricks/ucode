@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, NamedTuple
 
 import typer
 from rich.panel import Panel
@@ -53,7 +53,10 @@ from ucode.databricks import (
 )
 from ucode.mcp import (
     MCP_CLIENTS,
+    SKILLS_MCP_KIND,
     configure_mcp_command,
+    configure_skills_command,
+    configure_skills_mcp_command,
     purge_cross_workspace_mcp_residue,
     revert_mcp_configs,
 )
@@ -140,6 +143,52 @@ def _parse_agents_option(agents: str) -> list[str]:
             "No agents provided for --agents. Use a comma-separated list like `--agents claude,codex`."
         )
     return tools
+
+
+class SkillLocation(NamedTuple):
+    catalog: str
+    schema: str
+    skill: str | None
+
+    @property
+    def schema_ref(self) -> str:
+        return f"{self.catalog}.{self.schema}"
+
+
+def _parse_skill_locations(location: str, *, allow_skill: bool) -> list[SkillLocation]:
+    """Parse a comma-separated `--location` into `SkillLocation`s.
+
+    Each entry is a 2-part `<catalog>.<schema>` or 3-part
+    `<catalog>.<schema>.<skill>` dotted ref with non-empty parts. When
+    ``allow_skill`` is False the 3-part form is rejected. Duplicates are
+    dropped, preserving order.
+    """
+    locations: list[SkillLocation] = []
+    seen: set[SkillLocation] = set()
+    for raw in location.split(","):
+        raw = raw.strip()
+        if not raw:
+            continue
+        parts = raw.split(".")
+        if len(parts) not in (2, 3) or not all(part.strip() for part in parts):
+            raise RuntimeError(
+                f"--location entries must be `<catalog>.<schema>[.<skill>]`, got `{raw}`."
+            )
+        if len(parts) == 3 and not allow_skill:
+            raise RuntimeError(
+                f"`.{parts[2]}` names a single skill, which is download-only and not valid "
+                f"with --mcp; drop it to scope the connection to `{parts[0]}.{parts[1]}`."
+            )
+        parsed = SkillLocation(parts[0], parts[1], parts[2] if len(parts) == 3 else None)
+        if parsed not in seen:
+            seen.add(parsed)
+            locations.append(parsed)
+    if not locations:
+        raise RuntimeError(
+            "No skills provided for --location. Use `<catalog>.<schema>[.<skill>]`, "
+            "comma-separated for multiple."
+        )
+    return locations
 
 
 def _parse_workspaces_option(workspaces: str) -> list[tuple[str, str | None]]:
@@ -697,7 +746,9 @@ def status() -> int:
             tool_mcp_servers = [
                 str(server.get("name"))
                 for server in mcp_servers
-                if tool in (server.get("clients") or []) and server.get("name")
+                if tool in (server.get("clients") or [])
+                and server.get("name")
+                and server.get("kind") != SKILLS_MCP_KIND
             ]
             print_kv("MCP list command", str(MCP_CLIENTS[tool]["list_command"]))
             print_kv(
@@ -706,6 +757,25 @@ def status() -> int:
             )
         print_kv("Config file", str(config_path) if config_path.exists() else "missing")
         console.print()
+
+    print_heading("Skills")
+    skills_entry = next((s for s in mcp_servers if s.get("kind") == SKILLS_MCP_KIND), None)
+    if not skills_entry:
+        print_kv("Skills", "not configured")
+    else:
+        locations = skills_entry.get("skill_locations") or []
+        print_kv("Connection", str(skills_entry.get("name")))
+        print_kv("Mode", "mcp" if locations else "download")
+        print_kv(
+            "Locations",
+            ", ".join(locations) if locations else "none — utility tools only",
+        )
+        displays = [
+            str(MCP_CLIENTS[client]["display"])
+            for client in (skills_entry.get("clients") or [])
+            if client in MCP_CLIENTS
+        ]
+        print_kv("Configured", ", ".join(displays) if displays else "none")
 
     print_heading("Tracing")
     tracing = state.get("tracing") or {}
@@ -1260,6 +1330,65 @@ def configure_mcp(
     selected = None if services is None else {s.strip() for s in services.split(",") if s.strip()}
     try:
         configure_mcp_command(location=location, services=selected)
+    except RuntimeError as exc:
+        print_err(str(exc))
+        raise typer.Exit(1) from None
+    except KeyboardInterrupt:
+        print_err("Interrupted.")
+        raise typer.Exit(130) from None
+
+
+@configure_app.command("skills")
+def configure_skills(
+    location: Annotated[
+        str,
+        typer.Option(
+            "--location",
+            help="Comma-separated `<catalog>.<schema>` skill scopes (a single "
+            "`<catalog>.<schema>.<skill>` is download-only). Required.",
+        ),
+    ],
+    mcp: Annotated[
+        bool,
+        typer.Option("--mcp", help="Mutate the skills MCP connection instead of downloading."),
+    ] = False,
+    remove: Annotated[
+        bool, typer.Option("--remove", help="(--mcp) Remove the listed schemas from the set.")
+    ] = False,
+    replace: Annotated[
+        bool,
+        typer.Option("--replace", help="(--mcp) Replace the set with exactly the listed schemas."),
+    ] = False,
+    path: Annotated[
+        str | None, typer.Option("--path", help="(download) Project root; default user scope (~/).")
+    ] = None,
+    yes: Annotated[
+        bool,
+        typer.Option("--yes", "-y", help="(download) Overwrite on collision without prompting."),
+    ] = False,
+) -> None:
+    """Configure Databricks Skills for your coding tools."""
+    try:
+        if remove and replace:
+            raise RuntimeError("Use either --remove or --replace, not both.")
+        if (remove or replace) and not mcp:
+            raise RuntimeError("--remove/--replace require --mcp.")
+        if path is not None and mcp:
+            raise RuntimeError("--path is not valid with --mcp.")
+        if mcp:
+            mode = "remove" if remove else "replace" if replace else "add"
+            locs = _parse_skill_locations(location, allow_skill=False)
+            configure_skills_mcp_command([loc.schema_ref for loc in locs], mode=mode)
+        else:
+            # Download mode lands in a later PR; until then, reject every
+            # download-only affordance rather than silently ignoring it.
+            locs = _parse_skill_locations(location, allow_skill=True)
+            if path is not None or yes or any(loc.skill for loc in locs):
+                raise RuntimeError(
+                    "Download mode is not available yet; use --mcp to configure the skills "
+                    "connection for the given schemas."
+                )
+            configure_skills_command([loc.schema_ref for loc in locs])
     except RuntimeError as exc:
         print_err(str(exc))
         raise typer.Exit(1) from None

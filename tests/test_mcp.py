@@ -25,6 +25,14 @@ class TestBuildMcpHttpEntry:
         assert "oauth" not in entry
         assert "headersHelper" not in entry
 
+    def test_omits_always_load_by_default(self):
+        entry = mcp.build_mcp_http_entry(f"{WS}/ai-gateway/skills/")
+        assert "alwaysLoad" not in entry
+
+    def test_sets_always_load_when_requested(self):
+        entry = mcp.build_mcp_http_entry(f"{WS}/ai-gateway/skills/", always_load=True)
+        assert entry["alwaysLoad"] is True
+
 
 class TestAddClaudeMcpServer:
     def test_adds_user_scoped_json(self, monkeypatch):
@@ -1640,6 +1648,218 @@ class TestConfigureMcpServicesSubset:
             raise AssertionError(
                 "expected RuntimeError for multi-schema services without --location"
             )
+
+
+def _find_skills(servers):
+    return [s for s in servers if s.get("kind") == mcp.SKILLS_MCP_KIND]
+
+
+class TestResolveSkillLocationSet:
+    def test_add_is_order_preserving_union(self):
+        assert mcp.resolve_skill_location_set(["a.b"], ["c.d", "a.b"], mode="add") == [
+            "a.b",
+            "c.d",
+        ]
+
+    def test_add_to_empty(self):
+        assert mcp.resolve_skill_location_set([], ["a.b"], mode="add") == ["a.b"]
+
+    def test_remove_is_difference(self):
+        assert mcp.resolve_skill_location_set(["a.b", "c.d"], ["c.d"], mode="remove") == ["a.b"]
+
+    def test_replace_dedupes_preserving_order(self):
+        assert mcp.resolve_skill_location_set(["a.b"], ["x.y", "x.y", "z.w"], mode="replace") == [
+            "x.y",
+            "z.w",
+        ]
+
+    def test_replace_with_empty_clears(self):
+        assert mcp.resolve_skill_location_set(["a.b"], [], mode="replace") == []
+
+
+class TestResolveSkillsMcpServers:
+    def test_builds_single_canonical_entry(self):
+        servers = mcp._resolve_skills_mcp_servers(WS, ["claude"], ["main.default"], [])
+        assert _find_skills(servers) == servers
+        entry = servers[0]
+        assert entry["name"] == mcp.SKILLS_MCP_SERVER_NAME
+        assert entry["kind"] == mcp.SKILLS_MCP_KIND
+        assert entry["skill_locations"] == ["main.default"]
+        assert entry["url"] == f"{WS}/ai-gateway/skills/?schema=main.default"
+        assert entry["auth"] == "env:OAUTH_TOKEN"
+        assert entry["clients"] == ["claude"]
+
+    def test_keeps_other_entries_and_rebuilds_to_one_skills_entry(self):
+        service_entry = {
+            "name": "system-ai-github",
+            "url": f"{WS}/ai-gateway/mcp-services/system.ai.github",
+            "auth": "env:OAUTH_TOKEN",
+            "clients": ["claude"],
+        }
+        stale_skills = {
+            "name": mcp.SKILLS_MCP_SERVER_NAME,
+            "kind": mcp.SKILLS_MCP_KIND,
+            "skill_locations": ["old.one"],
+            "url": f"{WS}/ai-gateway/skills/?schema=old.one",
+            "auth": "env:OAUTH_TOKEN",
+            "clients": ["codex"],
+        }
+        servers = mcp._resolve_skills_mcp_servers(
+            WS, ["claude"], ["a.b"], [service_entry, stale_skills]
+        )
+        assert service_entry in servers
+        skills = _find_skills(servers)
+        assert len(skills) == 1
+        # Prior skills clients merge with the newly-configured ones (order-stable).
+        assert skills[0]["clients"] == ["codex", "claude"]
+
+    def test_drops_entry_matching_skills_server_name_even_without_kind(self):
+        old_named = {
+            "name": mcp.SKILLS_MCP_SERVER_NAME,
+            "url": f"{WS}/ai-gateway/skills/",
+            "clients": ["claude"],
+        }
+        servers = mcp._resolve_skills_mcp_servers(WS, ["claude"], ["a.b"], [old_named])
+        assert len(servers) == 1
+        assert servers[0]["kind"] == mcp.SKILLS_MCP_KIND
+
+    def test_url_derives_from_locations_not_stale_url(self):
+        stale = {
+            "name": mcp.SKILLS_MCP_SERVER_NAME,
+            "kind": mcp.SKILLS_MCP_KIND,
+            "skill_locations": ["old.one"],
+            "url": f"{WS}/ai-gateway/skills/?schema=stale.value",
+            "clients": ["claude"],
+        }
+        servers = mcp._resolve_skills_mcp_servers(WS, ["claude"], ["new.two"], [stale])
+        assert servers[0]["url"] == f"{WS}/ai-gateway/skills/?schema=new.two"
+
+    def test_empty_locations_yields_bare_route(self):
+        servers = mcp._resolve_skills_mcp_servers(WS, ["claude"], [], [])
+        assert servers[0]["skill_locations"] == []
+        assert servers[0]["url"] == f"{WS}/ai-gateway/skills/"
+
+
+def _skills_state(mcp_servers=None):
+    state = {"workspace": WS, "available_tools": ["claude"]}
+    if mcp_servers is not None:
+        state["mcp_servers"] = mcp_servers
+    return state
+
+
+class TestConfigureSkillsMcpCommand:
+    def test_add_to_empty_registers_connection(self, monkeypatch):
+        saved_states: list[dict] = []
+        configured: list[tuple[str, str, str, dict]] = []
+        _stub_location_base(monkeypatch, _skills_state())
+        monkeypatch.setattr(
+            mcp,
+            "configure_client_mcp_server",
+            lambda client, name, url, entry: configured.append((client, name, url, entry)) or [],
+        )
+        monkeypatch.setattr(mcp, "save_state", lambda state: saved_states.append(state.copy()))
+
+        assert mcp.configure_skills_mcp_command(["a.b"], mode="add") == 0
+
+        skills = _find_skills(saved_states[-1]["mcp_servers"])
+        assert len(skills) == 1
+        assert skills[0]["skill_locations"] == ["a.b"]
+        assert skills[0]["url"] == f"{WS}/ai-gateway/skills/?schema=a.b"
+        # alwaysLoad rides the per-entry apply (Claude-only).
+        assert configured[0][3]["alwaysLoad"] is True
+
+    def test_add_second_appends_in_order(self, monkeypatch):
+        saved_states: list[dict] = []
+        prior = mcp._resolve_skills_mcp_servers(WS, ["claude"], ["A.a"], [])
+        _stub_location_base(monkeypatch, _skills_state(prior))
+        monkeypatch.setattr(mcp, "configure_client_mcp_server", lambda *a, **kw: [])
+        monkeypatch.setattr(mcp, "save_state", lambda state: saved_states.append(state.copy()))
+
+        assert mcp.configure_skills_mcp_command(["B.b"], mode="add") == 0
+
+        assert _find_skills(saved_states[-1]["mcp_servers"])[0]["skill_locations"] == ["A.a", "B.b"]
+
+    def test_remove_from_set(self, monkeypatch):
+        saved_states: list[dict] = []
+        prior = mcp._resolve_skills_mcp_servers(WS, ["claude"], ["A.a", "B.b"], [])
+        _stub_location_base(monkeypatch, _skills_state(prior))
+        monkeypatch.setattr(mcp, "configure_client_mcp_server", lambda *a, **kw: [])
+        monkeypatch.setattr(mcp, "save_state", lambda state: saved_states.append(state.copy()))
+
+        assert mcp.configure_skills_mcp_command(["B.b"], mode="remove") == 0
+
+        assert _find_skills(saved_states[-1]["mcp_servers"])[0]["skill_locations"] == ["A.a"]
+
+    def test_replace_set(self, monkeypatch):
+        saved_states: list[dict] = []
+        prior = mcp._resolve_skills_mcp_servers(WS, ["claude"], ["A.a", "B.b"], [])
+        _stub_location_base(monkeypatch, _skills_state(prior))
+        monkeypatch.setattr(mcp, "configure_client_mcp_server", lambda *a, **kw: [])
+        monkeypatch.setattr(mcp, "save_state", lambda state: saved_states.append(state.copy()))
+
+        assert mcp.configure_skills_mcp_command(["X.x"], mode="replace") == 0
+
+        assert _find_skills(saved_states[-1]["mcp_servers"])[0]["skill_locations"] == ["X.x"]
+
+    def test_remove_last_keeps_entry_with_bare_url(self, monkeypatch):
+        saved_states: list[dict] = []
+        prior = mcp._resolve_skills_mcp_servers(WS, ["claude"], ["A.a"], [])
+        _stub_location_base(monkeypatch, _skills_state(prior))
+        monkeypatch.setattr(mcp, "configure_client_mcp_server", lambda *a, **kw: [])
+        monkeypatch.setattr(mcp, "save_state", lambda state: saved_states.append(state.copy()))
+
+        assert mcp.configure_skills_mcp_command(["A.a"], mode="remove") == 0
+
+        skills = _find_skills(saved_states[-1]["mcp_servers"])
+        assert len(skills) == 1
+        assert skills[0]["skill_locations"] == []
+        assert skills[0]["url"] == f"{WS}/ai-gateway/skills/"
+
+    def test_preserves_mcp_service_entries_across_mutations(self, monkeypatch):
+        saved_states: list[dict] = []
+        service_entry = {
+            "name": "system-ai-github",
+            "url": f"{WS}/ai-gateway/mcp-services/system.ai.github",
+            "auth": "env:OAUTH_TOKEN",
+            "clients": ["claude"],
+        }
+        prior = mcp._resolve_skills_mcp_servers(WS, ["claude"], ["A.a"], [service_entry])
+        _stub_location_base(monkeypatch, _skills_state(prior))
+        monkeypatch.setattr(mcp, "configure_client_mcp_server", lambda *a, **kw: [])
+        monkeypatch.setattr(mcp, "save_state", lambda state: saved_states.append(state.copy()))
+
+        assert mcp.configure_skills_mcp_command(["B.b"], mode="add") == 0
+
+        names = [s["name"] for s in saved_states[-1]["mcp_servers"]]
+        assert "system-ai-github" in names
+        assert names.count(mcp.SKILLS_MCP_SERVER_NAME) == 1
+
+    def test_soft_warns_over_schema_cap(self, monkeypatch, capsys):
+        saved_states: list[dict] = []
+        _stub_location_base(monkeypatch, _skills_state())
+        monkeypatch.setattr(mcp, "configure_client_mcp_server", lambda *a, **kw: [])
+        monkeypatch.setattr(mcp, "save_state", lambda state: saved_states.append(state.copy()))
+
+        many = [f"c.s{i}" for i in range(mcp.SKILLS_MCP_SCHEMA_SOFT_CAP + 1)]
+        assert mcp.configure_skills_mcp_command(many, mode="replace") == 0
+
+        assert len(_find_skills(saved_states[-1]["mcp_servers"])[0]["skill_locations"]) == len(many)
+        out = capsys.readouterr().out
+        assert "recommended limit" in out
+
+
+class TestConfigureSkillsCommand:
+    def test_bare_default_registers_connection(self, monkeypatch):
+        saved_states: list[dict] = []
+        _stub_location_base(monkeypatch, _skills_state())
+        monkeypatch.setattr(mcp, "configure_client_mcp_server", lambda *a, **kw: [])
+        monkeypatch.setattr(mcp, "save_state", lambda state: saved_states.append(state.copy()))
+
+        assert mcp.configure_skills_command(["a.b"]) == 0
+
+        skills = _find_skills(saved_states[-1]["mcp_servers"])
+        assert len(skills) == 1
+        assert skills[0]["skill_locations"] == ["a.b"]
 
 
 class TestRevertMcpConfigs:
