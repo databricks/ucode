@@ -1113,6 +1113,12 @@ def purge_cross_workspace_mcp_residue(state: dict, workspace: str) -> None:
         )
 
 
+def _skills_entries(servers: list[dict]) -> list[dict]:
+    """Skills connections carry their own lifecycle (``configure skills``); the
+    mcp commands preserve them untouched instead of treating them as removals."""
+    return [s for s in servers if s.get("kind") == SKILLS_MCP_KIND]
+
+
 def _resolve_location_mcp_servers(
     workspace: str,
     profile: str | None,
@@ -1123,9 +1129,10 @@ def _resolve_location_mcp_servers(
 ) -> list[dict]:
     """Build the desired MCP server list for ``--location <cat>.<schema>``.
 
-    Strict replacement: the returned list is exactly the mcp-services
-    discovered at ``location``. Any previously-registered MCP entries outside
-    that location are removed by ``apply_mcp_server_changes``. Raises ``RuntimeError`` for an invalid
+    Strict replacement for mcp-services: the returned list is exactly the ones
+    discovered at ``location`` (any previously-registered mcp-service outside it
+    is removed by ``apply_mcp_server_changes``), plus any existing skills
+    connection, preserved untouched. Raises ``RuntimeError`` for an invalid
     location (HTTP 404 from the listing API) or any other listing failure.
 
     When ``services`` is given, the discovered set is narrowed to exactly that
@@ -1184,7 +1191,7 @@ def _resolve_location_mcp_servers(
             working_servers.append(original.copy())
         else:
             working_servers.append(candidate)
-    return working_servers
+    return [*working_servers, *_skills_entries(original_servers)]
 
 
 def _merge_clients(prior: list[str] | None, new: list[str]) -> list[str]:
@@ -1368,12 +1375,16 @@ def configure_mcp_command(location: str | None = None, services: set[str] | None
     )
 
     original_mcp_servers: list[dict] = list(state.get("mcp_servers") or [])
-    original_by_name = _servers_by_name(original_mcp_servers)
+    # Skills connections are managed by `configure skills`, so keep them out of
+    # the picker and carry them through untouched.
+    skills_servers = _skills_entries(original_mcp_servers)
+    picker_servers = [s for s in original_mcp_servers if s.get("kind") != SKILLS_MCP_KIND]
+    original_by_name = _servers_by_name(picker_servers)
     selections = prompt_for_mcp_server_choices(
         available_external_mcp_names,
         available_genie_mcp_servers,
         available_app_mcp_servers,
-        original_mcp_servers,
+        picker_servers,
         available_mcp_service_names,
         available_vector_search_servers,
         available_uc_functions_servers,
@@ -1381,7 +1392,7 @@ def configure_mcp_command(location: str | None = None, services: set[str] | None
     if selections is None:
         return 0
 
-    working_mcp_servers: list[dict] = []
+    working_mcp_servers: list[dict] = list(skills_servers)
     working_names: set[str] = set()
     add_selections: list[str] = []
     for selection in selections:
