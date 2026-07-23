@@ -80,6 +80,7 @@ from ucode.ui import (
     prompt_for_selection,
     prompt_for_tools,
     prompt_for_workspace,
+    prompt_yes_no_default,
     set_verbosity,
     spinner,
     status_badge,
@@ -218,6 +219,7 @@ def configure_shared_state(
     skip_model_discovery: bool = False,
     skip_preflight: bool = False,
     fable_enabled: bool | None = None,
+    databricks_ai_tools_enabled: bool | None = None,
 ) -> dict:
     """Log into Databricks, enforce AI Gateway v2, fetch model lists, persist state.
 
@@ -249,6 +251,14 @@ def configure_shared_state(
         use_pat = bool(prior_state.get("use_pat")) and previous_workspace == workspace
     if fable_enabled is None:
         fable_enabled = bool(prior_state.get("fable_enabled")) and previous_workspace == workspace
+    if databricks_ai_tools_enabled is None:
+        # Opt-out: on by default. With no flag, keep this workspace's prior
+        # choice but don't inherit another workspace's opt-out.
+        disabled = (
+            prior_state.get("databricks_ai_tools_enabled") is False
+            and previous_workspace == workspace
+        )
+        databricks_ai_tools_enabled = not disabled
     fetch_all = tools is None
 
     # Assemble the shared workspace state that doesn't depend on model discovery:
@@ -278,6 +288,7 @@ def configure_shared_state(
         state["fable_enabled"] = True
     else:
         state.pop("fable_enabled", None)
+    state["databricks_ai_tools_enabled"] = databricks_ai_tools_enabled
     state["base_urls"] = build_shared_base_urls(workspace)
 
     if skip_preflight:
@@ -436,6 +447,7 @@ def _configure_shared_workspace_states(
     force_login: bool,
     use_pat: bool = False,
     fable_enabled: bool | None = None,
+    databricks_ai_tools_enabled: bool | None = None,
 ) -> list[dict]:
     if not workspaces:
         raise RuntimeError("At least one workspace must be provided.")
@@ -449,6 +461,7 @@ def _configure_shared_workspace_states(
                 force_login=force_login,
                 use_pat=use_pat,
                 fable_enabled=fable_enabled,
+                databricks_ai_tools_enabled=databricks_ai_tools_enabled,
             )
         )
     return states
@@ -529,6 +542,7 @@ def configure_workspace_command(
     use_pat: bool = False,
     skip_validate: bool = False,
     fable_enabled: bool | None = None,
+    databricks_ai_tools_enabled: bool | None = None,
 ) -> int:
     if tool is not None and selected_tools is not None:
         raise RuntimeError("Use either --agent or --agents, not both.")
@@ -547,6 +561,7 @@ def configure_workspace_command(
             force_login=True,
             use_pat=use_pat,
             fable_enabled=fable_enabled,
+            databricks_ai_tools_enabled=databricks_ai_tools_enabled,
         )
         state = states[0]
         state = configure_single_tool(tool, state)
@@ -584,6 +599,7 @@ def configure_workspace_command(
         force_login=True,
         use_pat=use_pat,
         fable_enabled=fable_enabled,
+        databricks_ai_tools_enabled=databricks_ai_tools_enabled,
     )
     state = states[0]
     save_state(state)
@@ -631,6 +647,16 @@ def configure_workspace_command(
     if offer_provider:
         for tool_name in picked:
             state = _maybe_select_provider_service(tool_name, state)
+
+    # Last question in the interactive flow: opt out of AI Tools. When a flag
+    # already decided it, configure_shared_state persisted that; skip the prompt.
+    # The default is the resolved prior choice, so Enter won't undo a past opt-out.
+    if databricks_ai_tools_enabled is None and offer_provider:
+        state["databricks_ai_tools_enabled"] = prompt_yes_no_default(
+            "Install Databricks AI Tools for your coding agents? "
+            "This adds Databricks skills and plugins.",
+            default=state.get("databricks_ai_tools_enabled", True),
+        )
 
     state = configure_selected_tools(state, picked)
 
@@ -1102,6 +1128,15 @@ def configure(
             "it configures Claude Code directly since Fable is Claude-only.",
         ),
     ] = None,
+    enable_databricks_ai_tools: Annotated[
+        bool | None,
+        typer.Option(
+            "--enable-databricks-ai-tools/--disable-databricks-ai-tools",
+            help="Install Databricks AI Tools (skills + plugins that teach agents to use "
+            "Databricks) for the configured agents. Installed by default; pass "
+            "--disable-databricks-ai-tools to opt out.",
+        ),
+    ] = None,
     tracing: Annotated[
         bool,
         typer.Option(
@@ -1167,6 +1202,8 @@ def configure(
         # target claude instead of dropping into the interactive agent picker.
         if enable_fable is not None and agent is None and agents is None:
             agent = "claude"
+        if enable_databricks_ai_tools is not None:
+            skip_kwargs["databricks_ai_tools_enabled"] = enable_databricks_ai_tools
         if agent is not None:
             tool = normalize_tool(agent)
             install_tool_binary(
