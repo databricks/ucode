@@ -1365,6 +1365,10 @@ def build_mcp_service_url(workspace: str, full_name: str) -> str:
     return f"{workspace}/ai-gateway/mcp-services/{full_name}"
 
 
+def build_skills_mcp_url(workspace: str, catalog: str, schema: str) -> str:
+    return f"{workspace}/ai-gateway/skills/{catalog}/{schema}"
+
+
 # Maps the gateway routing dialect a coding tool speaks to the Model Provider
 # Service `provider_type`s it can be backed by. claude speaks Anthropic's API,
 # which both the `anthropic` and `amazon_bedrock` provider types serve (Bedrock

@@ -25,6 +25,13 @@ class TestBuildMcpHttpEntry:
         assert "oauth" not in entry
         assert "headersHelper" not in entry
 
+    def test_omits_always_load_by_default(self):
+        assert "alwaysLoad" not in mcp.build_mcp_http_entry(f"{WS}/api/2.0/mcp/external/github")
+
+    def test_sets_always_load_when_requested(self):
+        entry = mcp.build_mcp_http_entry(f"{WS}/ai-gateway/skills/main/default", always_load=True)
+        assert entry["alwaysLoad"] is True
+
 
 class TestAddClaudeMcpServer:
     def test_adds_user_scoped_json(self, monkeypatch):
@@ -221,6 +228,36 @@ class TestConfigureClientMcpServer:
 
         assert removed_scopes == []
         assert calls == [("github", f"{WS}/api/2.0/mcp/external/github")]
+
+    def test_claude_receives_entry_with_always_load(self, monkeypatch):
+        added: dict = {}
+        url = f"{WS}/ai-gateway/skills/main/default"
+        entry = mcp.build_mcp_http_entry(url, always_load=True)
+        monkeypatch.setattr(mcp, "remove_claude_mcp_server", lambda name, scope: False)
+        monkeypatch.setattr(
+            mcp,
+            "add_claude_mcp_server",
+            lambda name, entry, scope: added.update(name=name, entry=entry),
+        )
+
+        mcp.configure_client_mcp_server("claude", "databricks-skills-main-default", url, entry)
+
+        assert added["entry"]["alwaysLoad"] is True
+
+    def test_codex_receives_only_the_url(self, monkeypatch):
+        added: dict = {}
+        url = f"{WS}/ai-gateway/skills/main/default"
+        entry = mcp.build_mcp_http_entry(url, always_load=True)
+        monkeypatch.setattr(mcp, "remove_codex_mcp_server", lambda name: False)
+        monkeypatch.setattr(
+            mcp, "add_codex_mcp_server", lambda name, url: added.update(name=name, url=url)
+        )
+
+        mcp.configure_client_mcp_server("codex", "databricks-skills-main-default", url, entry)
+
+        # codex's add signature takes no entry, so alwaysLoad structurally cannot
+        # reach it -- it is registered from the URL alone.
+        assert added == {"name": "databricks-skills-main-default", "url": url}
 
 
 class TestMcpPicker:
@@ -1640,6 +1677,93 @@ class TestConfigureMcpServicesSubset:
             raise AssertionError(
                 "expected RuntimeError for multi-schema services without --location"
             )
+
+
+class TestConfigureSkills:
+    def test_rejects_malformed_location(self, monkeypatch):
+        _stub_location_base(monkeypatch, {**CLAUDE_STATE})
+        for bad in ("main", "cat.sch.extra", ".sch", "cat.", ""):
+            try:
+                mcp.configure_skills_command(location=bad)
+            except RuntimeError as exc:
+                assert "--location" in str(exc)
+            else:
+                raise AssertionError(f"expected RuntimeError for `{bad}`")
+
+    def test_registers_skills_entry_for_every_agent(self, monkeypatch):
+        saved_states: list[dict] = []
+        configured: list[tuple[str, str, str, dict]] = []
+        state = {"workspace": WS, "available_tools": ALL_MCP_CLIENTS}
+        _stub_location_base(monkeypatch, state)
+        monkeypatch.setattr(mcp, "available_mcp_clients", lambda: list(ALL_MCP_CLIENTS))
+        monkeypatch.setattr(
+            mcp,
+            "configure_client_mcp_server",
+            lambda client, name, url, entry: configured.append((client, name, url, entry)) or [],
+        )
+        monkeypatch.setattr(mcp, "save_state", lambda state: saved_states.append(state.copy()))
+
+        assert mcp.configure_skills_command(location="main.default") == 0
+
+        assert {c[0] for c in configured} == set(ALL_MCP_CLIENTS)
+        assert {c[1] for c in configured} == {"databricks-skills-main-default"}
+        assert {c[2] for c in configured} == {f"{WS}/ai-gateway/skills/main/default"}
+        # The skills entry carries alwaysLoad; only Claude's CLI consumes it (see
+        # TestConfigureClientMcpServerAlwaysLoad for the per-agent dispatch).
+        assert all(c[3].get("alwaysLoad") is True for c in configured)
+        assert saved_states[-1]["mcp_servers"] == [
+            {
+                "name": "databricks-skills-main-default",
+                "url": f"{WS}/ai-gateway/skills/main/default",
+                "auth": "env:OAUTH_TOKEN",
+                "clients": ALL_MCP_CLIENTS,
+                "kind": "skills",
+            }
+        ]
+
+    def test_repoints_prior_skills_entry_but_keeps_mcp_services(self, monkeypatch):
+        saved_states: list[dict] = []
+        removed: list[tuple[str, str]] = []
+        service_entry = {
+            "name": "system-ai-github",
+            "url": f"{WS}/ai-gateway/mcp-services/system.ai.github",
+            "auth": "env:OAUTH_TOKEN",
+            "clients": ["claude"],
+        }
+        stale_skills = {
+            "name": "databricks-skills-main-old",
+            "url": f"{WS}/ai-gateway/skills/main/old",
+            "auth": "env:OAUTH_TOKEN",
+            "clients": ["claude"],
+            "kind": "skills",
+        }
+        _stub_location_base(
+            monkeypatch,
+            {**CLAUDE_STATE, "mcp_servers": [service_entry, stale_skills]},
+        )
+        monkeypatch.setattr(mcp, "configure_client_mcp_server", lambda client, name, url, entry: [])
+        monkeypatch.setattr(
+            mcp,
+            "remove_client_mcp_server",
+            lambda client, name: removed.append((client, name)) or [],
+        )
+        monkeypatch.setattr(mcp, "save_state", lambda state: saved_states.append(state.copy()))
+
+        assert mcp.configure_skills_command(location="main.default") == 0
+
+        # The stale skills entry is removed; the mcp-service is untouched.
+        assert removed == [("claude", "databricks-skills-main-old")]
+        saved = saved_states[-1]["mcp_servers"]
+        assert service_entry in saved
+        assert [s for s in saved if s.get("kind") == "skills"] == [
+            {
+                "name": "databricks-skills-main-default",
+                "url": f"{WS}/ai-gateway/skills/main/default",
+                "auth": "env:OAUTH_TOKEN",
+                "clients": ["claude"],
+                "kind": "skills",
+            }
+        ]
 
 
 class TestRevertMcpConfigs:

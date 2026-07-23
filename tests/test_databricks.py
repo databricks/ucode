@@ -529,6 +529,20 @@ class TestModelProviderFeatureUnavailable:
         assert db_mod.is_model_provider_feature_unavailable(None) is False
 
 
+class TestBuildMcpUrls:
+    def test_mcp_service_url_keeps_dotted_name(self):
+        assert (
+            db_mod.build_mcp_service_url(WS, "system.ai.github")
+            == f"{WS}/ai-gateway/mcp-services/system.ai.github"
+        )
+
+    def test_skills_url_uses_path_segments(self):
+        assert (
+            db_mod.build_skills_mcp_url(WS, "main", "default")
+            == f"{WS}/ai-gateway/skills/main/default"
+        )
+
+
 class TestListMcpServices:
     def test_accepts_entries_without_connection_status(self, monkeypatch):
         payload = {
