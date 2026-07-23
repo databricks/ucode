@@ -494,9 +494,12 @@ class TestConfigureAgentFlag:
             patch("ucode.cli.install_tool_binary"),
             patch("ucode.cli.configure_workspace_command") as mock_cfg,
         ):
+            # No stdin -> the AI Tools prompt takes its default (yes).
             result = runner.invoke(app, ["configure"])
         assert result.exit_code == 0, result.output
-        mock_cfg.assert_called_once_with(prompt_optional_updates=True)
+        mock_cfg.assert_called_once_with(
+            prompt_optional_updates=True, databricks_ai_tools_enabled=True
+        )
 
     def test_agents_flag_calls_configure_with_tools(self):
         with (
@@ -644,9 +647,75 @@ class TestConfigureAgentFlag:
             patch("ucode.cli.install_tool_binary"),
             patch("ucode.cli.configure_workspace_command") as mock_cfg,
         ):
+            # Interactive path -> AI Tools prompt takes its default (yes) with no stdin.
             result = runner.invoke(app, ["configure", "--skip-upgrade"])
         assert result.exit_code == 0, result.output
-        mock_cfg.assert_called_once_with(prompt_optional_updates=False)
+        mock_cfg.assert_called_once_with(
+            prompt_optional_updates=False, databricks_ai_tools_enabled=True
+        )
+
+    def test_disable_databricks_ai_tools_forwards_false_and_skips_prompt(self):
+        # An explicit flag suppresses the interactive prompt and forwards the choice.
+        with (
+            patch("ucode.cli.install_databricks_cli"),
+            patch("ucode.cli.install_tool_binary"),
+            patch("ucode.cli.configure_workspace_command") as mock_cfg,
+            patch("ucode.cli.prompt_yes_no_default") as mock_prompt,
+        ):
+            result = runner.invoke(app, ["configure", "--disable-databricks-ai-tools"])
+        assert result.exit_code == 0, result.output
+        mock_prompt.assert_not_called()
+        mock_cfg.assert_called_once_with(
+            prompt_optional_updates=True, databricks_ai_tools_enabled=False
+        )
+
+    def test_enable_databricks_ai_tools_with_agents_forwards_true(self):
+        with (
+            patch("ucode.cli.install_databricks_cli"),
+            patch("ucode.cli.install_tool_binary"),
+            patch("ucode.cli.configure_workspace_command") as mock_cfg,
+        ):
+            result = runner.invoke(
+                app, ["configure", "--enable-databricks-ai-tools", "--agents", "claude,codex"]
+            )
+        assert result.exit_code == 0, result.output
+        mock_cfg.assert_called_once_with(
+            selected_tools=["claude", "codex"],
+            prompt_optional_updates=True,
+            databricks_ai_tools_enabled=True,
+        )
+
+    def test_interactive_prompt_default_yes_when_no_prior_optout(self):
+        # No prior opt-out -> prompt defaults to yes; pressing Enter (no stdin) forwards True.
+        with (
+            patch("ucode.cli.install_databricks_cli"),
+            patch("ucode.cli.install_tool_binary"),
+            patch("ucode.cli.configure_workspace_command") as mock_cfg,
+            patch("ucode.cli.load_state", return_value={"workspace": "https://ws"}),
+        ):
+            result = runner.invoke(app, ["configure"])
+        assert result.exit_code == 0, result.output
+        mock_cfg.assert_called_once_with(
+            prompt_optional_updates=True, databricks_ai_tools_enabled=True
+        )
+
+    def test_interactive_prompt_defaults_to_prior_optout(self):
+        # A prior --disable persists databricks_ai_tools_enabled=False; pressing Enter on a
+        # re-configure must NOT silently re-enable it (prompt defaults to no -> forwards False).
+        with (
+            patch("ucode.cli.install_databricks_cli"),
+            patch("ucode.cli.install_tool_binary"),
+            patch("ucode.cli.configure_workspace_command") as mock_cfg,
+            patch(
+                "ucode.cli.load_state",
+                return_value={"workspace": "https://ws", "databricks_ai_tools_enabled": False},
+            ),
+        ):
+            result = runner.invoke(app, ["configure"])
+        assert result.exit_code == 0, result.output
+        mock_cfg.assert_called_once_with(
+            prompt_optional_updates=True, databricks_ai_tools_enabled=False
+        )
 
     def test_skip_upgrade_flag_with_agent_skips_optional_update(self):
         with (
@@ -860,6 +929,7 @@ class TestConfigureAgentsSelection:
             force_login=False,
             use_pat=False,
             fable_enabled=None,
+            databricks_ai_tools_enabled=None,
         ):
             configured_shared.append(
                 (workspace, profile, tuple(tools) if tools is not None else None, force_login)
@@ -1253,6 +1323,50 @@ class TestConfigureSharedStateUsePat:
 
         assert "fable_enabled" not in state
         assert "fable" not in state["claude_models"]
+
+    def test_ai_tools_disable_persists(self, monkeypatch):
+        cli_mod, *_ = self._stub_deps(monkeypatch, pat_token="dapi-pat")
+        state = cli_mod.configure_shared_state(
+            self.WS, profile="DEFAULT", databricks_ai_tools_enabled=False
+        )
+        assert state["databricks_ai_tools_enabled"] is False
+
+    def test_ai_tools_enable_persists_explicit_true(self, monkeypatch):
+        # We ask explicitly, so store the on choice too (not just absent-default).
+        cli_mod, *_ = self._stub_deps(monkeypatch, pat_token="dapi-pat")
+        state = cli_mod.configure_shared_state(
+            self.WS, profile="DEFAULT", databricks_ai_tools_enabled=True
+        )
+        assert state["databricks_ai_tools_enabled"] is True
+
+    def test_ai_tools_disable_inherited_same_workspace(self, monkeypatch):
+        # No flag on a re-configure of the same workspace keeps the prior opt-out.
+        cli_mod, *_ = self._stub_deps(
+            monkeypatch,
+            pat_token="dapi-pat",
+            existing_state={
+                "workspace": self.WS,
+                "profile": "DEFAULT",
+                "databricks_ai_tools_enabled": False,
+            },
+        )
+        state = cli_mod.configure_shared_state(self.WS, profile="DEFAULT")
+        assert state["databricks_ai_tools_enabled"] is False
+
+    def test_ai_tools_disable_does_not_leak_across_workspaces(self, monkeypatch):
+        # A different workspace's opt-out must NOT carry into this one; no flag
+        # here resolves to the default (install=True), matching use_pat/fable scoping.
+        cli_mod, *_ = self._stub_deps(
+            monkeypatch,
+            pat_token="dapi-pat",
+            existing_state={
+                "workspace": "https://other.databricks.com",
+                "profile": "DEFAULT",
+                "databricks_ai_tools_enabled": False,
+            },
+        )
+        state = cli_mod.configure_shared_state(self.WS, profile="DEFAULT")
+        assert state["databricks_ai_tools_enabled"] is True
 
     def test_falls_back_to_legacy_when_uc_empty(self, monkeypatch):
         # No UC model-services: each family falls back to the legacy listing.

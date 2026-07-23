@@ -62,16 +62,34 @@ class TestToolSpecs:
 
 
 class TestInstallAiToolsForAgents:
-    def test_maps_supported_tools_and_drops_others(self, monkeypatch):
+    def _capture(self, monkeypatch):
         captured = {}
         monkeypatch.setattr(
             agents_mod,
             "install_ai_tools",
-            lambda tokens, profile: captured.update(tokens=tokens, profile=profile),
+            lambda agents, profile: captured.update(agents=agents, profile=profile),
         )
+        return captured
+
+    def test_maps_supported_tools_and_drops_others(self, monkeypatch):
+        captured = self._capture(monkeypatch)
         # gemini and pi aren't supported by `databricks aitools`, so they drop.
-        install_ai_tools_for_agents(["claude", "codex", "gemini", "pi"], "prof")
-        assert captured == {"tokens": ["claude-code", "codex"], "profile": "prof"}
+        install_ai_tools_for_agents(["claude", "codex", "gemini", "pi"], {"profile": "prof"})
+        assert captured == {"agents": ["claude-code", "codex"], "profile": "prof"}
+
+    def test_installed_by_default(self, monkeypatch):
+        # Opt-out: absent flag means install.
+        captured = self._capture(monkeypatch)
+        install_ai_tools_for_agents(["claude"], {"profile": "p"})
+        assert captured == {"agents": ["claude-code"], "profile": "p"}
+
+    def test_skipped_when_disabled(self, monkeypatch):
+        # `configure --disable-databricks-ai-tools` persists this False.
+        captured = self._capture(monkeypatch)
+        install_ai_tools_for_agents(
+            ["claude"], {"profile": "p", "databricks_ai_tools_enabled": False}
+        )
+        assert captured == {}  # install_ai_tools never called
 
 
 class TestConfigureWiresAiToolsInstall:
@@ -84,19 +102,27 @@ class TestConfigureWiresAiToolsInstall:
         monkeypatch.setattr(
             agents_mod,
             "install_ai_tools",
-            lambda tokens, profile: captured.update(tokens=tokens, profile=profile),
+            lambda agents, profile: captured.update(agents=agents, profile=profile),
         )
         return captured
 
     def test_configure_single_tool_triggers_install(self, monkeypatch):
         captured = self._stub_configure(monkeypatch)
         agents_mod.configure_single_tool("codex", {"codex_models": ["m"], "profile": "myprof"})
-        assert captured == {"tokens": ["codex"], "profile": "myprof"}
+        assert captured == {"agents": ["codex"], "profile": "myprof"}
 
     def test_configure_selected_tools_triggers_install(self, monkeypatch):
         captured = self._stub_configure(monkeypatch)
         agents_mod.configure_selected_tools({"profile": "myprof"}, ["codex"])
-        assert captured == {"tokens": ["codex"], "profile": "myprof"}
+        assert captured == {"agents": ["codex"], "profile": "myprof"}
+
+    def test_configure_single_tool_respects_disable(self, monkeypatch):
+        captured = self._stub_configure(monkeypatch)
+        agents_mod.configure_single_tool(
+            "codex",
+            {"codex_models": ["m"], "profile": "myprof", "databricks_ai_tools_enabled": False},
+        )
+        assert captured == {}
 
 
 class TestNormalizeTool:
