@@ -76,10 +76,13 @@ AITOOLS_AGENT_TOKENS = {
 
 
 def install_ai_tools_for_agents(tools: list[str], state: dict) -> None:
-    """Install Databricks AI Tools for the coding agents that support them.
+    """Install Databricks AI Tools for the coding agents that support them
+    (gemini/pi have no ``aitools`` support and are dropped).
 
     Persists an ``ai_tools_installed`` marker so an already-installed agent is
     skipped without shelling out, making repeat calls (e.g. on every launch) cheap."""
+    if state.get("databricks_ai_tools_enabled", True) is False:
+        return
     installed = set(state.get("ai_tools_installed") or [])
     mapped = (AITOOLS_AGENT_TOKENS.get(tool) for tool in tools)
     tokens = [tok for tok in mapped if tok and tok not in installed]
