@@ -1322,24 +1322,16 @@ def configure_skills(
             "--mcp", help="Manage the skills MCP connection (required until download mode lands)."
         ),
     ] = False,
-    remove: Annotated[
-        bool, typer.Option("--remove", help="With --mcp: remove the listed schemas from the set.")
-    ] = False,
-    replace: Annotated[
-        bool,
-        typer.Option(
-            "--replace", help="With --mcp: replace the set with exactly the listed schemas."
-        ),
-    ] = False,
 ) -> None:
-    """Configure Databricks Skills for your coding tools."""
+    """Configure Databricks Skills for your coding tools.
+
+    ``--location`` sets the skills MCP connection's scope to exactly the listed
+    schemas, replacing any previous set.
+    """
     try:
         if not mcp:
             raise RuntimeError("Download mode is not available yet; pass --mcp for now.")
-        if remove and replace:
-            raise RuntimeError("Use either --remove or --replace, not both.")
-        mode = "remove" if remove else "replace" if replace else "add"
-        configure_skills_mcp_command(_parse_skill_locations(location), mode=mode)
+        configure_skills_mcp_command(_parse_skill_locations(location))
     except RuntimeError as exc:
         print_err(str(exc))
         raise typer.Exit(1) from None

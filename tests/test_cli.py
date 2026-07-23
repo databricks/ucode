@@ -343,46 +343,21 @@ class TestStatus:
 
 
 class TestConfigureSkillsCommand:
-    def test_mcp_flag_dispatches_add_mode(self):
+    def test_mcp_flag_dispatches_location_set(self):
         with patch("ucode.cli.configure_skills_mcp_command") as mock_mcp:
             result = runner.invoke(app, ["configure", "skills", "--location", "a.b", "--mcp"])
         assert result.exit_code == 0, result.output
-        mock_mcp.assert_called_once_with(["a.b"], mode="add")
-
-    def test_mcp_remove_dispatches_remove_mode(self):
-        with patch("ucode.cli.configure_skills_mcp_command") as mock_mcp:
-            result = runner.invoke(
-                app, ["configure", "skills", "--location", "a.b", "--mcp", "--remove"]
-            )
-        assert result.exit_code == 0, result.output
-        mock_mcp.assert_called_once_with(["a.b"], mode="remove")
-
-    def test_mcp_replace_dispatches_replace_mode(self):
-        with patch("ucode.cli.configure_skills_mcp_command") as mock_mcp:
-            result = runner.invoke(
-                app, ["configure", "skills", "--location", "a.b", "--mcp", "--replace"]
-            )
-        assert result.exit_code == 0, result.output
-        mock_mcp.assert_called_once_with(["a.b"], mode="replace")
+        mock_mcp.assert_called_once_with(["a.b"])
 
     def test_comma_location_yields_multiple_schemas(self):
         with patch("ucode.cli.configure_skills_mcp_command") as mock_mcp:
             result = runner.invoke(app, ["configure", "skills", "--location", "a.b, c.d", "--mcp"])
         assert result.exit_code == 0, result.output
-        mock_mcp.assert_called_once_with(["a.b", "c.d"], mode="add")
+        mock_mcp.assert_called_once_with(["a.b", "c.d"])
 
     def test_without_mcp_is_not_implemented_exit_1(self):
         with patch("ucode.cli.configure_skills_mcp_command") as mock_mcp:
             result = runner.invoke(app, ["configure", "skills", "--location", "a.b"])
-        assert result.exit_code == 1
-        mock_mcp.assert_not_called()
-
-    def test_remove_and_replace_together_exit_1(self):
-        with patch("ucode.cli.configure_skills_mcp_command") as mock_mcp:
-            result = runner.invoke(
-                app,
-                ["configure", "skills", "--location", "a.b", "--mcp", "--remove", "--replace"],
-            )
         assert result.exit_code == 1
         mock_mcp.assert_not_called()
 

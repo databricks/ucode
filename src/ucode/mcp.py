@@ -1407,26 +1407,6 @@ def _resolve_skills_mcp_servers(
     return [*kept, _build_skills_entry(workspace, locations, merged)]
 
 
-def _current_skill_locations(state: dict) -> list[str]:
-    """Read ``skill_locations`` off the single ``kind:"skills"`` entry, else ``[]``."""
-    for server in state.get("mcp_servers") or []:
-        if server.get("kind") == SKILLS_MCP_KIND:
-            return list(server.get("skill_locations") or [])
-    return []
-
-
-def resolve_skill_location_set(current: list[str], requested: list[str], *, mode: str) -> list[str]:
-    """Apply a set mutation to the skill-location list (``requested`` is already
-    de-duplicated by the CLI parser). ``mode`` is one of ``add`` (union),
-    ``remove`` (difference), ``replace`` (exactly ``requested``). Order is stable;
-    the backend assigns tool indices by URL position."""
-    if mode == "remove":
-        return [c for c in current if c not in requested]
-    if mode == "replace":
-        return requested
-    return current + [r for r in requested if r not in current]
-
-
 def _update_skills_mcp(
     state: dict, workspace: str, clients: list[str], locations: list[str]
 ) -> None:
@@ -1440,12 +1420,10 @@ def _update_skills_mcp(
         print_success("Saved")
 
 
-def configure_skills_mcp_command(locations: list[str], *, mode: str) -> int:
-    """Add/remove/replace the skills MCP connection's ``skill_locations`` set."""
+def configure_skills_mcp_command(locations: list[str]) -> int:
+    """Set the skills MCP connection's ``skill_locations`` to exactly ``locations``,
+    replacing any previous set."""
     state = load_state()
     workspace, _profile, clients = _setup_mcp_clients(state, "Skills MCP")
-    new_locations = resolve_skill_location_set(
-        _current_skill_locations(state), locations, mode=mode
-    )
-    _update_skills_mcp(state, workspace, clients, new_locations)
+    _update_skills_mcp(state, workspace, clients, locations)
     return 0
