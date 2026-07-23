@@ -1923,33 +1923,6 @@ class TestConfigureSkillsMcpCommand:
         assert "system-ai-github" in names
         assert names.count(mcp.SKILLS_MCP_SERVER_NAME) == 1
 
-    def test_soft_warns_over_schema_cap(self, monkeypatch, capsys):
-        saved_states: list[dict] = []
-        _stub_location_base(monkeypatch, _skills_state())
-        monkeypatch.setattr(mcp, "configure_client_mcp_server", lambda *a, **kw: [])
-        monkeypatch.setattr(mcp, "save_state", lambda state: saved_states.append(state.copy()))
-
-        many = [f"c.s{i}" for i in range(mcp.SKILLS_MCP_SCHEMA_SOFT_CAP + 1)]
-        assert mcp.configure_skills_mcp_command(many, mode="replace") == 0
-
-        assert len(_find_skills(saved_states[-1]["mcp_servers"])[0]["skill_locations"]) == len(many)
-        out = capsys.readouterr().out
-        assert "recommended limit" in out
-
-
-class TestConfigureSkillsCommand:
-    def test_bare_default_registers_connection(self, monkeypatch):
-        saved_states: list[dict] = []
-        _stub_location_base(monkeypatch, _skills_state())
-        monkeypatch.setattr(mcp, "configure_client_mcp_server", lambda *a, **kw: [])
-        monkeypatch.setattr(mcp, "save_state", lambda state: saved_states.append(state.copy()))
-
-        assert mcp.configure_skills_command(["a.b"]) == 0
-
-        skills = _find_skills(saved_states[-1]["mcp_servers"])
-        assert len(skills) == 1
-        assert skills[0]["skill_locations"] == ["a.b"]
-
 
 class TestRevertMcpConfigs:
     def test_removes_cli_registered_servers_and_restores_copilot_config(self, monkeypatch):

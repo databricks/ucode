@@ -1330,10 +1330,11 @@ def build_mcp_service_url(workspace: str, full_name: str) -> str:
 
 
 def build_skills_mcp_url(workspace: str, locations: list[str]) -> str:
-    """Skills route with repeated ``?schema=`` scopes (universe PR #2256555).
+    """Skills route with one ``?schema=`` scope per location. The trailing slash
+    is required by the Envoy prefix even with no query params.
 
-    Empty ``locations`` -> the bare route (utility tools only). The trailing
-    slash is required by the Envoy prefix even with no query params.
+        []                        -> ``.../ai-gateway/skills/``
+        ["main.default", "ml.a"]  -> ``.../ai-gateway/skills/?schema=main.default&schema=ml.a``
     """
     base = f"{workspace}/ai-gateway/skills/"
     if not locations:

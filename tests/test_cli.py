@@ -343,16 +343,6 @@ class TestStatus:
 
 
 class TestConfigureSkillsCommand:
-    def test_default_calls_configure_skills_command(self):
-        with (
-            patch("ucode.cli.configure_skills_command") as mock_default,
-            patch("ucode.cli.configure_skills_mcp_command") as mock_mcp,
-        ):
-            result = runner.invoke(app, ["configure", "skills", "--location", "a.b"])
-        assert result.exit_code == 0, result.output
-        mock_default.assert_called_once_with(["a.b"])
-        mock_mcp.assert_not_called()
-
     def test_mcp_flag_dispatches_add_mode(self):
         with patch("ucode.cli.configure_skills_mcp_command") as mock_mcp:
             result = runner.invoke(app, ["configure", "skills", "--location", "a.b", "--mcp"])
@@ -381,6 +371,12 @@ class TestConfigureSkillsCommand:
         assert result.exit_code == 0, result.output
         mock_mcp.assert_called_once_with(["a.b", "c.d"], mode="add")
 
+    def test_without_mcp_is_not_implemented_exit_1(self):
+        with patch("ucode.cli.configure_skills_mcp_command") as mock_mcp:
+            result = runner.invoke(app, ["configure", "skills", "--location", "a.b"])
+        assert result.exit_code == 1
+        mock_mcp.assert_not_called()
+
     def test_remove_and_replace_together_exit_1(self):
         with patch("ucode.cli.configure_skills_mcp_command") as mock_mcp:
             result = runner.invoke(
@@ -390,52 +386,18 @@ class TestConfigureSkillsCommand:
         assert result.exit_code == 1
         mock_mcp.assert_not_called()
 
-    def test_remove_without_mcp_exit_1(self):
-        with patch("ucode.cli.configure_skills_command") as mock_default:
-            result = runner.invoke(app, ["configure", "skills", "--location", "a.b", "--remove"])
-        assert result.exit_code == 1
-        mock_default.assert_not_called()
-
-    def test_path_with_mcp_exit_1(self):
-        with patch("ucode.cli.configure_skills_mcp_command") as mock_mcp:
-            result = runner.invoke(
-                app, ["configure", "skills", "--location", "a.b", "--mcp", "--path", "/tmp/p"]
-            )
-        assert result.exit_code == 1
-        mock_mcp.assert_not_called()
-
-    def test_three_part_with_mcp_exit_1(self):
+    def test_three_part_location_exit_1(self):
         with patch("ucode.cli.configure_skills_mcp_command") as mock_mcp:
             result = runner.invoke(app, ["configure", "skills", "--location", "a.b.c", "--mcp"])
         assert result.exit_code == 1
         mock_mcp.assert_not_called()
 
-    def test_three_part_without_mcp_is_download_only_exit_1(self):
-        with patch("ucode.cli.configure_skills_command") as mock_default:
-            result = runner.invoke(app, ["configure", "skills", "--location", "a.b.c"])
-        assert result.exit_code == 1
-        mock_default.assert_not_called()
-
-    def test_path_without_mcp_is_download_only_exit_1(self):
-        with patch("ucode.cli.configure_skills_command") as mock_default:
-            result = runner.invoke(
-                app, ["configure", "skills", "--location", "a.b", "--path", "/tmp/p"]
-            )
-        assert result.exit_code == 1
-        mock_default.assert_not_called()
-
-    def test_yes_without_mcp_is_download_only_exit_1(self):
-        with patch("ucode.cli.configure_skills_command") as mock_default:
-            result = runner.invoke(app, ["configure", "skills", "--location", "a.b", "--yes"])
-        assert result.exit_code == 1
-        mock_default.assert_not_called()
-
     def test_malformed_location_exit_1_names_location(self):
-        with patch("ucode.cli.configure_skills_command") as mock_default:
-            result = runner.invoke(app, ["configure", "skills", "--location", "justone"])
+        with patch("ucode.cli.configure_skills_mcp_command") as mock_mcp:
+            result = runner.invoke(app, ["configure", "skills", "--location", "justone", "--mcp"])
         assert result.exit_code == 1
         assert "--location" in _strip_ansi(result.output)
-        mock_default.assert_not_called()
+        mock_mcp.assert_not_called()
 
     def test_missing_location_is_typer_usage_error(self):
         result = runner.invoke(app, ["configure", "skills"])

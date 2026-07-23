@@ -82,7 +82,6 @@ MCP_CLIENTS = {
 }
 SKILLS_MCP_KIND = "skills"
 SKILLS_MCP_SERVER_NAME = "databricks-skill-registry"
-SKILLS_MCP_SCHEMA_SOFT_CAP = 10
 EXTERNAL_MCP_SELECTION_PREFIX = "external:"
 SQL_MCP_VALUE = "managed:sql"
 GENIE_SPACE_SELECTION_PREFIX = "genie-space:"
@@ -1044,9 +1043,8 @@ def apply_mcp_server_changes(
         url = server.get("url")
         if not isinstance(url, str) or not url:
             continue
-        # alwaysLoad is Claude-only and rides the per-entry apply; other clients
-        # get URL only. The skills registry always loads so its utility tools
-        # are available without an explicit MCP-server mention.
+        # alwaysLoad (Claude-only) keeps the skills registry's utility tools
+        # discoverable without an explicit mention; other clients ignore it.
         entry = build_mcp_http_entry(url, always_load=server.get("kind") == SKILLS_MCP_KIND)
         for client in clients:
             configure_client_mcp_server(client, name, url, entry)
@@ -1114,8 +1112,6 @@ def purge_cross_workspace_mcp_residue(state: dict, workspace: str) -> None:
 
 
 def _skills_entries(servers: list[dict]) -> list[dict]:
-    """Skills connections carry their own lifecycle (``configure skills``); the
-    mcp commands preserve them untouched instead of treating them as removals."""
     return [s for s in servers if s.get("kind") == SKILLS_MCP_KIND]
 
 
@@ -1235,35 +1231,6 @@ def _resolve_skills_mcp_servers(
         if s.get("kind") != SKILLS_MCP_KIND and _server_name(s) != SKILLS_MCP_SERVER_NAME
     ]
     return [*kept, _build_skills_entry(workspace, locations, merged)]
-
-
-def _dedupe_stable(values: list[str]) -> list[str]:
-    seen: set[str] = set()
-    result: list[str] = []
-    for value in values:
-        if value not in seen:
-            seen.add(value)
-            result.append(value)
-    return result
-
-
-def resolve_skill_location_set(current: list[str], requested: list[str], *, mode: str) -> list[str]:
-    """Apply a set mutation to the skill-location list. ``mode`` is one of
-    ``add`` (union), ``remove`` (difference), ``replace`` (deduped requested).
-    Order is stable throughout; backend assigns tool indices by URL position."""
-    if mode == "remove":
-        return [c for c in current if c not in requested]
-    if mode == "replace":
-        return _dedupe_stable(requested)
-    return current + [r for r in requested if r not in current]
-
-
-def _current_skill_locations(state: dict) -> list[str]:
-    """Read ``skill_locations`` off the single ``kind:"skills"`` entry, else ``[]``."""
-    for server in state.get("mcp_servers") or []:
-        if server.get("kind") == SKILLS_MCP_KIND:
-            return list(server.get("skill_locations") or [])
-    return []
 
 
 def _setup_mcp_clients(state: dict, section: str) -> tuple[str, str | None, list[str]]:
@@ -1440,7 +1407,26 @@ def configure_mcp_command(location: str | None = None, services: set[str] | None
     return 0
 
 
-def _apply_skills_connection(
+def _current_skill_locations(state: dict) -> list[str]:
+    """Read ``skill_locations`` off the single ``kind:"skills"`` entry, else ``[]``."""
+    for server in state.get("mcp_servers") or []:
+        if server.get("kind") == SKILLS_MCP_KIND:
+            return list(server.get("skill_locations") or [])
+    return []
+
+
+def resolve_skill_location_set(current: list[str], requested: list[str], *, mode: str) -> list[str]:
+    """Apply a set mutation to the skill-location list. ``mode`` is one of
+    ``add`` (union), ``remove`` (difference), ``replace`` (deduped requested).
+    Order is stable throughout; backend assigns tool indices by URL position."""
+    if mode == "remove":
+        return [c for c in current if c not in requested]
+    if mode == "replace":
+        return list(dict.fromkeys(requested))
+    return current + [r for r in requested if r not in current]
+
+
+def _update_skills_mcp(
     state: dict, workspace: str, clients: list[str], locations: list[str]
 ) -> None:
     """Rebuild the single skills connection for ``locations`` and persist it."""
@@ -1460,18 +1446,5 @@ def configure_skills_mcp_command(locations: list[str], *, mode: str) -> int:
     new_locations = resolve_skill_location_set(
         _current_skill_locations(state), locations, mode=mode
     )
-    if len(new_locations) > SKILLS_MCP_SCHEMA_SOFT_CAP:
-        print_warning(
-            f"{len(new_locations)} schemas exceeds the recommended limit of "
-            f"{SKILLS_MCP_SCHEMA_SOFT_CAP}; registering anyway."
-        )
-    _apply_skills_connection(state, workspace, clients, new_locations)
-    return 0
-
-
-def configure_skills_command(locations: list[str]) -> int:
-    """Bare-default entry point: register the skills connection for ``locations``."""
-    state = load_state()
-    workspace, _profile, clients = _setup_mcp_clients(state, "Skills")
-    _apply_skills_connection(state, workspace, clients, locations)
+    _update_skills_mcp(state, workspace, clients, new_locations)
     return 0
