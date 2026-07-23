@@ -454,7 +454,7 @@ class TestStatusSkillsSection:
         assert "Skills" in out
         assert "not configured" in out
 
-    def test_mcp_mode_rendering(self):
+    def test_renders_locations_and_configured_agents(self):
         state = {
             **MINIMAL_STATE,
             "mcp_servers": [
@@ -471,12 +471,10 @@ class TestStatusSkillsSection:
         result = self._run(state)
         assert result.exit_code == 0, result.output
         out = _strip_ansi(result.output)
-        assert "Connection: databricks-skill-registry" in out
-        assert "Mode: mcp" in out
-        assert "Locations: main.default, ml.prod" in out
+        assert "Skill MCP Locations: main.default, ml.prod" in out
         assert "Configured: Claude Code, Codex" in out
 
-    def test_download_mode_rendering(self):
+    def test_renders_placeholder_when_no_locations(self):
         state = {
             **MINIMAL_STATE,
             "mcp_servers": [
@@ -493,8 +491,7 @@ class TestStatusSkillsSection:
         result = self._run(state)
         assert result.exit_code == 0, result.output
         out = _strip_ansi(result.output)
-        assert "Mode: download" in out
-        assert "none — utility tools only" in out
+        assert "Skill MCP Locations: none — utility tools only" in out
 
     def test_skills_entry_absent_from_per_client_mcp_lines(self):
         state = {
@@ -519,12 +516,12 @@ class TestStatusSkillsSection:
         result = self._run(state)
         assert result.exit_code == 0, result.output
         out = _strip_ansi(result.output)
-        # The skills registry appears only in the Skills section, never on a
-        # per-client "MCP servers:" line.
+        # The skills registry is managed in the Skills section, never listed on
+        # a per-client "MCP servers:" line.
         for line in out.splitlines():
             if "MCP servers:" in line:
                 assert "databricks-skill-registry" not in line
-        assert "Connection: databricks-skill-registry" in out
+        assert "Skill MCP Locations: main.default" in out
 
 
 class TestRevert:

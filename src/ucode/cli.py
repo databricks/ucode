@@ -764,10 +764,8 @@ def status() -> int:
         print_kv("Skills", "not configured")
     else:
         locations = skills_entry.get("skill_locations") or []
-        print_kv("Connection", str(skills_entry.get("name")))
-        print_kv("Mode", "mcp" if locations else "download")
         print_kv(
-            "Locations",
+            "Skill MCP Locations",
             ", ".join(locations) if locations else "none — utility tools only",
         )
         displays = [
