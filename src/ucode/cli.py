@@ -649,6 +649,16 @@ def configure_workspace_command(
         for tool_name in picked:
             state = _maybe_select_provider_service(tool_name, state)
 
+    # Last question in the interactive flow: opt out of AI Tools. When a flag
+    # already decided it, configure_shared_state persisted that; skip the prompt.
+    # The default is the resolved prior choice, so Enter won't undo a past opt-out.
+    if databricks_ai_tools_enabled is None and offer_provider:
+        state["databricks_ai_tools_enabled"] = prompt_yes_no_default(
+            "Install Databricks AI Tools for your coding agents? "
+            "This adds Databricks skills and plugins.",
+            default=state.get("databricks_ai_tools_enabled", True),
+        )
+
     state = configure_selected_tools(state, picked)
 
     summary_lines = [f"[bold]Workspace:[/bold] [cyan]{state['workspace']}[/cyan]"]
@@ -1194,17 +1204,6 @@ def configure(
         # target claude instead of dropping into the interactive agent picker.
         if enable_fable is not None and agent is None and agents is None:
             agent = "claude"
-        # Bare `ucode configure`: nothing named on the command line, so there's
-        # a terminal to prompt in. Naming an agent or workspace/profile is a
-        # non-interactive run. (workspace_entries covers --workspaces/--profiles.)
-        interactive_configure = agent is None and agents is None and workspace_entries is None
-        if enable_databricks_ai_tools is None and interactive_configure:
-            # Default to prior choice so Enter doesn't undo a past opt-out.
-            prior_disabled = load_state().get("databricks_ai_tools_enabled") is False
-            enable_databricks_ai_tools = prompt_yes_no_default(
-                "Install Databricks AI Tools for your coding agents?",
-                default=not prior_disabled,
-            )
         if enable_databricks_ai_tools is not None:
             skip_kwargs["databricks_ai_tools_enabled"] = enable_databricks_ai_tools
         if agent is not None:
