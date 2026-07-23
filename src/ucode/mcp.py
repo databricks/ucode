@@ -1190,49 +1190,6 @@ def _resolve_location_mcp_servers(
     return [*working_servers, *_skills_entries(original_servers)]
 
 
-def _merge_clients(prior: list[str] | None, new: list[str]) -> list[str]:
-    """Order-preserving union of a prior client list with newly-configured ones."""
-    prior = list(prior or [])
-    return prior + [c for c in new if c not in prior]
-
-
-def _build_skills_entry(workspace: str, locations: list[str], clients: list[str]) -> dict:
-    """Canonical single skills-registry entry. ``skill_locations`` is the source
-    of truth; the URL is always derived from it, never parsed back."""
-    return {
-        "name": SKILLS_MCP_SERVER_NAME,
-        "kind": SKILLS_MCP_KIND,
-        "skill_locations": list(locations),
-        "url": build_skills_mcp_url(workspace, locations),
-        "auth": f"env:{MCP_AUTH_TOKEN_ENV_VAR}",
-        "clients": clients,
-    }
-
-
-def _resolve_skills_mcp_servers(
-    workspace: str,
-    clients: list[str],
-    locations: list[str],
-    original_servers: list[dict],
-) -> list[dict]:
-    """Rebuild the MCP server list around exactly one skills entry.
-
-    Drops every prior ``kind=="skills"`` entry and any entry named
-    ``SKILLS_MCP_SERVER_NAME`` (single-connection invariant; also sweeps up a
-    stray old-named entry via ``apply_mcp_server_changes``), keeps everything
-    else, and appends one rebuilt entry whose clients merge the prior skills
-    entry's clients with ``clients``.
-    """
-    prior = next((s for s in original_servers if s.get("kind") == SKILLS_MCP_KIND), None)
-    merged = _merge_clients((prior or {}).get("clients"), clients)
-    kept = [
-        s
-        for s in original_servers
-        if s.get("kind") != SKILLS_MCP_KIND and _server_name(s) != SKILLS_MCP_SERVER_NAME
-    ]
-    return [*kept, _build_skills_entry(workspace, locations, merged)]
-
-
 def _setup_mcp_clients(state: dict, section: str) -> tuple[str, str | None, list[str]]:
     """Validate the workspace, resolve configured MCP clients, and prepare auth.
 
@@ -1407,6 +1364,49 @@ def configure_mcp_command(location: str | None = None, services: set[str] | None
     return 0
 
 
+def _merge_clients(prior: list[str] | None, new: list[str]) -> list[str]:
+    """Order-preserving union of a prior client list with newly-configured ones."""
+    prior = list(prior or [])
+    return prior + [c for c in new if c not in prior]
+
+
+def _build_skills_entry(workspace: str, locations: list[str], clients: list[str]) -> dict:
+    """Canonical single skills-registry entry. ``skill_locations`` is the source
+    of truth; the URL is always derived from it, never parsed back."""
+    return {
+        "name": SKILLS_MCP_SERVER_NAME,
+        "kind": SKILLS_MCP_KIND,
+        "skill_locations": list(locations),
+        "url": build_skills_mcp_url(workspace, locations),
+        "auth": f"env:{MCP_AUTH_TOKEN_ENV_VAR}",
+        "clients": clients,
+    }
+
+
+def _resolve_skills_mcp_servers(
+    workspace: str,
+    clients: list[str],
+    locations: list[str],
+    original_servers: list[dict],
+) -> list[dict]:
+    """Rebuild the MCP server list around exactly one skills entry.
+
+    Drops every prior ``kind=="skills"`` entry and any entry named
+    ``SKILLS_MCP_SERVER_NAME`` (single-connection invariant; also sweeps up a
+    stray old-named entry via ``apply_mcp_server_changes``), keeps everything
+    else, and appends one rebuilt entry whose clients merge the prior skills
+    entry's clients with ``clients``.
+    """
+    prior = next((s for s in original_servers if s.get("kind") == SKILLS_MCP_KIND), None)
+    merged = _merge_clients((prior or {}).get("clients"), clients)
+    kept = [
+        s
+        for s in original_servers
+        if s.get("kind") != SKILLS_MCP_KIND and _server_name(s) != SKILLS_MCP_SERVER_NAME
+    ]
+    return [*kept, _build_skills_entry(workspace, locations, merged)]
+
+
 def _current_skill_locations(state: dict) -> list[str]:
     """Read ``skill_locations`` off the single ``kind:"skills"`` entry, else ``[]``."""
     for server in state.get("mcp_servers") or []:
@@ -1416,13 +1416,14 @@ def _current_skill_locations(state: dict) -> list[str]:
 
 
 def resolve_skill_location_set(current: list[str], requested: list[str], *, mode: str) -> list[str]:
-    """Apply a set mutation to the skill-location list. ``mode`` is one of
-    ``add`` (union), ``remove`` (difference), ``replace`` (deduped requested).
-    Order is stable throughout; backend assigns tool indices by URL position."""
+    """Apply a set mutation to the skill-location list (``requested`` is already
+    de-duplicated by the CLI parser). ``mode`` is one of ``add`` (union),
+    ``remove`` (difference), ``replace`` (exactly ``requested``). Order is stable;
+    the backend assigns tool indices by URL position."""
     if mode == "remove":
         return [c for c in current if c not in requested]
     if mode == "replace":
-        return list(dict.fromkeys(requested))
+        return requested
     return current + [r for r in requested if r not in current]
 
 

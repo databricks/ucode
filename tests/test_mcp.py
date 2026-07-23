@@ -1756,8 +1756,8 @@ class TestResolveSkillLocationSet:
     def test_remove_is_difference(self):
         assert mcp.resolve_skill_location_set(["a.b", "c.d"], ["c.d"], mode="remove") == ["a.b"]
 
-    def test_replace_dedupes_preserving_order(self):
-        assert mcp.resolve_skill_location_set(["a.b"], ["x.y", "x.y", "z.w"], mode="replace") == [
+    def test_replace_swaps_in_requested(self):
+        assert mcp.resolve_skill_location_set(["a.b"], ["x.y", "z.w"], mode="replace") == [
             "x.y",
             "z.w",
         ]
