@@ -25,6 +25,28 @@ class TestBuildMcpHttpEntry:
         assert "oauth" not in entry
         assert "headersHelper" not in entry
 
+    def test_omits_always_load_by_default(self):
+        entry = mcp.build_mcp_http_entry(f"{WS}/ai-gateway/skills/")
+        assert "alwaysLoad" not in entry
+
+    def test_sets_always_load_when_requested(self):
+        entry = mcp.build_mcp_http_entry(f"{WS}/ai-gateway/skills/", always_load=True)
+        assert entry["alwaysLoad"] is True
+
+
+class TestSplitCatalogSchema:
+    def test_accepts_catalog_schema(self):
+        assert mcp._split_catalog_schema("a.b", "--location") == ("a", "b")
+
+    def test_rejects_malformed_locations(self):
+        for bad in ("a", "a.b.c", ".b", "a.", ""):
+            try:
+                mcp._split_catalog_schema(bad, "--flag")
+            except RuntimeError as exc:
+                assert "--flag" in str(exc)
+            else:
+                raise AssertionError(f"expected RuntimeError for `{bad}`")
+
 
 class TestAddClaudeMcpServer:
     def test_adds_user_scoped_json(self, monkeypatch):

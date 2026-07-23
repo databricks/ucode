@@ -96,14 +96,17 @@ MCP_CONNECTION_MARKERS = (
 )
 
 
-def build_mcp_http_entry(url: str) -> dict:
-    return {
+def build_mcp_http_entry(url: str, *, always_load: bool = False) -> dict:
+    entry: dict[str, Any] = {
         "type": "http",
         "url": url,
         "headers": {
             "Authorization": f"Bearer ${{{MCP_AUTH_TOKEN_ENV_VAR}}}",
         },
     }
+    if always_load:
+        entry["alwaysLoad"] = True
+    return entry
 
 
 def add_claude_mcp_server(name: str, entry: dict, scope: str = MCP_USER_SCOPE) -> None:
@@ -1103,6 +1106,15 @@ def purge_cross_workspace_mcp_residue(state: dict, workspace: str) -> None:
         )
 
 
+def _split_catalog_schema(location: str, flag: str) -> tuple[str, str]:
+    """Split ``<catalog>.<schema>`` into its two non-empty parts."""
+    parts = location.split(".")
+    if len(parts) != 2 or not all(part.strip() for part in parts):
+        raise RuntimeError(f"{flag} must be `<catalog>.<schema>`, got `{location}`.")
+    catalog, schema = parts
+    return catalog, schema
+
+
 def _resolve_location_mcp_servers(
     workspace: str,
     profile: str | None,
@@ -1125,8 +1137,7 @@ def _resolve_location_mcp_servers(
     since-removed service still configures the rest. An empty set selects
     nothing (every previously-registered service in the location is removed).
     ``None`` keeps the whole schema."""
-    if location.count(".") != 1 or not all(part.strip() for part in location.split(".")):
-        raise RuntimeError(f"--location must be `<catalog>.<schema>`, got `{location}`.")
+    _split_catalog_schema(location, "--location")
 
     token = get_databricks_token(workspace, profile)
     with spinner(f"Discovering MCP services in {location}..."):
@@ -1177,25 +1188,12 @@ def _resolve_location_mcp_servers(
     return working_servers
 
 
-def configure_mcp_command(location: str | None = None, services: set[str] | None = None) -> int:
-    if services is not None and location is None:
-        # `--services` works standalone with full names (`system.ai.github`): the
-        # `<catalog>.<schema>` to configure is derived from them. Bare short names
-        # (`github`) can't be located without `--location`.
-        schemas = {".".join(s.split(".")[:2]) for s in services if s.count(".") >= 2}
-        bare = sorted(s for s in services if s.count(".") < 2)
-        if bare:
-            raise RuntimeError(
-                "--services short names need --location (or pass full names like "
-                f"`system.ai.<name>`): {', '.join(bare)}"
-            )
-        if len(schemas) != 1:
-            raise RuntimeError(
-                "--services without --location must all share one `<catalog>.<schema>` "
-                f"(got: {', '.join(sorted(schemas)) or 'none'}); pass --location instead."
-            )
-        location = next(iter(schemas))
-    state = load_state()
+def _setup_mcp_clients(state: dict, section: str) -> tuple[str, str | None, list[str]]:
+    """Validate the workspace, resolve configured MCP clients, and prepare auth.
+
+    Returns ``(workspace, profile, clients)`` and prints the section header, the
+    "Configuring for" note, and a warning per configured-but-uninstalled client.
+    """
     workspace = state.get("workspace")
     if not workspace:
         raise RuntimeError("Workspace is not configured. Run `ucode configure` first.")
@@ -1223,7 +1221,7 @@ def configure_mcp_command(location: str | None = None, services: set[str] | None
     apply_pat_environment(state)
     ensure_databricks_auth(workspace, profile)
 
-    print_section("MCP Servers")
+    print_section(section)
     client_names = ", ".join(str(MCP_CLIENTS[client]["display"]) for client in clients)
     print_note(f"Configuring for: {client_names}")
     for client in missing_clients:
@@ -1231,6 +1229,29 @@ def configure_mcp_command(location: str | None = None, services: set[str] | None
             f"{MCP_CLIENTS[client]['display']} is configured in ucode but not installed; "
             "skipping MCP config."
         )
+    return workspace, profile, clients
+
+
+def configure_mcp_command(location: str | None = None, services: set[str] | None = None) -> int:
+    if services is not None and location is None:
+        # `--services` works standalone with full names (`system.ai.github`): the
+        # `<catalog>.<schema>` to configure is derived from them. Bare short names
+        # (`github`) can't be located without `--location`.
+        schemas = {".".join(s.split(".")[:2]) for s in services if s.count(".") >= 2}
+        bare = sorted(s for s in services if s.count(".") < 2)
+        if bare:
+            raise RuntimeError(
+                "--services short names need --location (or pass full names like "
+                f"`system.ai.<name>`): {', '.join(bare)}"
+            )
+        if len(schemas) != 1:
+            raise RuntimeError(
+                "--services without --location must all share one `<catalog>.<schema>` "
+                f"(got: {', '.join(sorted(schemas)) or 'none'}); pass --location instead."
+            )
+        location = next(iter(schemas))
+    state = load_state()
+    workspace, profile, clients = _setup_mcp_clients(state, "MCP Servers")
 
     original_mcp_servers_for_location: list[dict] = list(state.get("mcp_servers") or [])
     if location is not None:
