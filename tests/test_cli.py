@@ -42,6 +42,15 @@ def no_state_writes():
         yield
 
 
+@pytest.fixture(autouse=True)
+def no_blocking_ai_tools_prompt():
+    """The interactive configure flow prompts for AI Tools; default it to yes so
+    tests that drive that path don't block reading stdin. Tests that assert on the
+    prompt override this with their own patch."""
+    with patch("ucode.cli.prompt_yes_no_default", lambda msg, *, default: default):
+        yield
+
+
 MINIMAL_STATE = {
     "workspace": "https://example.databricks.com",
     "base_urls": {
@@ -494,12 +503,11 @@ class TestConfigureAgentFlag:
             patch("ucode.cli.install_tool_binary"),
             patch("ucode.cli.configure_workspace_command") as mock_cfg,
         ):
-            # No stdin -> the AI Tools prompt takes its default (yes).
+            # No flag: the AI Tools prompt happens later, inside
+            # configure_workspace_command, so nothing is forwarded here.
             result = runner.invoke(app, ["configure"])
         assert result.exit_code == 0, result.output
-        mock_cfg.assert_called_once_with(
-            prompt_optional_updates=True, databricks_ai_tools_enabled=True
-        )
+        mock_cfg.assert_called_once_with(prompt_optional_updates=True)
 
     def test_agents_flag_calls_configure_with_tools(self):
         with (
@@ -647,12 +655,9 @@ class TestConfigureAgentFlag:
             patch("ucode.cli.install_tool_binary"),
             patch("ucode.cli.configure_workspace_command") as mock_cfg,
         ):
-            # Interactive path -> AI Tools prompt takes its default (yes) with no stdin.
             result = runner.invoke(app, ["configure", "--skip-upgrade"])
         assert result.exit_code == 0, result.output
-        mock_cfg.assert_called_once_with(
-            prompt_optional_updates=False, databricks_ai_tools_enabled=True
-        )
+        mock_cfg.assert_called_once_with(prompt_optional_updates=False)
 
     def test_disable_databricks_ai_tools_forwards_false_and_skips_prompt(self):
         # An explicit flag suppresses the interactive prompt and forwards the choice.
@@ -685,37 +690,50 @@ class TestConfigureAgentFlag:
             databricks_ai_tools_enabled=True,
         )
 
-    def test_interactive_prompt_default_yes_when_no_prior_optout(self):
-        # No prior opt-out -> prompt defaults to yes; pressing Enter (no stdin) forwards True.
-        with (
-            patch("ucode.cli.install_databricks_cli"),
-            patch("ucode.cli.install_tool_binary"),
-            patch("ucode.cli.configure_workspace_command") as mock_cfg,
-            patch("ucode.cli.load_state", return_value={"workspace": "https://ws"}),
-        ):
-            result = runner.invoke(app, ["configure"])
-        assert result.exit_code == 0, result.output
-        mock_cfg.assert_called_once_with(
-            prompt_optional_updates=True, databricks_ai_tools_enabled=True
-        )
+    def _stub_interactive_configure(self, monkeypatch, shared_state):
+        """Wire configure_workspace_command's interactive path; return captured info."""
+        import ucode.cli as cli_mod
 
-    def test_interactive_prompt_defaults_to_prior_optout(self):
-        # A prior --disable persists databricks_ai_tools_enabled=False; pressing Enter on a
-        # re-configure must NOT silently re-enable it (prompt defaults to no -> forwards False).
-        with (
-            patch("ucode.cli.install_databricks_cli"),
-            patch("ucode.cli.install_tool_binary"),
-            patch("ucode.cli.configure_workspace_command") as mock_cfg,
-            patch(
-                "ucode.cli.load_state",
-                return_value={"workspace": "https://ws", "databricks_ai_tools_enabled": False},
-            ),
-        ):
-            result = runner.invoke(app, ["configure"])
-        assert result.exit_code == 0, result.output
-        mock_cfg.assert_called_once_with(
-            prompt_optional_updates=True, databricks_ai_tools_enabled=False
+        monkeypatch.setattr(cli_mod, "configure_shared_state", lambda *a, **k: shared_state)
+        monkeypatch.setattr(cli_mod, "check_gateway_endpoint", lambda s, t: t == "claude")
+        monkeypatch.setattr(cli_mod, "install_tool_binary", lambda *a, **k: True)
+        monkeypatch.setattr(cli_mod, "_maybe_select_provider_service", lambda tool, s: s)
+        monkeypatch.setattr(cli_mod, "validate_all_tools", lambda s: None)
+        monkeypatch.setattr(cli_mod, "validate_tool", lambda t: (True, None))
+        monkeypatch.setattr(
+            cli_mod, "_prompt_for_configuration", lambda tool=None: ("https://w", None)
         )
+        monkeypatch.setattr(cli_mod, "prompt_for_tools", lambda options: ["claude"])
+        captured = {}
+        monkeypatch.setattr(
+            cli_mod,
+            "configure_selected_tools",
+            lambda s, tools: captured.update(state=dict(s)) or s,
+        )
+        prompt_calls = []
+        monkeypatch.setattr(
+            cli_mod,
+            "prompt_yes_no_default",
+            lambda msg, *, default: prompt_calls.append(default) or default,
+        )
+        return cli_mod, captured, prompt_calls
+
+    def test_interactive_prompt_default_yes_when_no_prior_optout(self, monkeypatch):
+        # No prior opt-out -> prompt defaults to yes; state carries True into install.
+        state = {**MINIMAL_STATE, "available_tools": [], "databricks_ai_tools_enabled": True}
+        cli_mod, captured, prompt_calls = self._stub_interactive_configure(monkeypatch, state)
+        cli_mod.configure_workspace_command()
+        assert prompt_calls == [True]  # default derived from resolved prior choice
+        assert captured["state"]["databricks_ai_tools_enabled"] is True
+
+    def test_interactive_prompt_defaults_to_prior_optout(self, monkeypatch):
+        # configure_shared_state resolved a prior --disable to False; the prompt must
+        # default to no so Enter doesn't silently re-enable it.
+        state = {**MINIMAL_STATE, "available_tools": [], "databricks_ai_tools_enabled": False}
+        cli_mod, captured, prompt_calls = self._stub_interactive_configure(monkeypatch, state)
+        cli_mod.configure_workspace_command()
+        assert prompt_calls == [False]
+        assert captured["state"]["databricks_ai_tools_enabled"] is False
 
     def test_skip_upgrade_flag_with_agent_skips_optional_update(self):
         with (
