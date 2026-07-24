@@ -937,8 +937,9 @@ def _launch_tool(
         # Surfaces a clear error up front instead of a cryptic gateway failure
         # mid-session. For a Bedrock service this also returns the model ids.
         provider_models = None
+        relayed = False
         if provider:
-            provider_models, error = resolve_provider_models(tool, state, provider)
+            provider_models, error, relayed = resolve_provider_models(tool, state, provider)
             if error:
                 raise RuntimeError(error)
         # Re-fetch model lists on every launch so newly-added Databricks
@@ -962,7 +963,12 @@ def _launch_tool(
         else:
             state, resolved_model = resolve_launch_model(tool, state, None)
         state = configure_tool(
-            tool, state, resolved_model, provider=provider, provider_models=provider_models
+            tool,
+            state,
+            resolved_model,
+            provider=provider,
+            provider_models=provider_models,
+            relayed=relayed,
         )
         print_section(f"ucode with {TOOL_SPECS[tool]['display']}")
         if provider:

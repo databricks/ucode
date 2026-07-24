@@ -102,6 +102,42 @@ class TestRenderOverlay:
         assert "apiKeyHelper" in overlay
         assert WS in overlay["apiKeyHelper"]
 
+    def test_relayed_omits_api_key_helper(self):
+        # Claude Code's own subscription OAuth must own Authorization; an
+        # apiKeyHelper would outrank it.
+        overlay, _ = claude.render_overlay(
+            WS,
+            None,
+            provider="c.s.mps",
+            relayed=True,
+            relayed_base_url="http://127.0.0.1:9",
+        )
+        assert "apiKeyHelper" not in overlay
+
+    def test_relayed_points_base_url_at_proxy(self):
+        overlay, _ = claude.render_overlay(
+            WS,
+            None,
+            provider="c.s.mps",
+            relayed=True,
+            relayed_base_url="http://127.0.0.1:9",
+        )
+        assert overlay["env"]["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:9"
+
+    def test_relayed_sends_mps_header_but_not_swap_token(self):
+        # The MPS header selects the service; the swap token is injected by the
+        # proxy, never written into settings.
+        overlay, _ = claude.render_overlay(
+            WS,
+            None,
+            provider="c.s.mps",
+            relayed=True,
+            relayed_base_url="http://127.0.0.1:9",
+        )
+        headers = overlay["env"]["ANTHROPIC_CUSTOM_HEADERS"]
+        assert "Databricks-Model-Provider-Service: c.s.mps" in headers
+        assert "X-Databricks-AI-Gateway-Token" not in headers
+
     def test_model_overrides_when_all_provided(self):
         models = {
             "sonnet": "databricks-claude-sonnet-4-6",
