@@ -4,7 +4,10 @@ discovery, AI Gateway v2 enforcement, SQL warehouse discovery, URL builders."""
 from __future__ import annotations
 
 import configparser
+import contextlib
 import functools
+import hashlib
+import importlib
 import json
 import logging
 import logging.handlers
@@ -15,6 +18,7 @@ import shlex
 import shutil
 import subprocess
 import time
+from collections.abc import Callable
 from concurrent.futures import (
     ThreadPoolExecutor,
     as_completed,
@@ -23,6 +27,7 @@ from concurrent.futures import (
     TimeoutError as FutureTimeoutError,
 )
 from pathlib import Path
+from types import ModuleType
 from typing import Literal, cast, overload
 from urllib import error as urllib_error
 from urllib import request as urllib_request
@@ -42,6 +47,15 @@ from ucode.ui import (
     spinner,
 )
 
+# `fcntl` (POSIX file locking) doesn't exist on Windows. Load it dynamically
+# so we degrade to no cross-process locking there instead of failing to
+# import this module at all; see `_refresh_lock`.
+fcntl: ModuleType | None
+try:
+    fcntl = importlib.import_module("fcntl")
+except ImportError:
+    fcntl = None
+
 UNIX_DATABRICKS_INSTALL_URL = (
     "https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh"
 )
@@ -52,6 +66,19 @@ AI_GATEWAY_V2_DOCS_URL = "https://docs.databricks.com/aws/en/ai-gateway/overview
 # v1.0.0 is the release that ships `databricks aitools`.
 MIN_DATABRICKS_CLI_VERSION = (1, 0, 0)
 TOKEN_REFRESH_INTERVAL_SECONDS = 1800
+# A `--force-refresh` within this window of a peer process's successful
+# force-refresh (same workspace+profile) is considered redundant: the OAuth
+# refresh token is rotating, so redeeming it twice in quick succession from
+# concurrent `ucode opencode` sessions can revoke the token family (#190).
+TOKEN_REFRESH_COALESCE_SECONDS = 60
+# Must exceed the `databricks auth token` subprocess timeout (`timeout=15` at
+# the `run(...)` call in the `_fetch` closure below), so a live peer that is
+# still inside its own (up to 15s) --force-refresh subprocess is guaranteed
+# to finish and touch the sentinel before any waiter gives up on the lock and
+# proceeds unlocked (#190: an unlocked waiter racing a still-refreshing peer
+# can redeem the rotating refresh token twice).
+_LOCK_ACQUIRE_TIMEOUT_SECONDS = 30
+_LOCK_POLL_INTERVAL_SECONDS = 0.2
 
 
 def _debug_enabled() -> bool:
@@ -812,6 +839,155 @@ def ensure_databricks_auth(workspace: str, profile: str | None = None) -> None:
     run_databricks_login(workspace, profile)
 
 
+def _refresh_lock_paths(workspace: str, profile: str | None) -> tuple[Path, Path]:
+    """Per-workspace+profile lock file and sentinel path, both under APP_DIR.
+
+    Hashing the workspace+profile pair keeps concurrent refreshes for
+    *different* workspaces from serializing against each other, while still
+    giving every process refreshing the *same* workspace+profile a shared,
+    stable path to flock."""
+    digest = hashlib.sha256(f"{workspace}|{profile or ''}".encode()).hexdigest()[:16]
+    lock_path = APP_DIR / f".token-refresh-{digest}.lock"
+    sentinel_path = Path(f"{lock_path}.ts")
+    return lock_path, sentinel_path
+
+
+def _sentinel_is_fresh(sentinel_path: Path) -> bool:
+    """Whether `sentinel_path`'s mtime is within TOKEN_REFRESH_COALESCE_SECONDS."""
+    try:
+        mtime = sentinel_path.stat().st_mtime
+    except OSError:
+        return False
+    return (time.time() - mtime) < TOKEN_REFRESH_COALESCE_SECONDS
+
+
+def _touch_sentinel(sentinel_path: Path) -> None:
+    try:
+        # The sentinel's parent (APP_DIR) is normally created by
+        # `_refresh_lock` before this runs, but that only happens on the
+        # `fcntl`-available branch -- on Windows (no `fcntl`) `_refresh_lock`
+        # yields immediately without ever creating it, which would make
+        # `.touch()` raise `FileNotFoundError` and silently disable
+        # coalescing on every such platform. Ensuring the directory here
+        # keeps best-effort coalescing working even without file locking.
+        sentinel_path.parent.mkdir(parents=True, exist_ok=True)
+        sentinel_path.touch()
+    except OSError as exc:
+        _debug("refresh_lock", f"failed to touch sentinel {sentinel_path}: {exc}")
+
+
+@contextlib.contextmanager
+def _refresh_lock(lock_path: Path):
+    """Best-effort cross-process exclusive lock guarding a force-refresh.
+
+    Degrades to a no-op (yields ``False`` without locking anything) when
+    ``fcntl`` is unavailable (Windows) or the lock can't be opened or
+    acquired for any ``OSError`` — a missing or stuck lock must never
+    prevent a token refresh from proceeding. Acquisition is a bounded,
+    non-blocking retry loop (flock has no native timeout) capped at
+    ``_LOCK_ACQUIRE_TIMEOUT_SECONDS`` before falling back to proceeding
+    without the lock."""
+    if fcntl is None:
+        yield False
+        return
+
+    try:
+        APP_DIR.mkdir(parents=True, exist_ok=True)
+        handle = lock_path.open("a+")
+    except OSError as exc:
+        _debug("refresh_lock", f"could not open lock file {lock_path}: {exc}")
+        yield False
+        return
+
+    acquired = False
+    unexpected_error = False
+    try:
+        deadline = time.monotonic() + _LOCK_ACQUIRE_TIMEOUT_SECONDS
+        while time.monotonic() < deadline:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
+                break
+            except BlockingIOError:
+                # Expected contention (a peer holds the lock) -- keep
+                # polling until acquired or the deadline passes.
+                time.sleep(_LOCK_POLL_INTERVAL_SECONDS)
+            except OSError as exc:
+                # Anything else (e.g. EBADF, or a filesystem that doesn't
+                # support flock at all) is not going to resolve by waiting
+                # -- fall back to unlocked immediately instead of spinning
+                # for the full timeout.
+                unexpected_error = True
+                _debug(
+                    "refresh_lock",
+                    f"unexpected flock error on {lock_path}, proceeding without lock: {exc}",
+                )
+                break
+        if not acquired and not unexpected_error:
+            _debug("refresh_lock", "acquire timeout, proceeding without lock")
+        _debug("refresh_lock", f"acquired={acquired} path={lock_path}")
+        yield acquired
+    finally:
+        if acquired:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            except OSError:
+                pass
+        handle.close()
+
+
+def _perform_force_refresh(
+    workspace: str,
+    profile: str | None,
+    cmd: list[str],
+    fetch: Callable[[], str],
+) -> str:
+    """Serialize `--force-refresh` across processes and coalesce redundant ones.
+
+    Holds a cross-process flock (see `_refresh_lock`) for the duration of an
+    actual force-refresh so two processes can never redeem the rotating
+    refresh token concurrently. If a peer already force-refreshed within
+    `TOKEN_REFRESH_COALESCE_SECONDS`, drops `--force-refresh` from `cmd` (in
+    place, so retries via the same `fetch` closure stay coalesced too) and
+    just fetches the now-current cached token instead.
+
+    The sentinel is touched on ATTEMPT, not on success: Databricks rotates
+    the OAuth refresh token when the `--force-refresh` redemption reaches the
+    server, not when we successfully parse a token out of our subprocess's
+    stdout. If the redemption subprocess actually rotated the token
+    server-side but returned a non-zero exit code or unparseable stdout
+    (both of which `_fetch` swallows into `""`), failing to touch the
+    sentinel would let a concurrent peer redeem the same (now-stale)
+    refresh token again and revoke the whole token family (#190). Marking on
+    attempt instead means we only risk occasionally serving a slightly-stale
+    cached token to a coalesced peer — strictly safer than a double
+    redemption — and any transient failure that gets coalesced away here
+    will simply be retried after the `TOKEN_REFRESH_COALESCE_SECONDS` window
+    elapses. Only touch it here, in the branch that actually sent
+    `--force-refresh`; the coalesced branch above reads the cached token and
+    performs no redemption, so it must never touch the sentinel."""
+    lock_path, sentinel_path = _refresh_lock_paths(workspace, profile)
+    with _refresh_lock(lock_path) as locked:
+        _debug(
+            "get_databricks_token",
+            f"force-refresh lock acquired={locked} workspace={workspace} profile={profile or '<none>'}",
+        )
+        if _sentinel_is_fresh(sentinel_path):
+            _debug(
+                "get_databricks_token",
+                f"coalescing --force-refresh: peer refreshed within "
+                f"{TOKEN_REFRESH_COALESCE_SECONDS}s",
+            )
+            if "--force-refresh" in cmd:
+                cmd.remove("--force-refresh")
+            return fetch()
+
+        _debug("get_databricks_token", "performing --force-refresh")
+        token = fetch()
+        _touch_sentinel(sentinel_path)
+        return token
+
+
 def get_databricks_token(
     workspace: str,
     profile: str | None = None,
@@ -871,7 +1047,10 @@ def get_databricks_token(
             _debug("auth token", f"exception: {type(exc).__name__}: {exc}")
         return ""
 
-    token = _fetch()
+    if force_refresh:
+        token = _perform_force_refresh(workspace, profile, cmd, _fetch)
+    else:
+        token = _fetch()
     if not token:
         # Session may have expired — attempt non-interactive re-auth and retry once.
         _debug("auth token", "empty on first fetch; attempting auth login --no-browser")

@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from unittest.mock import patch
 
+import pytest
+
 from ucode.agents import opencode
 
 WS = "https://example.databricks.com"
@@ -412,3 +414,292 @@ class TestWriteToolConfigStaleProviderCleanup:
 
         written = json.loads(config_file.read_text())
         assert written["model"] == "databricks-anthropic/claude-sonnet"
+
+
+ALL_PROVIDER_IDS = ["databricks-anthropic", "databricks-google", "databricks-oss"]
+
+
+class TestManagedProviderIds:
+    def test_picks_out_provider_keys_only(self):
+        managed_keys = [
+            ["model"],
+            ["provider", "databricks-anthropic"],
+            ["provider", "databricks-oss"],
+        ]
+        assert opencode._managed_provider_ids(managed_keys) == [
+            "databricks-anthropic",
+            "databricks-oss",
+        ]
+
+    def test_empty_when_no_provider_keys(self):
+        assert opencode._managed_provider_ids([["model"]]) == []
+
+
+class TestRenderAuthPlugin:
+    def test_contains_chat_headers_hook(self):
+        js = opencode.render_auth_plugin(WS, None, ALL_PROVIDER_IDS)
+        assert '"chat.headers"' in js
+
+    def test_embeds_workspace_in_auth_token_argv(self):
+        js = opencode.render_auth_plugin(WS, None, ALL_PROVIDER_IDS)
+        assert "auth-token" in js
+        assert "--host" in js
+        assert WS in js
+
+    def test_embeds_profile_flag_when_provided(self):
+        js = opencode.render_auth_plugin(WS, "my-profile", ALL_PROVIDER_IDS)
+        assert "--profile" in js
+        assert "my-profile" in js
+
+    def test_omits_profile_flag_when_not_provided(self):
+        js = opencode.render_auth_plugin(WS, None, ALL_PROVIDER_IDS)
+        assert "--profile" not in js
+
+    def test_embeds_provider_id_guard_set_with_all_providers(self):
+        js = opencode.render_auth_plugin(WS, None, ALL_PROVIDER_IDS)
+        for provider_id in ALL_PROVIDER_IDS:
+            assert provider_id in js
+        assert "MANAGED_PROVIDER_IDS" in js
+
+    def test_embeds_only_configured_subset_of_provider_ids(self):
+        js = opencode.render_auth_plugin(WS, None, ["databricks-anthropic"])
+        assert "databricks-anthropic" in js
+        assert "databricks-google" not in js
+        assert "databricks-oss" not in js
+
+    def test_embeds_ttl_constant(self):
+        js = opencode.render_auth_plugin(WS, None, ALL_PROVIDER_IDS)
+        assert "TTL_MS" in js
+        assert str(opencode.AUTH_PLUGIN_TOKEN_TTL_SECONDS * 1000) in js
+
+    def test_exports_plugin_function(self):
+        js = opencode.render_auth_plugin(WS, None, ALL_PROVIDER_IDS)
+        assert "export const UcodeDatabricksAuth" in js
+
+    def test_provider_scoping_guard_reads_provider_id_directly(self):
+        # `chat.headers`'s `input.provider` is opencode's runtime Provider
+        # record (id/name/env/options/source/models) -- NOT a nested
+        # `{source, info, options}` wrapper. `id` lives directly on
+        # `input.provider`, never `input.provider.info.id`. This was
+        # confirmed empirically against a real opencode 1.17.10 hook
+        # invocation (see #190 follow-up) after a version of this plugin
+        # that read `input.provider?.info?.id` silently no-opped on every
+        # request -- the guard's `!providerId` was always true, so the
+        # hook returned immediately and never refreshed the Authorization
+        # header. See TestRenderAuthPluginRuntimeBehavior below for a live
+        # Node execution of the generated JS against the real hook shape,
+        # which is what actually catches a regression here -- a
+        # string-content assertion alone would not.
+        js = opencode.render_auth_plugin(WS, None, ALL_PROVIDER_IDS)
+        assert "input.provider?.id" in js
+        assert "input.provider?.info?.id" not in js
+
+    def test_fails_open_on_error(self):
+        js = opencode.render_auth_plugin(WS, None, ALL_PROVIDER_IDS)
+        assert "catch" in js
+        assert "console.error" in js
+
+    def test_uses_execfile_not_shell(self):
+        js = opencode.render_auth_plugin(WS, None, ALL_PROVIDER_IDS)
+        assert "execFile" in js
+        assert "node:child_process" in js
+
+
+class TestRenderAuthPluginRuntimeBehavior:
+    """Executes the generated plugin under real Node against the actual
+    opencode `chat.headers` hook input shape, rather than asserting on the
+    generated JS's string content. A version of this plugin that read
+    `input.provider?.info?.id` (instead of `input.provider?.id`) passed
+    every prior test in this file -- because those tests only checked what
+    string literals appear in the generated source -- while silently
+    no-opping on every real request (the guard's `!providerId` was always
+    true). This class exists specifically to catch that class of bug:
+    a mismatch between our assumed hook-input shape and opencode's real
+    runtime shape, confirmed via `opencode`'s own `@opencode-ai/plugin`
+    type surface and an isolated end-to-end run against opencode 1.17.10
+    (#190 follow-up). Skips if `node` isn't on PATH."""
+
+    def _run_plugin(
+        self,
+        tmp_path,
+        provider_id: str | None,
+        fake_token: str | None = "fresh-token-xyz",
+        headers_preset: bool = True,
+    ):
+        import shutil
+        import subprocess
+        import sys
+
+        node = shutil.which("node")
+        if not node:
+            pytest.skip("`node` is not installed")
+
+        fake_ucode = tmp_path / "fake_ucode.py"
+        # `fake_token=None` simulates `ucode auth-token` exiting 0 but
+        # printing nothing (or only whitespace) -- a successful subprocess
+        # with unusable output.
+        print_stmt = f"print({fake_token!r})" if fake_token is not None else 'print("   ")'
+        # No shebang needed -- invoked directly via `sys.executable` below,
+        # not executed as a standalone script.
+        fake_ucode.write_text(f"{print_stmt}\n")
+
+        with patch(
+            "ucode.agents.opencode.build_auth_token_argv",
+            # Use the same interpreter running this test rather than a bare
+            # `python3`, which isn't guaranteed to be on PATH in every
+            # environment (even one running Python tests).
+            return_value=[sys.executable, str(fake_ucode)],
+        ):
+            js = opencode.render_auth_plugin(WS, None, ["databricks-anthropic"])
+
+        plugin_path = tmp_path / "plugin.mjs"
+        plugin_path.write_text(js)
+
+        provider_literal = f"{{ id: {provider_id!r} }}" if provider_id else "undefined"
+        output_literal = (
+            '{ headers: { Authorization: "Bearer STALE-BOOTSTRAP-TOKEN" } }'
+            if headers_preset
+            else "{}"
+        )
+        harness = tmp_path / "harness.mjs"
+        # A `file://` URL is a portable ESM import specifier on every OS;
+        # `.as_posix()` produces a bare path, which isn't a valid ESM
+        # specifier on Windows (`C:\\...`).
+        harness.write_text(f"""
+import {{ UcodeDatabricksAuth }} from {plugin_path.as_uri()!r};
+
+const hooks = await UcodeDatabricksAuth({{}});
+const output = {output_literal};
+const input = {{
+  sessionID: "ses_test",
+  agent: "build",
+  model: {{}},
+  provider: {provider_literal},
+  message: {{}},
+}};
+await hooks["chat.headers"](input, output);
+console.log(JSON.stringify(output.headers ?? null));
+""")
+
+        result = subprocess.run(
+            [node, str(harness)],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        return result
+
+    def test_managed_provider_id_directly_on_input_provider_refreshes_header(self, tmp_path):
+        # This is the real opencode runtime shape: `input.provider` IS the
+        # Provider record, `id` is a direct property.
+        result = self._run_plugin(tmp_path, provider_id="databricks-anthropic")
+        assert result.returncode == 0, result.stderr
+        headers = json.loads(result.stdout.strip().splitlines()[-1])
+        assert headers["Authorization"] == "Bearer fresh-token-xyz"
+
+    def test_unmanaged_provider_id_leaves_static_header_untouched(self, tmp_path):
+        result = self._run_plugin(tmp_path, provider_id="some-other-provider")
+        assert result.returncode == 0, result.stderr
+        headers = json.loads(result.stdout.strip().splitlines()[-1])
+        assert headers["Authorization"] == "Bearer STALE-BOOTSTRAP-TOKEN"
+
+    def test_missing_provider_leaves_static_header_untouched(self, tmp_path):
+        result = self._run_plugin(tmp_path, provider_id=None)
+        assert result.returncode == 0, result.stderr
+        headers = json.loads(result.stdout.strip().splitlines()[-1])
+        assert headers["Authorization"] == "Bearer STALE-BOOTSTRAP-TOKEN"
+
+    def test_empty_token_output_fails_open_instead_of_setting_empty_bearer(self, tmp_path):
+        # `ucode auth-token` exiting 0 with empty/whitespace-only stdout must
+        # not be treated as a successful fetch -- otherwise the hook would
+        # cache and send `Authorization: Bearer ` (empty), clobbering a
+        # possibly-still-valid bootstrap token for the full TTL window.
+        result = self._run_plugin(tmp_path, provider_id="databricks-anthropic", fake_token=None)
+        assert result.returncode == 0, result.stderr
+        headers = json.loads(result.stdout.strip().splitlines()[-1])
+        assert headers["Authorization"] == "Bearer STALE-BOOTSTRAP-TOKEN"
+
+    def test_initializes_missing_output_headers_instead_of_throwing(self, tmp_path):
+        # If opencode ever invokes the hook with no pre-populated
+        # `output.headers`, the hook must still set Authorization rather
+        # than throwing (which the try/catch would otherwise silently
+        # swallow, no-opping the refresh).
+        result = self._run_plugin(
+            tmp_path, provider_id="databricks-anthropic", headers_preset=False
+        )
+        assert result.returncode == 0, result.stderr
+        headers = json.loads(result.stdout.strip().splitlines()[-1])
+        assert headers["Authorization"] == "Bearer fresh-token-xyz"
+
+
+class TestWriteAuthPlugin:
+    def test_writes_plugin_file_containing_hook(self, tmp_path, monkeypatch):
+        import ucode.agents.opencode as oc_mod
+
+        plugin_path = tmp_path / "ucode-databricks-auth.js"
+        monkeypatch.setattr(oc_mod, "OPENCODE_PLUGIN_PATH", plugin_path)
+
+        state = {"workspace": WS, "profile": None}
+        oc_mod.write_auth_plugin(state, ["databricks-anthropic"])
+
+        assert plugin_path.exists()
+        content = plugin_path.read_text()
+        assert '"chat.headers"' in content
+        assert "databricks-anthropic" in content
+
+
+class TestWriteToolConfigAuthPlugin:
+    def _write_and_return(self, tmp_path, monkeypatch, opencode_models):
+        import ucode.agents.opencode as oc_mod
+        import ucode.config_io as config_io_mod
+
+        monkeypatch.setattr(config_io_mod, "APP_DIR", tmp_path)
+        config_file = tmp_path / "opencode.json"
+        backup_file = tmp_path / "opencode-backup.json"
+        plugin_file = tmp_path / "ucode-databricks-auth.js"
+        monkeypatch.setattr(oc_mod, "OPENCODE_CONFIG_PATH", config_file)
+        monkeypatch.setattr(oc_mod, "OPENCODE_BACKUP_PATH", backup_file)
+        monkeypatch.setattr(oc_mod, "OPENCODE_PLUGIN_PATH", plugin_file)
+
+        state = {
+            "workspace": WS,
+            "base_urls": {"opencode": _base_urls()},
+            "opencode_models": opencode_models,
+            "managed_configs": {},
+        }
+
+        with (
+            patch("ucode.agents.opencode.get_databricks_token", return_value="tok"),
+            patch("ucode.agents.opencode.save_state"),
+        ):
+            oc_mod.write_tool_config(state, "claude-sonnet", token="tok")
+
+        return config_file, plugin_file
+
+    def test_writes_plugin_file_to_configured_path(self, tmp_path, monkeypatch):
+        _config_file, plugin_file = self._write_and_return(
+            tmp_path, monkeypatch, {"anthropic": ["claude-sonnet"]}
+        )
+
+        assert plugin_file.exists()
+        assert '"chat.headers"' in plugin_file.read_text()
+
+    def test_plugin_scoped_to_configured_providers_only(self, tmp_path, monkeypatch):
+        _config_file, plugin_file = self._write_and_return(
+            tmp_path, monkeypatch, {"anthropic": ["claude-sonnet"]}
+        )
+
+        content = plugin_file.read_text()
+        assert "databricks-anthropic" in content
+        assert "databricks-google" not in content
+        assert "databricks-oss" not in content
+
+    def test_static_bootstrap_config_still_present_in_opencode_json(self, tmp_path, monkeypatch):
+        config_file, _plugin_file = self._write_and_return(
+            tmp_path, monkeypatch, {"anthropic": ["claude-sonnet"]}
+        )
+
+        written = json.loads(config_file.read_text())
+        anthropic_options = written["provider"]["databricks-anthropic"]["options"]
+        assert anthropic_options["apiKey"] == "tok"
+        assert anthropic_options["headers"]["Authorization"] == "Bearer tok"

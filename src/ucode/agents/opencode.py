@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import signal
 import subprocess
@@ -15,9 +16,11 @@ from ucode.config_io import (
     deep_merge_dict,
     read_json_safe,
     write_json_file,
+    write_text_file,
 )
 from ucode.databricks import (
     TOKEN_REFRESH_INTERVAL_SECONDS,
+    build_auth_token_argv,
     build_opencode_base_urls,
     get_databricks_token,
     model_token_limits,
@@ -30,6 +33,18 @@ OPENCODE_CONFIG_DIR = OPENCODE_XDG_CONFIG_HOME / "opencode"
 OPENCODE_CONFIG_PATH = OPENCODE_CONFIG_DIR / "opencode.json"
 OPENCODE_BACKUP_PATH = APP_DIR / "opencode-config.backup.json"
 OPENCODE_MCP_AUTH_HEADER_VALUE = "Bearer {env:OAUTH_TOKEN}"
+
+# Axis B of #190: opencode bakes provider.options.headers.Authorization into
+# opencode.json once at `ucode configure`/refresh time and never re-reads it
+# for the life of the process, so a long-lived session keeps sending a
+# bearer token that may since have been rotated or revoked. This
+# ucode-managed plugin's `chat.headers` hook overrides that static header on
+# every chat request with a freshly fetched (and short-TTL-cached) token.
+# The static opencode.json header stays in place as the bootstrap/fallback
+# the plugin fails open to if the refresh call errors.
+OPENCODE_PLUGIN_DIR = OPENCODE_CONFIG_DIR / "plugin"
+OPENCODE_PLUGIN_PATH = OPENCODE_PLUGIN_DIR / "ucode-databricks-auth.js"
+AUTH_PLUGIN_TOKEN_TTL_SECONDS = 60
 
 SPEC: ToolSpec = {
     "binary": "opencode",
@@ -155,6 +170,127 @@ def render_overlay(
     return overlay, keys
 
 
+def _managed_provider_ids(managed_keys: list[list[str]]) -> list[str]:
+    """Provider ids actually configured, derived from render_overlay's managed_keys.
+
+    `managed_keys` entries are key paths like `["provider", "databricks-anthropic"]`
+    for each provider render_overlay populated (only providers with at least one
+    configured model are included); this just picks those out."""
+    return [key[1] for key in managed_keys if len(key) == 2 and key[0] == "provider"]
+
+
+def render_auth_plugin(workspace: str, profile: str | None, provider_ids: list[str]) -> str:
+    """Return the JS source for the ucode-managed opencode `chat.headers` plugin.
+
+    On every chat request, the plugin sets a freshly fetched
+    `Authorization: Bearer <token>` header for our Databricks providers
+    (identified by `provider_ids`), overriding the static header baked into
+    opencode.json. The token comes from `ucode auth-token` -- the same
+    cross-platform helper used elsewhere (see `build_auth_token_argv`) -- but
+    is cached in-process for `AUTH_PLUGIN_TOKEN_TTL_SECONDS` so it doesn't
+    shell out on every request; a single in-flight promise coalesces
+    concurrent requests within the process. On any error, the hook leaves
+    `output.headers` untouched (fail open to the static bootstrap token)."""
+    argv = build_auth_token_argv(workspace, profile)
+    argv_literal = json.dumps(argv)
+    provider_ids_literal = json.dumps(sorted(provider_ids))
+    ttl_ms = AUTH_PLUGIN_TOKEN_TTL_SECONDS * 1000
+
+    return f"""\
+// Generated and managed by ucode -- do not edit by hand. Overwritten on every
+// `ucode configure` / token refresh.
+//
+// Fixes #190: opencode reads provider.options.headers.Authorization from
+// opencode.json once at startup and never again, so a long-lived session
+// keeps sending a token that may since have been rotated or revoked. This
+// `chat.headers` hook sets a fresh Authorization header on every chat
+// request for our Databricks providers, overriding the static header.
+
+import {{ execFile }} from "node:child_process";
+import {{ promisify }} from "node:util";
+
+const execFileAsync = promisify(execFile);
+
+const UCODE_AUTH_TOKEN_ARGV = {argv_literal};
+const MANAGED_PROVIDER_IDS = new Set({provider_ids_literal});
+const TTL_MS = {ttl_ms};
+
+let cachedToken = null;
+let cachedAt = 0;
+let inflight = null;
+
+async function fetchToken() {{
+  const [cmd, ...args] = UCODE_AUTH_TOKEN_ARGV;
+  const {{ stdout }} = await execFileAsync(cmd, args);
+  const token = stdout.trim();
+  if (!token) {{
+    // `ucode auth-token` exited 0 but printed nothing usable -- treat as a
+    // failure so the caller's catch block fails open to the static
+    // bootstrap token instead of caching/sending an empty bearer.
+    throw new Error("ucode auth-token returned empty output");
+  }}
+  return token;
+}}
+
+async function getToken() {{
+  const now = Date.now();
+  if (cachedToken && now - cachedAt < TTL_MS) {{
+    return cachedToken;
+  }}
+  if (inflight) {{
+    return inflight;
+  }}
+  inflight = fetchToken()
+    .then((token) => {{
+      cachedToken = token;
+      cachedAt = Date.now();
+      return token;
+    }})
+    .finally(() => {{
+      inflight = null;
+    }});
+  return inflight;
+}}
+
+export const UcodeDatabricksAuth = async (_ctx) => ({{
+  "chat.headers": async (input, output) => {{
+    // NOTE: the hook's `input.provider` is the runtime Provider record
+    // itself (id/name/env/options/source/models), not the ProviderContext
+    // shape ({{source, info, options}}) some type surfaces suggest -- `id`
+    // lives directly on `input.provider`, not `input.provider.info.id`.
+    // Confirmed empirically against opencode 1.17.10; verify against a real
+    // hook invocation before changing this path again (#190 follow-up).
+    const providerId = input.provider?.id;
+    if (!providerId || !MANAGED_PROVIDER_IDS.has(providerId)) {{
+      return;
+    }}
+    try {{
+      const token = await getToken();
+      // Defensive: ensure `output.headers` exists even if this opencode
+      // version ever invokes the hook without a pre-populated headers
+      // object, so the header still gets set rather than throwing (which
+      // would be caught below and silently no-op the refresh).
+      output.headers = output.headers || {{}};
+      output.headers["Authorization"] = "Bearer " + token;
+    }} catch (err) {{
+      console.error("[ucode] failed to refresh Databricks token:", err);
+      // Fail open: leave the static bootstrap token from opencode.json.
+    }}
+  }},
+}});
+"""
+
+
+def write_auth_plugin(state: dict, provider_ids: list[str]) -> None:
+    """Write the ucode-managed opencode auth plugin (see `render_auth_plugin`).
+
+    Always writes -- including with an empty `provider_ids` -- so a
+    workspace/model change that drops the last provider still overwrites a
+    stale plugin rather than leaving one referencing removed provider ids."""
+    plugin_js = render_auth_plugin(state["workspace"], state.get("profile"), provider_ids)
+    write_text_file(OPENCODE_PLUGIN_PATH, plugin_js)
+
+
 def write_tool_config(
     state: dict,
     model: str,
@@ -188,6 +324,9 @@ def write_tool_config(
             providers.pop(stale, None)
     merged = deep_merge_dict(existing, overlay)
     write_json_file(OPENCODE_CONFIG_PATH, merged)
+    # Plugin is the live/per-request override; opencode.json (above) remains
+    # the static bootstrap/fallback the plugin fails open to. See #190.
+    write_auth_plugin(state, _managed_provider_ids(managed_keys))
     state = mark_tool_managed(state, "opencode", managed_keys)
     save_state(state)
     return state, token

@@ -351,6 +351,48 @@ class TestStatus:
         assert "https://example.databricks.com/ai-gateway/gemini" not in result.output
 
 
+class TestRemoveOpencodeAuthPlugin:
+    """Review comment on #197: _remove_opencode_auth_plugin previously
+    swallowed OSError silently, which would leave `ucode revert` reporting
+    "unchanged" and continuing as if nothing were wrong on a real removal
+    failure (permissions, filesystem issues) rather than surfacing an
+    actionable error -- matching restore_file's existing raise convention."""
+
+    def test_returns_false_when_file_absent(self, tmp_path, monkeypatch):
+        import ucode.cli as cli_mod
+
+        monkeypatch.setattr(cli_mod, "OPENCODE_PLUGIN_PATH", tmp_path / "missing.js")
+
+        assert cli_mod._remove_opencode_auth_plugin() is False
+
+    def test_returns_true_and_deletes_file_when_present(self, tmp_path, monkeypatch):
+        import ucode.cli as cli_mod
+
+        plugin_path = tmp_path / "ucode-databricks-auth.js"
+        plugin_path.write_text("// generated")
+        monkeypatch.setattr(cli_mod, "OPENCODE_PLUGIN_PATH", plugin_path)
+
+        assert cli_mod._remove_opencode_auth_plugin() is True
+        assert not plugin_path.exists()
+
+    def test_raises_runtime_error_instead_of_silently_swallowing_removal_failure(
+        self, tmp_path, monkeypatch
+    ):
+        import ucode.cli as cli_mod
+
+        plugin_path = tmp_path / "ucode-databricks-auth.js"
+        plugin_path.write_text("// generated")
+        monkeypatch.setattr(cli_mod, "OPENCODE_PLUGIN_PATH", plugin_path)
+
+        def _raise_permission_error(self):
+            raise PermissionError("denied")
+
+        monkeypatch.setattr(type(plugin_path), "unlink", _raise_permission_error)
+
+        with pytest.raises(RuntimeError, match="Failed to remove OpenCode auth plugin"):
+            cli_mod._remove_opencode_auth_plugin()
+
+
 class TestRevert:
     def test_reverts_mcp_configs_before_clearing_state(self):
         state = {

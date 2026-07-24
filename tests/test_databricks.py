@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import subprocess
+import time
 
 import pytest
 
@@ -1178,6 +1180,206 @@ class TestGetDatabricksToken:
         assert "stale or invalid" in message
         assert "databricks auth logout --profile example-profile" in message
         assert f"databricks auth login --host {WS} --profile example-profile" in message
+
+
+class TestForceRefreshLockAndCoalescing:
+    """Axis A of #190: serialize `--force-refresh` across processes and
+    coalesce redundant refreshes within TOKEN_REFRESH_COALESCE_SECONDS."""
+
+    def _fake_databricks(self, tmp_path, script: str) -> dict:
+        fake = tmp_path / "databricks"
+        fake.write_text(f"#!/bin/sh\n{script}\n")
+        fake.chmod(0o755)
+        return {**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}"}
+
+    def _argv_recording_env(self, tmp_path, argv_log) -> dict:
+        return self._fake_databricks(
+            tmp_path,
+            f'printf "%s\\n" "$@" >> {argv_log}\n'
+            'echo \'{"access_token": "good-token", "token_type": "Bearer"}\'',
+        )
+
+    def test_coalesces_force_refresh_when_sentinel_is_fresh(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(db_mod, "APP_DIR", tmp_path)
+        argv_log = tmp_path / "argv"
+        env = self._argv_recording_env(tmp_path, argv_log)
+        monkeypatch.setattr("os.environ", env)
+
+        _, sentinel_path = db_mod._refresh_lock_paths(WS, None)
+        sentinel_path.touch()  # fresh mtime == a peer just force-refreshed
+        mtime_before = sentinel_path.stat().st_mtime_ns
+
+        token = get_databricks_token(WS, force_refresh=True)
+
+        assert token == "good-token"
+        argv = argv_log.read_text().splitlines()
+        assert "--force-refresh" not in argv
+        # M2: the coalesced branch performs no redemption, so it must never
+        # re-touch the sentinel.
+        assert sentinel_path.stat().st_mtime_ns == mtime_before
+
+    def test_performs_force_refresh_and_touches_sentinel_when_stale(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(db_mod, "APP_DIR", tmp_path)
+        argv_log = tmp_path / "argv"
+        env = self._argv_recording_env(tmp_path, argv_log)
+        monkeypatch.setattr("os.environ", env)
+
+        _, sentinel_path = db_mod._refresh_lock_paths(WS, None)
+        assert not sentinel_path.exists()
+
+        token = get_databricks_token(WS, force_refresh=True)
+
+        assert token == "good-token"
+        argv = argv_log.read_text().splitlines()
+        assert "--force-refresh" in argv
+        assert sentinel_path.exists()
+
+    def test_force_refresh_attempt_touches_sentinel_even_when_fetch_returns_empty(
+        self, tmp_path, monkeypatch
+    ):
+        """M2: mark-on-attempt, not mark-on-success. The OAuth server rotates
+        the refresh token when a `--force-refresh` redemption reaches it, not
+        when we successfully parse a token out of the subprocess's stdout. If
+        the subprocess exits non-zero or returns unparseable stdout, `_fetch`
+        swallows that into "" — but the sentinel must still be touched so a
+        concurrent peer doesn't redeem the same now-rotated refresh token
+        again. `_perform_force_refresh` must also still return "" so the
+        caller's outer empty-token re-auth + retry path keeps firing."""
+        monkeypatch.setattr(db_mod, "APP_DIR", tmp_path)
+        _, sentinel_path = db_mod._refresh_lock_paths(WS, None)
+        assert not sentinel_path.exists()
+
+        cmd = ["databricks", "auth", "token", "--host", WS, "--output", "json", "--force-refresh"]
+        token = db_mod._perform_force_refresh(WS, None, cmd, fetch=lambda: "")
+
+        assert token == ""
+        assert sentinel_path.exists()
+
+    def test_performs_force_refresh_when_sentinel_is_stale(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(db_mod, "APP_DIR", tmp_path)
+        argv_log = tmp_path / "argv"
+        env = self._argv_recording_env(tmp_path, argv_log)
+        monkeypatch.setattr("os.environ", env)
+
+        _, sentinel_path = db_mod._refresh_lock_paths(WS, None)
+        sentinel_path.touch()
+        old = time.time() - db_mod.TOKEN_REFRESH_COALESCE_SECONDS - 5
+        os.utime(sentinel_path, (old, old))
+
+        token = get_databricks_token(WS, force_refresh=True)
+
+        assert token == "good-token"
+        argv = argv_log.read_text().splitlines()
+        assert "--force-refresh" in argv
+
+    def test_degrades_to_no_lock_when_fcntl_missing(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(db_mod, "APP_DIR", tmp_path)
+        monkeypatch.setattr(db_mod, "fcntl", None)
+        env = self._fake_databricks(
+            tmp_path,
+            'echo \'{"access_token": "good-token", "token_type": "Bearer"}\'',
+        )
+        monkeypatch.setattr("os.environ", env)
+
+        token = get_databricks_token(WS, force_refresh=True)
+
+        assert token == "good-token"
+
+    def test_lock_file_path_differs_for_different_workspace_or_profile(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(db_mod, "APP_DIR", tmp_path)
+
+        lock_a, sentinel_a = db_mod._refresh_lock_paths(WS, None)
+        lock_b, sentinel_b = db_mod._refresh_lock_paths("https://other.databricks.com", None)
+        lock_c, sentinel_c = db_mod._refresh_lock_paths(WS, "some-profile")
+
+        assert lock_a != lock_b
+        assert lock_a != lock_c
+        assert lock_b != lock_c
+        assert sentinel_a != sentinel_b
+        assert sentinel_a != sentinel_c
+        assert lock_a.parent == tmp_path
+
+    def test_non_force_refresh_path_ignores_lock_and_sentinel(self, tmp_path, monkeypatch):
+        # force_refresh=False must stay cheap/unlocked: no lock file should
+        # even be created.
+        monkeypatch.setattr(db_mod, "APP_DIR", tmp_path)
+        env = self._fake_databricks(
+            tmp_path,
+            'echo \'{"access_token": "good-token", "token_type": "Bearer"}\'',
+        )
+        monkeypatch.setattr("os.environ", env)
+
+        token = get_databricks_token(WS)
+
+        assert token == "good-token"
+        lock_path, sentinel_path = db_mod._refresh_lock_paths(WS, None)
+        assert not lock_path.exists()
+        assert not sentinel_path.exists()
+
+    def test_touch_sentinel_creates_missing_parent_directory(self, tmp_path, monkeypatch):
+        # Review comment on #197: on the fcntl-unavailable branch,
+        # _refresh_lock returns without ever creating APP_DIR, so
+        # _touch_sentinel used to raise (swallowed) FileNotFoundError and
+        # silently disable coalescing on every such platform. It must create
+        # its own parent directory rather than depending on the caller.
+        missing_dir = tmp_path / "does-not-exist-yet"
+        assert not missing_dir.exists()
+        _, sentinel_path = db_mod._refresh_lock_paths(WS, None)
+        sentinel_path = missing_dir / sentinel_path.name
+
+        db_mod._touch_sentinel(sentinel_path)
+
+        assert sentinel_path.exists()
+
+    def test_falls_back_immediately_on_unexpected_flock_error(self, tmp_path, monkeypatch):
+        # Review comment on #197: only lock *contention* (BlockingIOError)
+        # should be retried in the acquisition loop. Any other OSError
+        # (e.g. EBADF, or a filesystem that doesn't support flock at all)
+        # is not going to resolve by waiting, and used to spin for the full
+        # _LOCK_ACQUIRE_TIMEOUT_SECONDS before falling back.
+        monkeypatch.setattr(db_mod, "APP_DIR", tmp_path)
+        monkeypatch.setattr(db_mod, "_LOCK_ACQUIRE_TIMEOUT_SECONDS", 30)
+
+        def raise_unexpected(fd, op):
+            raise OSError(errno.EBADF, "Bad file descriptor")
+
+        monkeypatch.setattr(db_mod.fcntl, "flock", raise_unexpected)
+        lock_path, _ = db_mod._refresh_lock_paths(WS, None)
+
+        start = time.monotonic()
+        with db_mod._refresh_lock(lock_path) as locked:
+            elapsed = time.monotonic() - start
+            assert locked is False
+
+        # Bailed out almost immediately, not after spinning for anywhere
+        # near the 30s acquisition timeout.
+        assert elapsed < 2.0
+
+    def test_retries_through_contention_then_acquires(self, tmp_path, monkeypatch):
+        # BlockingIOError (lock contention) must still be retried, not
+        # treated as the "give up immediately" unexpected-error case.
+        monkeypatch.setattr(db_mod, "APP_DIR", tmp_path)
+        attempts: list[int] = []
+        real_flock = db_mod.fcntl.flock
+        acquire_op = db_mod.fcntl.LOCK_EX | db_mod.fcntl.LOCK_NB
+
+        def flaky_flock(fd, op):
+            if op != acquire_op:
+                # Pass unlock calls straight through -- only the acquire
+                # attempts are what's under test here.
+                return real_flock(fd, op)
+            attempts.append(1)
+            if len(attempts) < 3:
+                raise BlockingIOError(errno.EAGAIN, "Resource temporarily unavailable")
+            return real_flock(fd, op)
+
+        monkeypatch.setattr(db_mod, "_LOCK_POLL_INTERVAL_SECONDS", 0.01)
+        monkeypatch.setattr(db_mod.fcntl, "flock", flaky_flock)
+        lock_path, _ = db_mod._refresh_lock_paths(WS, None)
+
+        with db_mod._refresh_lock(lock_path) as locked:
+            assert locked is True
+        assert len(attempts) == 3
 
 
 class TestListDatabricksConnections:
