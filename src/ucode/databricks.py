@@ -1365,6 +1365,19 @@ def build_mcp_service_url(workspace: str, full_name: str) -> str:
     return f"{workspace}/ai-gateway/mcp-services/{full_name}"
 
 
+def build_skills_mcp_url(workspace: str, locations: list[str]) -> str:
+    """Skills route with one ``?schema=`` scope per location. The trailing slash
+    is required by the Envoy prefix even with no query params.
+
+        []                        -> ``.../ai-gateway/skills/``
+        ["main.default", "ml.a"]  -> ``.../ai-gateway/skills/?schema=main.default&schema=ml.a``
+    """
+    base = f"{workspace}/ai-gateway/skills/"
+    if not locations:
+        return base
+    return base + "?" + urlencode([("schema", loc) for loc in locations])
+
+
 # Maps the gateway routing dialect a coding tool speaks to the Model Provider
 # Service `provider_type`s it can be backed by. claude speaks Anthropic's API,
 # which both the `anthropic` and `amazon_bedrock` provider types serve (Bedrock
