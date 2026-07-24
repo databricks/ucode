@@ -92,6 +92,28 @@ Options are shown in this order:
 Discovered external MCP connections are listed directly. MCP auth uses a Databricks token that
 `ucode` sets when launching each tool.
 
+### Skills (optional)
+
+Configure Unity Catalog Skills for your coding tools with `ucode configure skills`. It has two
+mutually-exclusive modes, both scoped by `--location <catalog>.<schema>` (comma-separated for
+multiple schemas):
+
+```bash
+# Download mode (default): fetch every skill in the schema to disk.
+ucode configure skills --location main.default --path /abs/project/dir
+
+# MCP mode: expose the schema's skills as MCP tools instead of downloading.
+ucode configure skills --location main.default,ml.prod --mcp
+```
+
+- **Download mode** writes each skill flat as `<leaf>/SKILL.md` (plus its bundled files) into both
+  `<path>/.claude/skills/` and `<path>/.agents/skills/`. `--path` is required and must be an
+  existing absolute directory. Any pre-existing skill dir prompts before it's overwritten. It then
+  registers a schema-less skills MCP connection (utility tools only), leaving any prior `--mcp`
+  scope untouched.
+- **MCP mode** sets the connection's location set to exactly `<list>` (override-only) and rebuilds
+  its `?schema=` URL; no files are downloaded and `--path` is rejected.
+
 ---
 
 ## Other Commands
@@ -107,6 +129,8 @@ Discovered external MCP connections are listed directly. MCP auth uses a Databri
 | `ucode configure --profiles DEFAULT` | Configure using existing Databricks CLI profiles (hosts come from `~/.databrickscfg`) |
 | `ucode configure --profiles DEFAULT --use-pat` | Authenticate with the profile's personal access token — no browser login |
 | `ucode configure --skip-validate` | Write configs without sending a test message through each agent |
+| `ucode configure skills --location main.default --path <dir>` | Download a schema's skills into `<dir>` and register a schema-less skills MCP connection |
+| `ucode configure skills --location main.default --mcp` | Expose a schema's skills as MCP tools (override-only) instead of downloading |
 
 ## Managed Local Files
 
