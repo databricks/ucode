@@ -153,6 +153,43 @@ class TestSubcommandRouting:
         result = runner.invoke(app, ["--agent", "claude"])
         assert result.exit_code != 0
 
+    def test_workspace_flag_sets_current_workspace(self):
+        """--workspace targets that workspace (normalized) before launch."""
+        patches = _patch_launch("claude")
+        with (
+            patches[0],
+            patches[1],
+            patches[2],
+            patches[3],
+            patches[4],
+            patches[5],
+            patches[6],
+            patch("ucode.cli.set_current_workspace") as mock_set,
+        ):
+            result = runner.invoke(
+                app,
+                ["claude", "--workspace", "https://eng-ml-inference.staging.cloud.databricks.com/"],
+            )
+        assert result.exit_code == 0, result.output
+        mock_set.assert_called_once_with("https://eng-ml-inference.staging.cloud.databricks.com")
+
+    def test_no_workspace_flag_leaves_current_workspace(self):
+        """Without --workspace, launch never reassigns the current workspace."""
+        patches = _patch_launch("claude")
+        with (
+            patches[0],
+            patches[1],
+            patches[2],
+            patches[3],
+            patches[4],
+            patches[5],
+            patches[6],
+            patch("ucode.cli.set_current_workspace") as mock_set,
+        ):
+            result = runner.invoke(app, ["claude"])
+        assert result.exit_code == 0, result.output
+        mock_set.assert_not_called()
+
 
 class TestMcpSubcommands:
     def test_web_search_subcommand_help(self):
@@ -404,9 +441,28 @@ class TestConfigureSkillsCommand:
         assert "--location" in _strip_ansi(result.output)
         mock_mcp.assert_not_called()
 
-    def test_missing_location_is_typer_usage_error(self):
-        result = runner.invoke(app, ["configure", "skills"])
-        assert result.exit_code == 2
+    def test_bare_command_registers_schemaless_connection(self):
+        with patch("ucode.cli.configure_skills_mcp_command") as mock_mcp:
+            result = runner.invoke(app, ["configure", "skills"])
+        assert result.exit_code == 0, result.output
+        mock_mcp.assert_called_once_with([])
+
+    def test_mcp_without_location_registers_schemaless_connection(self):
+        with patch("ucode.cli.configure_skills_mcp_command") as mock_mcp:
+            result = runner.invoke(app, ["configure", "skills", "--mcp"])
+        assert result.exit_code == 0, result.output
+        mock_mcp.assert_called_once_with([])
+
+    def test_path_without_location_exit_1(self):
+        with (
+            patch("ucode.cli.configure_skills_mcp_command") as mock_mcp,
+            patch("ucode.cli.configure_skills_download_command") as mock_download,
+        ):
+            result = runner.invoke(app, ["configure", "skills", "--path", "/tmp/skills"])
+        assert result.exit_code == 1
+        assert "--path" in _strip_ansi(result.output)
+        mock_mcp.assert_not_called()
+        mock_download.assert_not_called()
 
 
 class TestStatusSkillsSection:
@@ -642,12 +698,43 @@ class TestConfigureAgentFlag:
             patch("ucode.cli.install_databricks_cli"),
             patch("ucode.cli.install_tool_binary"),
             patch("ucode.cli.configure_workspace_command") as mock_cfg,
+            # Fully-interactive configure ends by offering the MCP step; decline it.
+            patch("ucode.cli.prompt_yes_no", return_value=False) as mock_mcp_prompt,
+            patch("ucode.cli.configure_mcp_command") as mock_mcp,
         ):
             # No flag: the AI Tools prompt happens later, inside
             # configure_workspace_command, so nothing is forwarded here.
             result = runner.invoke(app, ["configure"])
         assert result.exit_code == 0, result.output
         mock_cfg.assert_called_once_with(prompt_optional_updates=True)
+        mock_mcp_prompt.assert_called_once()
+        mock_mcp.assert_not_called()
+
+    def test_interactive_accepting_mcp_prompt_runs_mcp_config(self):
+        with (
+            patch("ucode.cli.install_databricks_cli"),
+            patch("ucode.cli.install_tool_binary"),
+            patch("ucode.cli.configure_workspace_command"),
+            patch("ucode.cli.prompt_yes_no", return_value=True),
+            patch("ucode.cli.configure_mcp_command") as mock_mcp,
+        ):
+            result = runner.invoke(app, ["configure"])
+        assert result.exit_code == 0, result.output
+        mock_mcp.assert_called_once_with()
+
+    def test_agents_flag_skips_mcp_prompt(self):
+        # Flag-driven (non-interactive) runs must stay scriptable: no MCP prompt.
+        with (
+            patch("ucode.cli.install_databricks_cli"),
+            patch("ucode.cli.install_tool_binary"),
+            patch("ucode.cli.configure_workspace_command"),
+            patch("ucode.cli.prompt_yes_no") as mock_prompt,
+            patch("ucode.cli.configure_mcp_command") as mock_mcp,
+        ):
+            result = runner.invoke(app, ["configure", "--agents", "claude,codex"])
+        assert result.exit_code == 0, result.output
+        mock_prompt.assert_not_called()
+        mock_mcp.assert_not_called()
 
     def test_agents_flag_calls_configure_with_tools(self):
         with (
@@ -794,6 +881,9 @@ class TestConfigureAgentFlag:
             patch("ucode.cli.install_databricks_cli"),
             patch("ucode.cli.install_tool_binary"),
             patch("ucode.cli.configure_workspace_command") as mock_cfg,
+            # Fully-interactive configure ends by offering the MCP step; decline it.
+            patch("ucode.cli.prompt_yes_no", return_value=False),
+            patch("ucode.cli.configure_mcp_command"),
         ):
             result = runner.invoke(app, ["configure", "--skip-upgrade"])
         assert result.exit_code == 0, result.output
@@ -806,6 +896,9 @@ class TestConfigureAgentFlag:
             patch("ucode.cli.install_tool_binary"),
             patch("ucode.cli.configure_workspace_command") as mock_cfg,
             patch("ucode.cli.prompt_yes_no_default") as mock_prompt,
+            # Fully-interactive configure ends by offering the MCP step; decline it.
+            patch("ucode.cli.prompt_yes_no", return_value=False),
+            patch("ucode.cli.configure_mcp_command"),
         ):
             result = runner.invoke(app, ["configure", "--disable-databricks-ai-tools"])
         assert result.exit_code == 0, result.output
