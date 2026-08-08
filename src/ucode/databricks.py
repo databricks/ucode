@@ -1531,7 +1531,9 @@ def discover_model_services(
     - ``claude_models`` maps ``fable``/``opus``/``sonnet``/``haiku`` to the
       newest matching ``system.ai.claude-*`` id (mirrors
       ``discover_claude_models``).
-    - ``codex_models`` is the list of ``system.ai.*gpt-*`` ids.
+    - ``codex_models`` is the list of Responses-compatible ``system.ai.*gpt-*``
+      ids; ``gpt-oss`` is excluded because its gateway rejects the session and
+      prompt-caching fields sent by Pi and OpenCode.
     - ``gemini_models`` is the list of ``system.ai.*gemini-*`` ids, newest first.
     - ``oss_models`` is the list of OSS-model ``system.ai.*`` ids.
 
@@ -1552,7 +1554,7 @@ def discover_model_services(
         if candidates:
             claude_models[family] = candidates[0]
 
-    codex_models = [m for m in ids if "gpt-" in m]
+    codex_models = [m for m in ids if "gpt-" in m and "gpt-oss-" not in m]
     gemini_models = sorted([m for m in ids if "gemini-" in m], key=model_version_sort_key)
 
     oss_models = [m for m in ids if any(family in m for family in _OSS_MODEL_FAMILIES)]
@@ -2601,7 +2603,8 @@ def discover_gemini_models(workspace: str, token: str) -> tuple[list[str], str |
 
 
 def discover_codex_models(workspace: str, token: str) -> tuple[list[str], str | None]:
-    return discover_endpoints_with_api_type(workspace, token, "openai/v1/responses")
+    models, reason = discover_endpoints_with_api_type(workspace, token, "openai/v1/responses")
+    return [model for model in models if "gpt-oss-" not in model], reason
 
 
 def fetch_gemini_models(workspace: str, token: str) -> list[str]:
@@ -2867,6 +2870,7 @@ def build_tool_base_url(tool: str, workspace: str) -> str:
 def build_opencode_base_urls(workspace: str) -> dict[str, str]:
     return {
         "anthropic": build_tool_base_url("claude", workspace) + "/v1",
+        "openai": build_tool_base_url("codex", workspace),
         "gemini": build_tool_base_url("gemini", workspace) + "/v1beta",
         "oss": f"{workspace}/ai-gateway/mlflow/v1",
     }
@@ -2877,17 +2881,15 @@ def build_pi_base_urls(workspace: str) -> dict[str, str]:
     # path (verified end-to-end). Each `api` type appends its own path suffix:
     #
     # - anthropic-messages       appends `/v1/messages`
-    # - openai-responses         appends `/responses`
+    # - openai-responses         appends `/responses` (codex and OSS providers)
     # - google-generative-ai     appends `/v1beta/models/{id}:streamGenerateContent`
-    # - openai-completions       appends `/chat/completions`
     #
     # So the baseUrls below stop just before the suffix Pi will tack on.
-    # Compat flags applied per-provider in agents/pi.py; required for `oss`
-    # only (MLflow rejects `store` and `tools[].function.strict`).
     return {
         "claude": build_tool_base_url("claude", workspace),
         "openai": build_tool_base_url("codex", workspace),
         "gemini": build_tool_base_url("gemini", workspace) + "/v1beta",
+        "oss": f"{workspace}/ai-gateway/mlflow/v1",
     }
 
 
