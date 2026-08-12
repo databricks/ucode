@@ -1287,6 +1287,19 @@ class TestStatus:
 
 
 class TestConfigureSkillsCommand:
+    @pytest.fixture(autouse=True)
+    def _stub_install_cli(self):
+        with patch("ucode.cli.install_databricks_cli") as mock_install:
+            yield mock_install
+
+    def test_requires_skills_mcp_cli_floor(self, _stub_install_cli):
+        from ucode.databricks import SKILLS_MCP_MIN_DATABRICKS_CLI_VERSION
+
+        with patch("ucode.cli.configure_skills_mcp_command"):
+            result = runner.invoke(app, ["configure", "skills", "--location", "a.b", "--mcp"])
+        assert result.exit_code == 0, result.output
+        _stub_install_cli.assert_called_once_with(minimum=SKILLS_MCP_MIN_DATABRICKS_CLI_VERSION)
+
     def test_mcp_flag_dispatches_location_set(self):
         with patch("ucode.cli.configure_skills_mcp_command") as mock_mcp:
             result = runner.invoke(app, ["configure", "skills", "--location", "a.b", "--mcp"])
@@ -1416,6 +1429,19 @@ class TestConfigureSkillsCommand:
 class TestSkillsAddCommand:
     """`ucode skill add` is the additive sibling of `configure skills`: `--mcp`
     unions schemas into the connection scope, the default mode downloads."""
+
+    @pytest.fixture(autouse=True)
+    def _stub_install_cli(self):
+        with patch("ucode.cli.install_databricks_cli") as mock_install:
+            yield mock_install
+
+    def test_requires_skills_mcp_cli_floor(self, _stub_install_cli):
+        from ucode.databricks import SKILLS_MCP_MIN_DATABRICKS_CLI_VERSION
+
+        with patch("ucode.cli.add_skills_command"):
+            result = runner.invoke(app, ["skill", "add", "--location", "a.b", "--mcp"])
+        assert result.exit_code == 0, result.output
+        _stub_install_cli.assert_called_once_with(minimum=SKILLS_MCP_MIN_DATABRICKS_CLI_VERSION)
 
     def test_mcp_flag_unions_locations(self):
         with patch("ucode.cli.add_skills_command") as mock_add:
@@ -1599,6 +1625,19 @@ class TestConfigureAgentsForMcp:
 
 
 class TestSkillsRemoveCommand:
+    @pytest.fixture(autouse=True)
+    def _stub_install_cli(self):
+        with patch("ucode.cli.install_databricks_cli") as mock_install:
+            yield mock_install
+
+    def test_requires_skills_mcp_cli_floor(self, _stub_install_cli):
+        from ucode.databricks import SKILLS_MCP_MIN_DATABRICKS_CLI_VERSION
+
+        with patch("ucode.cli.remove_skills_command"):
+            result = runner.invoke(app, ["skill", "remove", "--mcp"])
+        assert result.exit_code == 0, result.output
+        _stub_install_cli.assert_called_once_with(minimum=SKILLS_MCP_MIN_DATABRICKS_CLI_VERSION)
+
     def test_requires_mcp_until_download_removal_is_supported(self):
         with patch("ucode.cli.remove_skills_command") as remove:
             result = runner.invoke(app, ["skill", "remove"])

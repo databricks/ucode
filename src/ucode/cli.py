@@ -46,6 +46,7 @@ from ucode.agents.codex import revert_legacy_shared_config
 from ucode.agents.pi import PI_SETTINGS_BACKUP_PATH, PI_SETTINGS_PATH
 from ucode.config_io import is_dry_run, restore_file, set_dry_run
 from ucode.databricks import (
+    SKILLS_MCP_MIN_DATABRICKS_CLI_VERSION,
     apply_pat_environment,
     build_shared_base_urls,
     discover_claude_models,
@@ -1311,6 +1312,7 @@ def skills_add(
     ``<catalog>.<schema>.<name>``.
     """
     try:
+        install_databricks_cli(minimum=SKILLS_MCP_MIN_DATABRICKS_CLI_VERSION)
         locations = _parse_skill_locations(location)
         requested_skills = (
             None if skills is None else {s.strip() for s in skills.split(",") if s.strip()}
@@ -1421,6 +1423,7 @@ def skills_remove(
                 "Removing downloaded skills is not supported yet. Pass --mcp to remove "
                 "schemas from the skills MCP connection."
             )
+        install_databricks_cli(minimum=SKILLS_MCP_MIN_DATABRICKS_CLI_VERSION)
         requested_agents = (
             None
             if agents is None
@@ -3192,6 +3195,7 @@ def configure_skills(
     ``--location``).
     """
     try:
+        install_databricks_cli(minimum=SKILLS_MCP_MIN_DATABRICKS_CLI_VERSION)
         locations = _parse_skill_locations(location)
         # `--skill` absent -> None (whole schema); present (even empty) -> the
         # explicit subset, so `--skill ""` downloads nothing.
@@ -3303,7 +3307,7 @@ def setup_skills_cmd(
 ) -> None:
     """Choose the skills the managed config gives developers (admins only)."""
     try:
-        install_databricks_cli()
+        install_databricks_cli(minimum=SKILLS_MCP_MIN_DATABRICKS_CLI_VERSION)
         # None means "prompt"; an explicit `--location` is parsed to the list to publish.
         locations = None if location is None else _parse_skill_locations(location)
         code = setup_skills_command(locations)
