@@ -681,7 +681,7 @@ class TestCodexManagedConfig:
         # can read the TOML back and NO real sudo/`/etc` write ever happens.
         monkeypatch.setattr(codex, "_managed_config_path", lambda: managed_path)
 
-        def fake_write_managed(path, text, *, display):
+        def fake_write_managed(path, text, *, display, workspace):
             Path(path).parent.mkdir(parents=True, exist_ok=True)
             Path(path).write_text(text, encoding="utf-8")
             return "written"
@@ -699,7 +699,7 @@ class TestCodexManagedConfig:
         assert doc["model"] == "gpt-5"
         assert "ucode-databricks" in doc["model_providers"]
 
-    def test_managed_config_preserves_other_keys(self, tmp_path, monkeypatch):
+    def test_managed_config_does_not_merge_unowned_keys(self, tmp_path, monkeypatch):
         _, managed_path = self._patch(tmp_path, monkeypatch)
         managed_path.parent.mkdir(parents=True, exist_ok=True)
         managed_path.write_text(
@@ -709,8 +709,9 @@ class TestCodexManagedConfig:
         codex.write_tool_config(state)
 
         doc = read_toml_safe(managed_path)
-        # ucode pins its own model, but other keys already in the managed file survive.
-        assert doc["approval_policy"] == "on-request"
+        # Strict ownership means the desired document contains only ucode's settings. The real
+        # managed-file writer refuses this write because the existing file has no owner marker.
+        assert "approval_policy" not in doc
         assert doc["model"] == "gpt-5"
 
     def test_no_managed_write_by_default(self, tmp_path, monkeypatch):

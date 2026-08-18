@@ -26,7 +26,7 @@ from ucode.databricks import (
     get_databricks_token,
 )
 from ucode.launcher import exec_or_spawn
-from ucode.managed_files import OS, current_os, write_managed_file
+from ucode.managed_files import OS, current_os, remove_managed_file, write_managed_file
 from ucode.smart_routing.codex_hooks import (
     remove_smart_routing_hooks,
     sync_smart_routing_hooks,
@@ -399,9 +399,9 @@ def _write_managed_config(
     use_pat: bool,
     provider: str | None,
 ) -> None:
-    """Merge the modern overlay into Codex's OS managed_config.toml, preserving any other keys there.
+    """Write the modern overlay into Codex's strictly ucode-owned OS managed config.
 
-    Written via the sudo path in `managed_files` (drift-suppressed).
+    A pre-existing unowned file is rejected by `managed_files`; ucode never merges into it.
     """
     path = _managed_config_path()
     if path is None:
@@ -413,12 +413,20 @@ def _write_managed_config(
     overlay = render_overlay(
         workspace, model, databricks_profile, use_pat=use_pat, provider=provider
     )
-    doc = read_toml_safe(path)
+    doc: dict = {}
     deep_merge_dict(doc, overlay)
     if provider:
         # deep_merge can't drop keys; clear a `model` a prior non-provider run pinned.
         doc.pop("model", None)
-    write_managed_file(path, tomlkit.dumps(doc), display="Codex")
+    write_managed_file(path, tomlkit.dumps(doc), display="Codex", workspace=workspace)
+
+
+def clear_managed_config() -> str:
+    """Remove Codex's machine-wide config when ucode owns it."""
+    path = _managed_config_path()
+    if path is None:
+        return "unchanged"
+    return remove_managed_file(path, display="Codex")
 
 
 def default_model(state: dict) -> str | None:

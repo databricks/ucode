@@ -2481,6 +2481,61 @@ class TestFetchManagedConfig:
         assert self._fetch({"workspace": "https://w"}) is None
 
 
+class TestReconcileGlobalManagedSettings:
+    @staticmethod
+    def _reconcile(managed, tool):
+        import ucode.cli as cli_mod
+
+        cli_mod._reconcile_global_managed_settings(managed, tool)
+
+    def test_no_config_removes_owned_codex_file(self, monkeypatch):
+        monkeypatch.setenv("ENABLE_MANAGED_AGENT_CONFIG", "1")
+        calls: list[str] = []
+        monkeypatch.setattr(
+            "ucode.cli.codex_agent.clear_managed_config", lambda: calls.append("codex") or "removed"
+        )
+
+        self._reconcile(None, "codex")
+        assert calls == ["codex"]
+
+    def test_non_global_config_removes_owned_claude_file(self, monkeypatch):
+        monkeypatch.setenv("ENABLE_MANAGED_AGENT_CONFIG", "1")
+        calls: list[str] = []
+        monkeypatch.setattr(
+            "ucode.cli.claude_agent.clear_managed_settings",
+            lambda: calls.append("claude") or "removed",
+        )
+
+        self._reconcile({"enabled_agents": {"claude": {}}}, "claude")
+        assert calls == ["claude"]
+
+    def test_global_config_keeps_file_for_agent_writer(self, monkeypatch):
+        monkeypatch.setenv("ENABLE_MANAGED_AGENT_CONFIG", "1")
+        monkeypatch.setattr(
+            "ucode.cli.codex_agent.clear_managed_config",
+            lambda: pytest.fail("workspace B's writer should replace workspace A's owned file"),
+        )
+        managed = {"enabled_agents": {"codex": {"use_as_global_settings": True}}}
+
+        self._reconcile(managed, "codex")
+
+    def test_cleanup_conflict_blocks_launch(self, monkeypatch):
+        monkeypatch.setenv("ENABLE_MANAGED_AGENT_CONFIG", "1")
+        monkeypatch.setattr("ucode.cli.codex_agent.clear_managed_config", lambda: "skipped")
+
+        with pytest.raises(RuntimeError, match="Could not clear stale machine-wide settings"):
+            self._reconcile(None, "codex")
+
+    def test_feature_off_does_not_touch_global_files(self, monkeypatch):
+        monkeypatch.delenv("ENABLE_MANAGED_AGENT_CONFIG", raising=False)
+        monkeypatch.setattr(
+            "ucode.cli.codex_agent.clear_managed_config",
+            lambda: pytest.fail("feature-off launch must not mutate global files"),
+        )
+
+        self._reconcile(None, "codex")
+
+
 class TestManagedConfigDecidesDiscoveryFromFreshRead:
     def test_a_removed_model_list_no_longer_skips_discovery(self, monkeypatch):
         """The sweep decision must come from the fetched config, not the cached one.

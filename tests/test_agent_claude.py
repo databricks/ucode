@@ -494,7 +494,7 @@ class TestWriteToolConfigManagedSettings:
         # Deterministic managed path, and a mocked sudo writer so NO real sudo/`/etc` write happens.
         monkeypatch.setattr(claude, "_managed_settings_path", lambda: FAKE_MANAGED_PATH)
 
-        def fake_write_managed(path, text, *, display):
+        def fake_write_managed(path, text, *, display, workspace):
             managed_writes.append((str(path), text))
             return "written"
 
@@ -510,17 +510,18 @@ class TestWriteToolConfigManagedSettings:
         assert str(claude.CLAUDE_SETTINGS_PATH) in [p for p, _ in private_writes]
         assert [p for p, _ in managed_writes] == [str(FAKE_MANAGED_PATH)]
 
-    def test_managed_file_preserves_other_keys(self, monkeypatch):
+    def test_managed_file_does_not_merge_unowned_keys(self, monkeypatch):
         private_writes: list = []
         managed_writes: list = []
-        # An IT-authored key already in the managed file must survive the merge.
+        # Strict ownership means the desired document contains only ucode's settings. The real
+        # managed-file writer refuses this write because the existing file has no owner marker.
         existing = {str(FAKE_MANAGED_PATH): {"env": {"MY_OWN": "keep"}}}
         self._patch(monkeypatch, private_writes, managed_writes, existing)
         state = {"workspace": WS, "codex_models": [], "write_managed_config": True}
         claude.write_tool_config(state, "databricks-claude-sonnet-4")
         _, text = managed_writes[0]
         written = json.loads(text)
-        assert written["env"]["MY_OWN"] == "keep"
+        assert "MY_OWN" not in written["env"]
         assert written["env"]["ANTHROPIC_BASE_URL"]
         assert written["apiKeyHelper"]
 

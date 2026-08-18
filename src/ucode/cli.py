@@ -1445,6 +1445,23 @@ def _fetch_managed_config(state: dict) -> dict | None:
         return refresh_managed_config(state)
 
 
+def _reconcile_global_managed_settings(managed: dict | None, tool: str) -> None:
+    """Remove a prior workspace's global file when the target does not want one."""
+    if not managed_agent_config_enabled() or managed_use_as_global_settings(managed or {}, tool):
+        return
+    if tool == "claude":
+        result = claude_agent.clear_managed_settings()
+    elif tool == "codex":
+        result = codex_agent.clear_managed_config()
+    else:
+        return
+    if result == "skipped":
+        raise RuntimeError(
+            f"Could not clear stale machine-wide settings for {TOOL_SPECS[tool]['display']}. "
+            "Resolve the warning above before launching this workspace."
+        )
+
+
 def _note_recommended_agent(recommendation: dict | None, tool: str) -> None:
     """Say when the budget tier points at a different agent than the one being launched.
 
@@ -1651,6 +1668,7 @@ def _launch_tool(
         # control-plane round trip and any fallback warning it printed.
         if managed is None:
             managed = _fetch_managed_config(state)
+        _reconcile_global_managed_settings(managed, tool)
         # Checked before discovery, which can take tens of seconds, so a blocked launch fails fast.
         _reject_disabled_agent(managed, tool)
         # Discovery exists to find models and isn't needed for managed config that already names them.

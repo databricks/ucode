@@ -1,4 +1,4 @@
-"""Write agent config into OS-level *managed settings* files.
+"""Own and write agent config in OS-level *managed settings* files.
 
 These files are root-owned and the highest-precedence config scope for their agent — a bare
 ``claude`` / ``codex`` (launched directly, without ucode) reads them, so writing here is what makes
@@ -8,15 +8,17 @@ the gateway config apply outside ``ucode <agent>``:
   ``/Library/Application Support/ClaudeCode/managed-settings.json`` (macOS)
 - Codex: ``/etc/codex/managed_config.toml`` (Linux + macOS)
 
-The write is guarded by a **drift check**: it reads the world-readable file WITHOUT sudo and does
-nothing when it already matches, so the common no-op launch never prompts for a password; only a
-real change shells out to ``sudo`` (temp file → ``sudo cp``), clearing and restoring the immutable
-flag (``chattr``/``chflags``) that a fleet golden image may have set. Writing needs root, so the
-first write (or one after the config changes) prompts for the developer's sudo password.
+ucode uses strict file ownership: it creates an adjacent ``.ucode-owner.json`` marker when it first
+creates a managed file, and only updates or removes files carrying a valid marker whose content hash
+still matches. A pre-existing unowned file is never modified. The marker persists the owning
+workspace across sessions, allowing workspace A's file to become workspace B's and then be removed
+when workspace C has no global managed config, without retaining a baseline copy.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import shlex
 import subprocess
@@ -30,6 +32,7 @@ from ucode.ui import console, print_err, print_warning
 
 # Absolute path so a stripped PATH (desktop/GUI launchers) still finds it.
 _SUDO = "/usr/bin/sudo"
+_OWNER_VERSION = 1
 
 
 class OS(Enum):
@@ -70,8 +73,63 @@ def _read_existing(path: Path) -> str:
         return ""
 
 
-def write_managed_file(path: Path, desired_text: str, *, display: str) -> str:
-    """Write ``desired_text`` to a root-owned managed file, only when it differs (drift check).
+def _path_exists(path: Path) -> bool | None:
+    """Whether ``path`` exists, or None when permissions prevent determining it."""
+    try:
+        return path.exists()
+    except OSError:
+        return None
+
+
+def ownership_path(path: Path) -> Path:
+    """The durable ownership marker adjacent to ``path``."""
+    return path.with_name(f"{path.name}.ucode-owner.json")
+
+
+def _content_hash(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _load_owner(path: Path) -> dict | None:
+    marker = ownership_path(path)
+    marker_exists = _path_exists(marker)
+    if marker_exists is False:
+        return None
+    if marker_exists is None:
+        return {}
+    try:
+        value = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(value, dict):
+        return {}
+    if (
+        value.get("version") != _OWNER_VERSION
+        or value.get("owner") != "ucode"
+        or not isinstance(value.get("workspace"), str)
+        or not isinstance(value.get("sha256"), str)
+    ):
+        return {}
+    return value
+
+
+def _owner_text(workspace: str, desired_text: str) -> str:
+    return (
+        json.dumps(
+            {
+                "version": _OWNER_VERSION,
+                "owner": "ucode",
+                "workspace": workspace,
+                "sha256": _content_hash(desired_text),
+            },
+            indent=2,
+        )
+        + "\n"
+    )
+
+
+def write_managed_file(path: Path, desired_text: str, *, display: str, workspace: str) -> str:
+    """Write ``desired_text`` only when ucode strictly owns ``path``.
 
     Returns ``"written"``, ``"unchanged"``, or ``"skipped"``. Never raises: a permission or immutable
     failure is surfaced as an actionable message and reported as ``"skipped"`` so the launch still
@@ -83,24 +141,94 @@ def write_managed_file(path: Path, desired_text: str, *, display: str) -> str:
             f"skipped {path}."
         )
         return "skipped"
-    # Drift check first — reading is unprivileged, so an unchanged file never triggers a sudo prompt.
-    if _read_existing(path) == desired_text:
+    existing = _read_existing(path)
+    owner = _load_owner(path)
+    target_exists = _path_exists(path)
+    if owner is None and target_exists is not False:
+        print_warning(
+            f"{display}: {path} already exists and is not owned by ucode; "
+            "leaving it unchanged. Its machine-wide settings may override this ucode launch."
+        )
+        return "skipped"
+    if owner == {}:
+        print_warning(f"{display}: ownership metadata for {path} is invalid; leaving it unchanged.")
+        return "skipped"
+    if owner is not None and target_exists is None:
+        print_warning(f"{display}: cannot verify ownership of {path}; leaving it unchanged.")
+        return "skipped"
+    if owner is not None and target_exists and owner["sha256"] != _content_hash(existing):
+        print_warning(f"{display}: {path} changed after ucode wrote it; leaving it unchanged.")
+        return "skipped"
+    marker = ownership_path(path)
+    marker_text = _owner_text(workspace, desired_text)
+    if existing == desired_text and owner is not None and owner["workspace"] == workspace:
         return "unchanged"
     if is_dry_run():
-        console.print(f"\n[bold]\\[dry run] {path} (via sudo)[/bold]\n{desired_text}")
+        console.print(f"\n[bold]\\[dry run] {path} + {marker} (via sudo)[/bold]\n{desired_text}")
         return "written"
+    existed = target_exists is True
+    marker_existed = owner is not None
+    existing_marker = _read_existing(marker) if marker_existed else ""
     try:
         _sudo_replace(path, desired_text)
+        _sudo_replace(marker, marker_text)
     except PermissionError as exc:
+        _rollback_owned_write(path, existing, existed, marker, existing_marker, marker_existed)
         print_err(
             f"{display}: cannot write {path} without root ({exc}). Re-run with `sudo ucode ...` to "
             "apply the config machine-wide."
         )
         return "skipped"
     except subprocess.CalledProcessError as exc:
+        _rollback_owned_write(path, existing, existed, marker, existing_marker, marker_existed)
         _report_sudo_failure(path, display, exc)
         return "skipped"
     return "written"
+
+
+def remove_managed_file(path: Path, *, display: str) -> str:
+    """Remove ``path`` only when its ownership marker and content still match.
+
+    Returns ``"removed"`, ``"unchanged"``, or ``"skipped"``. An unmarked file is not ours and is
+    therefore unchanged; drift is skipped so ucode never deletes a file another actor took over.
+    """
+    marker = ownership_path(path)
+    owner = _load_owner(path)
+    if owner is None:
+        return "unchanged"
+    if not managed_files_supported():
+        print_warning(
+            f"{display}: machine-wide managed settings aren't supported on this platform; "
+            f"could not remove {path}."
+        )
+        return "skipped"
+    if owner == {}:
+        print_warning(f"{display}: ownership metadata for {path} is invalid; leaving it unchanged.")
+        return "skipped"
+    target_exists = _path_exists(path)
+    if target_exists is None:
+        print_warning(f"{display}: cannot verify ownership of {path}; leaving it unchanged.")
+        return "skipped"
+    if target_exists and owner["sha256"] != _content_hash(_read_existing(path)):
+        print_warning(f"{display}: {path} changed after ucode wrote it; leaving it unchanged.")
+        return "skipped"
+    if is_dry_run():
+        console.print(f"\n[bold]\\[dry run] remove {path} + {marker} (via sudo)[/bold]")
+        return "removed"
+    try:
+        if target_exists:
+            _sudo_remove(path)
+        _sudo_remove(marker)
+    except PermissionError as exc:
+        print_err(
+            f"{display}: cannot remove {path} without root ({exc}). Re-run with `sudo ucode ...` "
+            "to clear the stale workspace-managed settings."
+        )
+        return "skipped"
+    except subprocess.CalledProcessError as exc:
+        _report_sudo_failure(path, display, exc)
+        return "skipped"
+    return "removed"
 
 
 def _sudo_replace(path: Path, desired_text: str) -> None:
@@ -131,6 +259,37 @@ def _sudo_replace(path: Path, desired_text: str) -> None:
                 _restore_immutable(path)
     finally:
         os.unlink(tmp_path)
+
+
+def _sudo_remove(path: Path) -> None:
+    """Remove a ucode-owned managed file or marker through sudo."""
+    _clear_immutable(path)
+    subprocess.run([_SUDO, "rm", "-f", str(path)], capture_output=True, text=True, check=True)
+
+
+def _rollback_owned_write(
+    path: Path,
+    existing: str,
+    existed: bool,
+    marker: Path,
+    existing_marker: str,
+    marker_existed: bool,
+) -> None:
+    """Best-effort rollback when updating the managed file and marker fails partway through."""
+    try:
+        if existed:
+            _sudo_replace(path, existing)
+        else:
+            _sudo_remove(path)
+        if marker_existed:
+            _sudo_replace(marker, existing_marker)
+        else:
+            _sudo_remove(marker)
+    except (PermissionError, subprocess.CalledProcessError):
+        print_warning(
+            f"Could not fully roll back a failed managed-settings update at {path}; "
+            "inspect the file and its ucode ownership marker before retrying."
+        )
 
 
 def _clear_immutable(path: Path) -> bool:

@@ -30,7 +30,7 @@ from ucode.databricks import (
     get_databricks_token,
 )
 from ucode.launcher import exec_or_spawn
-from ucode.managed_files import OS, current_os, write_managed_file
+from ucode.managed_files import OS, current_os, remove_managed_file, write_managed_file
 from ucode.smart_routing.claude_hooks import (
     remove_smart_routing_hooks,
     sync_smart_routing_hooks,
@@ -559,7 +559,7 @@ def write_tool_config(
     write_json_file(CLAUDE_SETTINGS_PATH, _compose(read_json_safe(CLAUDE_SETTINGS_PATH)))
 
     if state.get("write_managed_config"):
-        _write_managed_settings(_compose, relayed)
+        _write_managed_settings(_compose, relayed, state["workspace"])
 
     if web_search_model:
         _register_web_search_mcp(state["workspace"], web_search_model, state.get("profile"))
@@ -576,14 +576,13 @@ def write_tool_config(
     return state
 
 
-def _write_managed_settings(compose: Callable[[dict], dict], relayed: bool) -> None:
+def _write_managed_settings(compose: Callable[[dict], dict], relayed: bool, workspace: str) -> None:
     """Write ucode's config into Claude Code's OS managed-settings.json so a bare `claude` works.
 
     Runs only under use_as_global_settings. The managed file is root-owned and the highest-precedence
-    scope, so it applies whether or not `ucode` launches `claude`. The same compose (merge overlay +
-    prune stale keys) that produced the private file is applied to the existing managed file, so any
-    real IT-authored keys already there survive. The write goes through the sudo path in
-    `managed_files` (drift-suppressed, so no password prompt when unchanged).
+    scope, so it applies whether or not `ucode` launches `claude`. The file is wholly ucode-owned; a
+    pre-existing unowned file is rejected rather than merged. The write goes through the sudo path
+    in `managed_files` (drift-suppressed, so no password prompt when unchanged).
 
     Relayed launches are skipped: they depend on a per-session loopback refresh proxy that only runs
     during `ucode claude`, so a bare `claude` could not reach the gateway anyway.
@@ -602,8 +601,16 @@ def _write_managed_settings(compose: Callable[[dict], dict], relayed: bool) -> N
             "settings write."
         )
         return
-    desired = json.dumps(compose(read_json_safe(path)), indent=2)
-    write_managed_file(path, desired, display="Claude Code")
+    desired = json.dumps(compose({}), indent=2)
+    write_managed_file(path, desired, display="Claude Code", workspace=workspace)
+
+
+def clear_managed_settings() -> str:
+    """Remove Claude Code's machine-wide settings when ucode owns them."""
+    path = _managed_settings_path()
+    if path is None:
+        return "unchanged"
+    return remove_managed_file(path, display="Claude Code")
 
 
 def _is_tracing_stop_hook(hook: object) -> bool:
