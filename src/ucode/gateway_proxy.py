@@ -52,10 +52,14 @@ _HOP_BY_HOP = frozenset(
 # plus the swap header (replaced with a freshly-minted value per request).
 _STRIP_ON_FORWARD = _HOP_BY_HOP | {_SWAP_HEADER.lower()}
 _STREAM_CHUNK = 8192
-# Per-operation upstream timeouts. `read` is generous because model turns stream
-# over a single response and Anthropic emits SSE pings, so inter-chunk gaps stay
-# small; `connect`/`pool` fail fast when the gateway is unreachable.
-_UPSTREAM_TIMEOUT = httpx.Timeout(connect=10.0, read=600.0, write=600.0, pool=10.0)
+# Per-operation upstream timeouts. On the relayed path the pings the proxy sees
+# are AIGW's keep-alive frames (~every 10s), which cover only healthy streams;
+# AIGW itself aborts a genuine stall at ~60s and closes cleanly, so `read` only
+# needs to catch a dark upstream (pod crash / network partition, where neither
+# tokens nor pings arrive) — 120s catches that in ~2 min while staying well above
+# the 10s keep-alive so slow-but-healthy streams never trip it. `connect`/`pool`
+# fail fast when the gateway is unreachable.
+_UPSTREAM_TIMEOUT = httpx.Timeout(connect=10.0, read=120.0, write=600.0, pool=10.0)
 # Refresh once the token has less than this many seconds of life left. Databricks
 # access tokens live ~1h; a 10-min buffer leaves ample headroom for a retry.
 _REFRESH_BUFFER_S = 600
@@ -243,9 +247,28 @@ class _ProxyHandler(BaseHTTPRequestHandler):
             # quietly rather than crashing the handler thread.
             return
         except httpx.HTTPError:
-            # Upstream dropped mid-stream. Headers (and status) may already be
-            # sent, so we can't reliably signal a fresh error — stop and let the
-            # client see a truncated stream rather than corrupt the framing.
+            # Upstream dropped mid-stream after the head was already sent. For an
+            # *uncompressed SSE* body we can emit a terminal Anthropic error frame
+            # so the client retries cleanly instead of rendering a silent
+            # truncation as "incomplete". But this path also relays non-streaming
+            # JSON and (since Accept-Encoding is forwarded) possibly-gzipped
+            # bodies byte-for-byte — injecting plaintext SSE framing into either
+            # would corrupt it, which is strictly worse than a clean truncation.
+            # So gate on content-type + content-encoding, and lead with a double
+            # CRLF to force an SSE event boundary in case the drop landed
+            # mid-line. Also guard for the client already being gone.
+            ctype = resp.headers.get("content-type", "")
+            cenc = resp.headers.get("content-encoding", "")
+            if "text/event-stream" in ctype and cenc in ("", "identity"):
+                try:
+                    self.wfile.write(
+                        b"\r\n\r\nevent: error\r\n"
+                        b'data: {"type":"error","error":{"type":"overloaded_error",'
+                        b'"message":"gateway proxy: upstream stream interrupted"}}\r\n\r\n'
+                    )
+                    self.wfile.flush()
+                except OSError:
+                    pass
             return
 
     # Forward every method: this is a transparent pass-through, so routing any
