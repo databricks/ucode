@@ -364,9 +364,11 @@ class TestInstallToolBinary:
         monkeypatch.setattr("ucode.agents.shutil.which", fake_which)
         monkeypatch.setattr("ucode.agents.subprocess.run", fake_run)
         monkeypatch.setattr("ucode.agents._confirm_update_installed_tool_binary", lambda _: True)
+        monkeypatch.setattr("ucode.agents._required_update_message", lambda _: None)
+        monkeypatch.setattr("ucode.agents._minimum_version_error", lambda _: None)
 
         assert install_tool_binary("opencode", strict=False, update_existing=True) is True
-        assert calls == [["npm", "install", "-g", "opencode-ai"]]
+        assert calls == [["npm", "install", "-g", "opencode-ai@1"]]
         output = capsys.readouterr().out
         assert "Updating OpenCode..." in output
         assert "OpenCode is up to date" in output
@@ -388,6 +390,8 @@ class TestInstallToolBinary:
         monkeypatch.setattr(
             "ucode.agents.prompt_yes_no", lambda prompt: prompt_calls.append(prompt) or True
         )
+        monkeypatch.setattr("ucode.agents._required_update_message", lambda _: None)
+        monkeypatch.setattr("ucode.agents._minimum_version_error", lambda _: None)
 
         assert install_tool_binary("opencode", strict=False, update_existing=True) is True
         assert calls == []
@@ -413,10 +417,12 @@ class TestInstallToolBinary:
         monkeypatch.setattr(
             "ucode.agents.prompt_yes_no", lambda prompt: prompt_calls.append(prompt) or True
         )
+        monkeypatch.setattr("ucode.agents._required_update_message", lambda _: None)
+        monkeypatch.setattr("ucode.agents._minimum_version_error", lambda _: None)
 
         assert install_tool_binary("opencode", strict=False, update_existing=True) is True
         assert prompt_calls == ["(Optional) Update OpenCode from 1.2.3 to 1.2.4?"]
-        assert calls == [["npm", "install", "-g", "opencode-ai"]]
+        assert calls == [["npm", "install", "-g", "opencode-ai@1"]]
         assert "Updating OpenCode..." in capsys.readouterr().out
 
     def test_skips_existing_binary_update_when_user_declines(self, monkeypatch, capsys):
@@ -432,6 +438,8 @@ class TestInstallToolBinary:
         monkeypatch.setattr("ucode.agents.shutil.which", fake_which)
         monkeypatch.setattr("ucode.agents.subprocess.run", fake_run)
         monkeypatch.setattr("ucode.agents._confirm_update_installed_tool_binary", lambda _: False)
+        monkeypatch.setattr("ucode.agents._required_update_message", lambda _: None)
+        monkeypatch.setattr("ucode.agents._minimum_version_error", lambda _: None)
 
         assert install_tool_binary("opencode", strict=False, update_existing=True) is True
         assert calls == []
@@ -489,7 +497,7 @@ class TestInstallToolBinary:
             )
             is True
         )
-        assert calls and calls[0][:3] == ["npm", "install", "-g"]
+        assert calls == [["npm", "install", "-g", "opencode-ai@1"]]
 
     def test_too_new_tool_warns_and_downgrades_on_confirm(self, monkeypatch, capsys):
         """An installed build past its supported ceiling is offered as a
@@ -582,6 +590,8 @@ class TestInstallToolBinary:
         monkeypatch.setattr("ucode.agents.shutil.which", fake_which)
         monkeypatch.setattr("ucode.agents.subprocess.run", fake_run)
         monkeypatch.setattr("ucode.agents._confirm_update_installed_tool_binary", lambda _: True)
+        monkeypatch.setattr("ucode.agents._required_update_message", lambda _: None)
+        monkeypatch.setattr("ucode.agents._minimum_version_error", lambda _: None)
 
         assert install_tool_binary("opencode", strict=True, update_existing=True) is True
 
