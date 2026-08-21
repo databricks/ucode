@@ -263,6 +263,9 @@ def _select_provider_service(tool: str, workspace: str, token: str) -> dict | No
         return None
 
     usable = [service for service in services if service_usable_for_tool(tool, service)]
+    if tool == "claude":
+        # Claude subscription relays are not reliable enough for managed configurations yet.
+        usable = [service for service in usable if not service.get("relayed")]
     if not usable:
         if services:
             # Services exist but none match this agent's dialect — say so, since "no picker appeared"
