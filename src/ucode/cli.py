@@ -2943,6 +2943,18 @@ def revert_cmd() -> None:
         raise typer.Exit(1) from None
 
 
+@app.command("doctor")
+def doctor_cmd() -> None:
+    """Diagnose the local ucode setup and offer to fix any problems found."""
+    from ucode.doctor import doctor
+
+    try:
+        doctor()
+    except RuntimeError as exc:
+        print_err(str(exc))
+        raise typer.Exit(1) from None
+
+
 @app.command("usage")
 def usage_cmd(
     warehouse_id: Annotated[
