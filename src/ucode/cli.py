@@ -2037,15 +2037,23 @@ def _launch_tool(
         # The router's per-launch pick for the root session. Codex pins it as the
         # resolved model; claude pins it via ANTHROPIC_MODEL (route_root_model).
         route_root_model = None
+        relayed_forward_model = None  # forwarded to Claude Code's --model for a relayed provider
         if provider:
             # Routing through a Model Provider Service pins no Databricks model;
             # the agent uses its own canonical model names (header selects the
             # provider). Skip model resolution, which would otherwise fail when
             # the workspace has no matching Databricks models.
             resolved_model = None
-            # Relayed services forward --model to Claude Code's own flag at launch (below), not env.
             if tool == "claude" and not relayed and (model or provider_models):
                 route_root_model = resolve_provider_launch_model(model, provider_models or {})
+            elif tool == "claude" and relayed and (model or provider_models):
+                # Resolve against a curated allowlist so the forwarded id is one the gateway allows;
+                # an allow_all relay declares none, so forward as-is.
+                relayed_forward_model = (
+                    resolve_provider_launch_model(model, provider_models, always_select=True)
+                    if provider_models
+                    else model
+                )
         else:
             # A managed default_model is the model the admin wants sessions to start on, so it goes
             # in as the explicit model rather than being applied afterwards: for codex the proto has
@@ -2105,10 +2113,16 @@ def _launch_tool(
             # per-family target pins.
             custom_model=model if (tool == "claude" and not provider) else None,
         )
-        # Relayed = a Claude subscription: forward --model to Claude Code's own flag, like `-- --model X`.
-        if tool == "claude" and provider and relayed and model and not forwarded_model:
-            ctx.args = ["--model", model, *ctx.args]
-            forwarded_model = model
+        # Relayed = a Claude subscription: forward the model to Claude Code's own flag, like `-- --model X`.
+        if (
+            tool == "claude"
+            and provider
+            and relayed
+            and relayed_forward_model
+            and not forwarded_model
+        ):
+            ctx.args = ["--model", relayed_forward_model, *ctx.args]
+            forwarded_model = relayed_forward_model
         print_section(_launch_title(tool))
         if managed is not None:
             print_kv("Config", "workspace-managed")

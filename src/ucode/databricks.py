@@ -2438,16 +2438,19 @@ def map_claude_family_models(targets: list[str]) -> dict[str, str]:
 _CLAUDE_LAUNCH_TIER_PREFERENCE = ("opus", "sonnet", "haiku")
 
 
-def resolve_provider_launch_model(model: str | None, provider_models: dict[str, str]) -> str | None:
+def resolve_provider_launch_model(
+    model: str | None, provider_models: dict[str, str], *, always_select: bool = False
+) -> str | None:
     """Pick the model a provider-routed Claude session starts on, or None to keep Claude Code's default.
 
     ``provider_models`` maps the Claude families a service declares to their target ids (see
     ``map_claude_family_models``). With an explicit ``model`` (``ucode claude --model``) the user's
     choice wins: a family alias resolves to that tier's declared target (erroring when the service
     doesn't offer it), any other value is trusted as a raw target id the service allows. Without one,
-    return None when the service offers opus — Claude Code's own default already works, so we avoid
-    setting ANTHROPIC_MODEL and the duplicate ``/model`` picker row it produces — else the most
-    capable tier the service does offer, so the launch doesn't dead-end on an unservable opus.
+    return the most capable tier the service offers — but return None if it offers opus (Claude Code's
+    default already resolves there via the pinned family alias), unless ``always_select`` is set.
+    Relayed launches set it: they forward via Claude Code's ``--model`` flag, with no pinned alias to
+    fall back on.
     """
     if model:
         if model in ANTHROPIC_FAMILIES:
@@ -2460,7 +2463,7 @@ def resolve_provider_launch_model(model: str | None, provider_models: dict[str, 
                 )
             return target
         return model
-    if provider_models.get("opus"):
+    if not always_select and provider_models.get("opus"):
         return None
     return next(
         (
