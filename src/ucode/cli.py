@@ -1171,6 +1171,10 @@ setup_app = typer.Typer(add_completion=False, no_args_is_help=False)
 app.add_typer(
     setup_app,
     name="setup",
+    # Hidden from `ug --help` while workspace-managed configs are still in development and not
+    # ramped: the commands stay runnable (the flow is gated behind ENABLE_MANAGED_AGENT_CONFIG),
+    # they just aren't advertised to customers yet. Unhide alongside the public rollout.
+    hidden=True,
     help="Author the workspace's managed coding config (admins only). See `ug setup help`.",
 )
 
@@ -2419,7 +2423,11 @@ def _launch_managed_default(
     if not current:
         raise RuntimeError("No workspace configured. Run `ug configure` first.")
     apply_pat_environment(state)
-    # --dry-run avoids the fetch but still applies the last saved config.
+    # --dry-run avoids the fetch but still applies the last saved config. It doesn't reach the
+    # gateway, so the feature-disabled signal is unknown here — default it to False so the guidance
+    # check below is well-defined (without this, a dry run with no cached config raised
+    # UnboundLocalError).
+    coding_agent_config_feature_disabled = False
     if dry_run:
         managed = load_managed_state(current)
     else:
@@ -3282,7 +3290,7 @@ def setup_show_cmd() -> None:
         raise typer.Exit(code)
 
 
-@app.command("publish")
+@app.command("publish", hidden=True)  # Hidden with `ug setup`; see the setup add_typer above.
 def publish_cmd(
     file_path: Annotated[
         str | None,

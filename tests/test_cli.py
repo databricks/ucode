@@ -89,6 +89,19 @@ class TestHelp:
         for tool in TOOLS:
             assert tool in result.output
 
+    def test_managed_authoring_is_hidden_from_top_level_help_but_runnable(self):
+        # `ug setup` / `ug publish` are hidden while workspace-managed configs are still in
+        # development and unramped (gated behind ENABLE_MANAGED_AGENT_CONFIG). They must stay
+        # invokable, just not advertised. `ug export` (read-only, any user) is still listed.
+        # Match on the command descriptions, not the bare word "setup" (which also appears in
+        # doctor's help text), and flatten Typer's line-wrapping + box characters first.
+        flat = re.sub(r"[│╭╮╯╰─\s]+", " ", _strip_ansi(runner.invoke(app, ["--help"]).output))
+        assert "Author the workspace's managed" not in flat
+        assert "Publish this workspace's managed" not in flat
+        assert "Export this workspace's managed" in flat
+        assert runner.invoke(app, ["setup", "--help"]).exit_code == 0
+        assert runner.invoke(app, ["publish", "--help"]).exit_code == 0
+
     @pytest.mark.parametrize("prog_name", ["ug", "ucode"])
     def test_help_uses_invoked_name_and_names_ucode_as_an_alias(self, prog_name):
         result = runner.invoke(app, ["--help"], prog_name=prog_name)
@@ -4072,6 +4085,26 @@ class TestBareUcode:
         assert result.exit_code == 0, result.output
         # The config bare `ucode` already read is handed down, so the launch path does not refetch.
         assert launched[0][1]["managed"] == self.MANAGED
+
+    def test_dry_run_with_no_cached_config_does_not_crash(self, monkeypatch):
+        # --dry-run doesn't fetch, so the feature-disabled flag is never assigned by the fetch path.
+        # With no cached config it must still be well-defined (defaults False) rather than raising
+        # UnboundLocalError when the guidance check reads it.
+        monkeypatch.setenv("ENABLE_MANAGED_AGENT_CONFIG", "1")
+        monkeypatch.setattr("ucode.cli.install_databricks_cli", lambda *a, **k: None)
+        monkeypatch.setattr("ucode.cli.apply_pat_environment", lambda *a, **k: None)
+        monkeypatch.setattr("ucode.cli.load_state", lambda: {"workspace": "https://w"})
+        monkeypatch.setattr(
+            "ucode.cli.refresh_managed_config",
+            lambda state: pytest.fail("--dry-run must not fetch"),
+        )
+        monkeypatch.setattr("ucode.cli.load_managed_state", lambda ws: None)
+        monkeypatch.setattr(
+            "ucode.cli._launch_tool",
+            lambda *a, **k: pytest.fail("nothing to launch without a config"),
+        )
+        result = runner.invoke(app, ["--dry-run"])
+        assert result.exit_code == 0, result.output
 
     def test_skip_preflight_still_resolves_an_agent_from_the_managed_config(self, monkeypatch):
         # --skip-preflight is now only about auth/gateway re-validation, decoupled from managed
