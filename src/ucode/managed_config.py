@@ -436,17 +436,8 @@ def refresh_managed_config(state: dict) -> tuple[dict | None, bool]:
     managed, reason = get_managed_config(workspace, token)
     if reason is not None:
         if _is_feature_disabled(reason):
-            # FEATURE_DISABLED is an authoritative "the feature is off server-side", not a transient
-            # read failure — so don't fall back to a config cached from when it was enabled. Doing so
-            # would keep applying a policy the workspace has turned off, and (via a stale cache
-            # masking the disabled state) route `ug configure` into a managed-setup flow that
-            # immediately dead-ends. Clear the persisted copy too (same as the "no config" branch
-            # below): the file doubles as the fallback, so leaving it would let a later transient
-            # read/token failure resurrect the disabled policy. Report "no config, feature off".
             save_managed_state(workspace, {})
             return None, True
-        # A refused/failed read says nothing about whether the admin's config still exists, so leave
-        # the cached config in force rather than dropping the admin's policy on a transient blip.
         fallback = _persisted_fallback(workspace, reason, refused=_is_permission_denied(reason))
         return fallback, False
     if managed is None:
