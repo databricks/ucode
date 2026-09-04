@@ -1391,6 +1391,34 @@ def _extract_apps_payload(payload: object) -> list[dict]:
     raise RuntimeError("Databricks apps listing returned invalid JSON.")
 
 
+class PermissionDeniedError(RuntimeError):
+    """A workspace API returned an authorization failure (HTTP 403 / permission denied).
+
+    Callers use this only to skip V2 MCP discovery gracefully instead of aborting setup (see the
+    discovery wrappers in :mod:`ucode.mcp`), while other errors still surface.
+
+    It deliberately does NOT try to distinguish a consumer-only identity (no `workspace-access`
+    entitlement) from a workspace user missing a grant on a specific resource: no service exposes
+    a signal that reliably tells them apart. The `workspace-access` entitlement is enforced with a
+    named 403 only on guarded AI Gateway / Model Serving *inference* and model-listing paths (which
+    ucode already exercises at model setup, so a consumer is gated there) — NOT on the Apps / UC /
+    Vector Search listing calls the MCP flow uses, which return an empty list or a generic ACL
+    denial for a consumer."""
+
+
+def _looks_like_cli_permission_error(stderr: str | None) -> bool:
+    """Whether a Databricks CLI stderr indicates an authorization failure.
+
+    The CLI exit code is generic, so we match on the stable markers the CLI/API emit
+    for a denied workspace call rather than the status alone."""
+    if not stderr:
+        return False
+    lowered = stderr.lower()
+    if "permission" in lowered and ("denied" in lowered or "insufficient" in lowered):
+        return True
+    return "403" in lowered or "not authorized" in lowered or "unauthorized" in lowered
+
+
 def list_databricks_apps(workspace: str, profile: str | None = None) -> list[dict]:
     env = build_databricks_cli_env(workspace)
     try:
@@ -1412,6 +1440,11 @@ def list_databricks_apps(workspace: str, profile: str | None = None) -> list[dic
         )
         return _extract_apps_payload(json.loads(result.stdout or "[]"))
     except subprocess.CalledProcessError as exc:
+        # A 403 here means the caller isn't authorized to list apps (a consumer-only identity, or
+        # a workspace user without apps permission); raise PermissionDeniedError so callers can skip
+        # discovery gracefully (AIGTWY-4471). Other CLI failures stay hard errors.
+        if _looks_like_cli_permission_error(exc.stderr):
+            raise PermissionDeniedError("Not authorized to list Databricks apps.") from exc
         raise RuntimeError("Failed to list Databricks apps via `databricks apps list`.") from exc
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError("Timed out while listing Databricks apps.") from exc
