@@ -4099,6 +4099,10 @@ class TestBareUcode:
             lambda state: pytest.fail("--dry-run must not fetch"),
         )
         monkeypatch.setattr("ucode.cli.load_managed_state", lambda ws: None)
+        # The no-config guidance checks admin status; stub the token/admin calls so the test
+        # doesn't shell out to the `databricks` binary (absent in CI).
+        monkeypatch.setattr("ucode.cli.get_databricks_token", lambda *a, **k: "tok")
+        monkeypatch.setattr("ucode.cli.is_workspace_admin", lambda *a, **k: False)
         monkeypatch.setattr(
             "ucode.cli._launch_tool",
             lambda *a, **k: pytest.fail("nothing to launch without a config"),
