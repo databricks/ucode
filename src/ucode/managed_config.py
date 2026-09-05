@@ -416,11 +416,15 @@ def refresh_managed_config(state: dict) -> tuple[dict | None, bool]:
     A failed fetch never blocks the launch: an unreachable control plane shouldn't stop someone from
     coding. Instead it falls back to the last config persisted for this workspace, so the admin's
     most recent known policy still applies; only when there is no persisted config either does the
-    launch fall through to the developer's own settings.
+    launch fall through to the developer's own settings. ``FEATURE_DISABLED`` is the exception — it
+    is an authoritative "off", not a transient failure, so it drops the cache rather than falling
+    back (see below).
 
-    ``coding_agent_config_feature_disabled`` is True when the gateway returned ``FEATURE_DISABLED`` and there was no
-    persisted config to fall back on — the coding-agent-configs feature isn't enabled server-side,
-    so callers suppress the ``ucode setup`` recommendation.
+    ``coding_agent_config_feature_disabled`` is True whenever the gateway returned ``FEATURE_DISABLED`` —
+    the coding-agent-configs feature isn't enabled server-side, so callers suppress the ``ucode
+    setup`` recommendation. A config cached from when the feature was enabled is discarded in that
+    case (returned manifest is None), so a launch doesn't re-apply a policy the workspace has turned
+    off and ``ug configure`` doesn't route into a managed-setup flow that would dead-end.
     """
     workspace = state.get("workspace")
     if not workspace:
@@ -431,10 +435,11 @@ def refresh_managed_config(state: dict) -> tuple[dict | None, bool]:
         return _persisted_fallback(workspace, str(exc)), False
     managed, reason = get_managed_config(workspace, token)
     if reason is not None:
-        # A refused read leaves the cached config alone: it says nothing about whether the admin's
-        # config still exists, unlike a successful "no config" answer below.
+        if _is_feature_disabled(reason):
+            save_managed_state(workspace, {})
+            return None, True
         fallback = _persisted_fallback(workspace, reason, refused=_is_permission_denied(reason))
-        return fallback, _is_feature_disabled(reason) and fallback is None
+        return fallback, False
     if managed is None:
         # Record that this workspace has no config, rather than leaving an earlier one on disk:
         # the file doubles as the fallback above, so a removed policy would otherwise come back

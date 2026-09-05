@@ -2807,10 +2807,13 @@ class TestPublishFailureMessages:
 
 
 class TestCliWiring:
-    def test_setup_is_registered(self):
-        result = runner.invoke(app, ["--help"])
-        assert result.exit_code == 0
-        assert "setup" in result.output
+    def test_setup_is_registered_but_hidden(self):
+        # `setup` is wired up and invokable, but hidden from top-level help while workspace-managed
+        # configs are still in development and unramped. Assert on the command object (not the word
+        # "setup", which also appears in `doctor`'s help text) plus that it still runs.
+        group = typer.main.get_command(app).commands["setup"]  # type: ignore[attr-defined]
+        assert group.hidden is True
+        assert runner.invoke(app, ["setup", "--help"]).exit_code == 0
 
     def test_setup_help_lists_from_file(self):
         # Assert on the declared option rather than the rendered help text: Rich ellipsizes option
@@ -2827,10 +2830,12 @@ class TestCliWiring:
         assert result.exit_code == 0
         assert "show" in result.output
 
-    def test_publish_is_registered(self):
-        result = runner.invoke(app, ["--help"])
-        assert result.exit_code == 0
-        assert "publish" in result.output
+    def test_publish_is_registered_but_hidden(self):
+        # Hidden from top-level help alongside `setup` (managed configs still in development), but
+        # wired up and invokable.
+        command = typer.main.get_command(app).commands["publish"]  # type: ignore[attr-defined]
+        assert command.hidden is True
+        assert runner.invoke(app, ["publish", "--help"]).exit_code == 0
 
     def test_publish_declares_yes_and_no_dry_run(self):
         # `--dry-run` was removed: publish always validates before publishing, so a separate
