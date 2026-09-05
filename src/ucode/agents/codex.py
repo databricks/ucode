@@ -7,14 +7,19 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
-from collections.abc import Callable
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from pathlib import Path
 
 import tomlkit
 from tomlkit.exceptions import ParseError
 
+from ucode import gateway_proxy
 from ucode.codex_config import codex_config_args
+from ucode.codex_rate_limit import SharedCodexRateLimiter
+from ucode.codex_request import sanitize_reasoning_replay
 from ucode.config_io import (
     APP_DIR,
     ToolSpec,
@@ -32,13 +37,10 @@ from ucode.launcher import exec_or_spawn
 from ucode.managed_files import (
     OS,
     current_os,
-    managed_file_conflicts,
     managed_file_is_verified,
     managed_file_status,
-    managed_writes_allowed,
     mark_managed_file_verified,
     read_managed_file,
-    reconcile_managed_file,
     revert_managed_file,
 )
 from ucode.smart_routing import v2 as smart_routing_v2
@@ -66,6 +68,8 @@ MINIMUM_ROUTING_CODEX_VERSION_TEXT = "0.145.0"
 # Retained only to identify and remove state written by the legacy persisted opt-in.
 SMART_ROUTING_STATE_KEY = smart_routing_v2.LEGACY_STATE_KEY
 APP_SERVER_SMART_ROUTING_STARTING_MODEL = "gpt-5.6-luna"
+CODEX_RATE_LIMITER_ENV = "UCODE_CODEX_RATE_LIMITER"
+_FALSE_ENV_VALUES = frozenset({"0", "false", "no", "off"})
 
 SPEC: ToolSpec = {
     "binary": "codex",
@@ -363,7 +367,7 @@ def write_tool_config(state: dict, model: str | None = None, provider: str | Non
         enabled=False,
     )
     write_toml_file(CODEX_CONFIG_PATH, doc)
-    _reconcile_managed_config(state, compose)
+    _migrate_and_check_managed_config(state)
     state = mark_tool_managed(state, "codex", MANAGED_KEYS)
     save_state(state)
     return state
@@ -395,13 +399,18 @@ def managed_config_is_current(state: dict) -> bool:
     path = _managed_config_path()
     if path is None:
         return True
-    required_scope = "managed" if managed_writes_allowed() else None
-    return managed_file_is_verified(state, "codex", path, required_scope=required_scope)
+    return managed_file_is_verified(state, "codex", path, required_scope="local-compatible")
 
 
 def managed_config_status(state: dict) -> tuple[Path | None, str, str]:
     path = _managed_config_path()
     status, backup = managed_file_status(state, "codex", path, parser=_parse_managed_config)
+    if (
+        path is not None
+        and status == "missing"
+        and managed_file_is_verified(state, "codex", path, required_scope="local-compatible")
+    ):
+        status = "compatible (local settings)"
     return path, status, backup
 
 
@@ -414,49 +423,57 @@ def revert_managed_config() -> str:
     )
 
 
-def _reconcile_managed_config(state: dict, compose: Callable[[dict], dict]) -> None:
-    """Reconcile Codex's highest-precedence config while preserving unrelated policy."""
+def _managed_provider_conflicts(doc: dict) -> list[str]:
+    """Return managed values that can bypass a launch-scoped ucode provider."""
+    conflicts: list[str] = []
+    managed_provider = doc.get("model_provider")
+    if managed_provider is not None and managed_provider != CODEX_MODEL_PROVIDER_NAME:
+        conflicts.append("model_provider")
+    providers = doc.get("model_providers")
+    ucode_provider = (
+        providers.get(CODEX_MODEL_PROVIDER_NAME) if isinstance(providers, Mapping) else None
+    )
+    if isinstance(ucode_provider, Mapping) and "base_url" in ucode_provider:
+        conflicts.append(f"model_providers.{CODEX_MODEL_PROVIDER_NAME}.base_url")
+    return conflicts
+
+
+def _migrate_and_check_managed_config(state: dict) -> None:
+    """Retire ucode's managed provider and verify that external policy will not bypass it.
+
+    Codex gives ``/etc/codex/managed_config.toml`` precedence over profile files and launch-time
+    config overrides. A provider persisted there therefore bypasses the per-launch loopback proxy
+    used for shared throttling and 429 retries. Restore ucode's recorded pre-write baseline, then
+    keep only a compatibility fingerprint for unrelated machine policy.
+    """
     path = _managed_config_path()
     if path is None:
-        print_warning_err(
-            "Machine-wide Codex settings aren't supported on this platform; skipped the managed "
-            "config."
-        )
         return
     if path.is_symlink():
         raise RuntimeError(
             f"Refusing to use Codex managed settings through symlink {path}. Replace it with a "
             "regular file or contact your administrator."
         )
+
+    # Releases only settings recorded as ucode-owned. The shared managed-file lifecycle restores
+    # the original baseline or performs a three-way revert when external policy changed later.
+    revert_managed_config()
     current_text = read_managed_file(path)
     try:
         existing = _parse_managed_config(current_text) if current_text is not None else {}
     except RuntimeError as exc:
         raise RuntimeError(
-            f"Cannot safely update Codex managed settings at {path}: {exc}. ucode did not modify "
+            f"Cannot safely inspect Codex managed settings at {path}: {exc}. ucode did not modify "
             "the file. Repair it or contact your administrator."
         ) from exc
-    managed_before = copy.deepcopy(existing)
-    desired_doc = compose(existing)
-    if not managed_writes_allowed():
-        conflicts = managed_file_conflicts(managed_before, desired_doc, MANAGED_KEYS)
-        if conflicts:
-            raise RuntimeError(
-                "Codex configuration cannot be applied non-interactively because OS-managed "
-                f"settings at {path} override ucode values: {', '.join(conflicts)}. Run `ucode "
-                "configure --agent codex` from an interactive terminal or contact your "
-                "administrator."
-            )
-        mark_managed_file_verified(state, "codex", path, scope="local-compatible")
-        return
-    reconcile_managed_file(
-        path,
-        tomlkit.dumps(desired_doc),
-        tool="codex",
-        display="Codex",
-        owned_paths=MANAGED_KEYS,
-    )
-    mark_managed_file_verified(state, "codex", path)
+    conflicts = _managed_provider_conflicts(existing)
+    if conflicts:
+        raise RuntimeError(
+            f"Codex cannot use ucode's shared rate limiter because OS-managed settings at {path} "
+            f"override the launch-scoped provider: {', '.join(conflicts)}. Remove those provider "
+            "settings or contact your administrator."
+        )
+    mark_managed_file_verified(state, "codex", path, scope="local-compatible")
 
 
 def default_model(state: dict) -> str | None:
@@ -494,6 +511,94 @@ def clear_model_preferences(state: dict) -> bool:
 _PROFILE_REJECTED_MAX_SECONDS = 3.0
 
 
+def _codex_rate_limiter_enabled() -> bool:
+    return os.environ.get(CODEX_RATE_LIMITER_ENV, "").strip().lower() not in _FALSE_ENV_VALUES
+
+
+def _server_family_subcommand(tool_args: list[str]) -> bool:
+    """Keep Codex server commands on their existing profile/fallback path."""
+    return bool(tool_args) and tool_args[0].endswith("-server")
+
+
+def _proxied_overlay(config: dict, proxy_base_url: str, *, provider_only: bool = False) -> dict:
+    """Return a launch-scoped config that routes the ucode provider via loopback."""
+    providers = config.get("model_providers")
+    provider = providers.get(CODEX_MODEL_PROVIDER_NAME) if isinstance(providers, Mapping) else None
+    if not isinstance(provider, Mapping):
+        raise RuntimeError(
+            f"Cannot launch Codex through the shared limiter because {CODEX_CONFIG_PATH} "
+            "does not contain the ucode Databricks provider. Run `ucode configure --agents "
+            "codex` first."
+        )
+
+    if provider_only:
+        overlay = {
+            "model_providers": {CODEX_MODEL_PROVIDER_NAME: copy.deepcopy(provider)},
+        }
+    else:
+        overlay = copy.deepcopy(config)
+    overlay["model_providers"][CODEX_MODEL_PROVIDER_NAME]["base_url"] = proxy_base_url
+    # The proxy needs the JSON body to identify the model and estimate input
+    # tokens. This is a launch-only override; the user's Codex config is not
+    # changed. Official Codex config calls this stable feature on by default.
+    overlay["features.enable_request_compression"] = False
+    return overlay
+
+
+@contextmanager
+def _codex_request_proxy(state: dict) -> Iterator[str]:
+    """Run a loopback Codex proxy for the lifetime of one launched process."""
+    workspace = state.get("workspace")
+    if not isinstance(workspace, str) or not workspace:
+        raise RuntimeError("Codex shared rate limiting needs a configured Databricks workspace.")
+
+    limiter = SharedCodexRateLimiter(workspace)
+    server, cache, client = gateway_proxy.start_proxy(
+        workspace,
+        state.get("profile"),
+        0,
+        token_header=gateway_proxy.AUTHORIZATION_HEADER,
+        force_refresh_near_expiry=True,
+        upstream_base=f"{workspace.rstrip('/')}/ai-gateway/codex/",
+        request_transform=sanitize_reasoning_replay,
+        request_gate=limiter,
+        rate_limit_retry=limiter.retry_after_429,
+    )
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}/v1"
+    finally:
+        cache.stop()
+        server.shutdown()
+        server.server_close()
+        client.close()
+        server_thread.join(timeout=2)
+
+
+def _run_with_profile(
+    binary: str,
+    tool_args: list[str],
+    config_args: list[str] | None = None,
+) -> tuple[int, bool]:
+    """Run Codex with the ucode profile and identify its fast parse rejection."""
+    started = time.monotonic()
+    argv = [binary, "--profile", CODEX_PROFILE_NAME, *(config_args or []), *tool_args]
+    returncode = subprocess.run(argv).returncode
+    rejected = returncode != 0 and time.monotonic() - started < _PROFILE_REJECTED_MAX_SECONDS
+    return returncode, rejected
+
+
+def _relaunch_without_profile(binary: str, tool_args: list[str]) -> None:
+    # Warn on stderr: app-server stdout is a JSON-RPC stream.
+    print_warning_err(
+        "ucode's `--profile` isn't accepted here (error above). Retrying "
+        f"without it: Codex will resolve {LEGACY_CODEX_CONFIG_PATH} and any OS-managed "
+        "settings instead of the ucode profile."
+    )
+    exec_or_spawn([binary, *tool_args])
+
+
 def launch(state: dict, tool_args: list[str]) -> None:
     clear_model_preferences(state)
     binary = SPEC["binary"]
@@ -516,6 +621,20 @@ def launch(state: dict, tool_args: list[str]) -> None:
                 return codex_model_id(models[0])
             return APP_SERVER_SMART_ROUTING_STARTING_MODEL
 
+        if _codex_rate_limiter_enabled():
+            with _codex_request_proxy(state) as proxy_base_url:
+
+                def render_proxied_overlay(*args, **kwargs):
+                    return _proxied_overlay(render_overlay(*args, **kwargs), proxy_base_url)
+
+                smart_routing_v2.launch_codex(
+                    state,
+                    tool_args,
+                    binary=binary,
+                    start_model=_app_server_start_model(),
+                    render_overlay=render_proxied_overlay,
+                )
+            return
         smart_routing_v2.launch_codex(
             state,
             tool_args,
@@ -523,6 +642,7 @@ def launch(state: dict, tool_args: list[str]) -> None:
             start_model=_app_server_start_model(),
             render_overlay=render_overlay,
         )
+        return
     if workspace:
         os.environ["OAUTH_TOKEN"] = get_databricks_token(workspace, state.get("profile"))
     if tool_args[:1] == ["app"]:
@@ -535,9 +655,25 @@ def launch(state: dict, tool_args: list[str]) -> None:
                 f"Cannot launch Codex app with the ucode profile because {CODEX_CONFIG_PATH} "
                 "is missing or empty. Run `ucode configure --agents codex` first."
             )
-        config_args = codex_config_args(profile_doc)
-        exec_or_spawn([binary, "app", *config_args, *tool_args[1:]])
-        return  # unreachable in production (exec replaces the process)
+        if not _codex_rate_limiter_enabled():
+            config_args = codex_config_args(profile_doc)
+            exec_or_spawn([binary, "app", *config_args, *tool_args[1:]])
+            return  # unreachable in production (exec replaces the process)
+        with _codex_request_proxy(state) as proxy_base_url:
+            config_args = codex_config_args(_proxied_overlay(profile_doc, proxy_base_url))
+            returncode = subprocess.run([binary, "app", *config_args, *tool_args[1:]]).returncode
+        sys.exit(returncode)
+
+    # Codex server-family commands retain their existing launch and fallback
+    # behavior. Their callers own provider configuration and may keep the
+    # server alive after this launcher exits, so a session-local proxy would be
+    # the wrong lifecycle.
+    if _server_family_subcommand(tool_args) or not _codex_rate_limiter_enabled():
+        returncode, rejected = _run_with_profile(binary, tool_args)
+        if rejected:
+            _relaunch_without_profile(binary, tool_args)
+            return
+        sys.exit(returncode)
     # Run codex with --profile first — the TUI and runtime subcommands
     # (exec/resume/mcp/...) keep ucode's Databricks routing, including any added
     # by future codex versions. codex rejects the global --profile on
@@ -554,9 +690,12 @@ def launch(state: dict, tool_args: list[str]) -> None:
     # inherited (no capture), so Ctrl-C reaches codex directly and the resulting
     # KeyboardInterrupt propagates past the retry check — quitting an interactive
     # session is never mistaken for a --profile rejection.
-    started = time.monotonic()
-    returncode = subprocess.run([binary, "--profile", CODEX_PROFILE_NAME, *tool_args]).returncode
-    if returncode != 0 and time.monotonic() - started < _PROFILE_REJECTED_MAX_SECONDS:
+    profile_doc = read_toml_safe(CODEX_CONFIG_PATH)
+    with _codex_request_proxy(state) as proxy_base_url:
+        launch_overlay = _proxied_overlay(profile_doc, proxy_base_url, provider_only=True)
+        config_args = codex_config_args(launch_overlay)
+        returncode, rejected = _run_with_profile(binary, tool_args, config_args)
+    if rejected:
         # Fast failure: most likely codex rejected --profile on this subcommand.
         # Relaunch without it, handing over the terminal. (A fast failure for
         # any other reason — e.g. a bad flag — just re-fails the same way here,
@@ -565,12 +704,7 @@ def launch(state: dict, tool_args: list[str]) -> None:
         # Warn on *stderr*: this path is reached by `codex app-server`, whose
         # stdout is a JSON-RPC stream its caller parses. Emit before handing off,
         # since execvp replaces this process.
-        print_warning_err(
-            "ucode's `--profile` isn't accepted here (error above). Retrying "
-            f"without it: Codex will resolve {LEGACY_CODEX_CONFIG_PATH} and any OS-managed "
-            "settings instead of the ucode profile."
-        )
-        exec_or_spawn([binary, *tool_args])
+        _relaunch_without_profile(binary, tool_args)
         return  # unreachable in production (exec replaces the process)
     sys.exit(returncode)
 

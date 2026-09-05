@@ -328,9 +328,11 @@ class _FakeClient:
     def __init__(self, responses):
         self._responses = list(responses)
         self.sent_tokens: list[str | None] = []
+        self.sent_bodies: list[bytes | None] = []
 
     def stream(self, _method, _url, headers, content):
         self.sent_tokens.append(headers.get(gateway_proxy.AI_GATEWAY_TOKEN_HEADER))
+        self.sent_bodies.append(content)
         return self._responses.pop(0)
 
 
@@ -392,6 +394,24 @@ class _Collect(io.RawIOBase):
 
 
 class TestRetryOn401:
+    def test_request_transform_and_gate_run_once_before_auth_retry(self):
+        body = b'{"model":"gpt-6-astra"}'
+        transformed = body + b" "
+        transformed_bodies = []
+        gated = []
+        client = _FakeClient([_FakeResp(401, b"a"), _FakeResp(200, b"ok")])
+        handler = _handle_handler(client, _FakeCache(), _Collect())
+        handler.headers = {"Content-Length": str(len(body))}
+        handler.rfile = io.BytesIO(body)
+        handler.request_transform = lambda value: transformed_bodies.append(value) or transformed
+        handler.request_gate = gated.append
+
+        handler._handle()
+
+        assert transformed_bodies == [body]
+        assert gated == [transformed]
+        assert client.sent_bodies == [transformed, transformed]
+
     def test_401_forces_refresh_and_retries(self):
         # A stale swap token yields 401; the proxy force-refreshes and retries,
         # this time succeeding, so Claude Code never sees the 401.
@@ -435,6 +455,58 @@ class TestRetryOn401:
         assert cache.refreshed == 1  # a refresh was attempted
         assert "databricks auth login" in capsys.readouterr().err
         assert b"401" in bytes(out.data)  # the response is still relayed
+
+
+class TestRetryOn429:
+    def test_429_is_drained_waited_and_retried_inside_proxy(self):
+        body = b'{"model":"future-model","input":"hello"}'
+        first = _FakeResp(429, b'{"error":"slow down"}', {"Retry-After": "7"})
+        client = _FakeClient([first, _FakeResp(200, b"ok")])
+        out = _Collect()
+        handler = _handle_handler(client, _FakeCache(), out)
+        handler.headers = {"Content-Length": str(len(body))}
+        handler.rfile = io.BytesIO(body)
+        retries = []
+        handler.rate_limit_retry = lambda seen_body, headers, attempt: retries.append(
+            (seen_body, headers, attempt)
+        )
+
+        handler._handle()
+
+        assert first.read_called is True
+        assert client.sent_bodies == [body, body]
+        assert retries == [(body, {"Retry-After": "7"}, 1)]
+        assert b"429" not in bytes(out.data)
+        assert b"200" in bytes(out.data)
+        assert b"ok" in bytes(out.data)
+
+    def test_repeated_429s_increase_attempt_without_spending_client_retries(self):
+        responses = [
+            _FakeResp(429, b"one"),
+            _FakeResp(429, b"two"),
+            _FakeResp(200, b"ok"),
+        ]
+        client = _FakeClient(responses)
+        out = _Collect()
+        handler = _handle_handler(client, _FakeCache(), out)
+        attempts = []
+        handler.rate_limit_retry = lambda _body, _headers, attempt: attempts.append(attempt)
+
+        handler._handle()
+
+        assert attempts == [1, 2]
+        assert len(client.sent_bodies) == 3
+        assert b"429" not in bytes(out.data)
+        assert b"200" in bytes(out.data)
+
+    def test_429_is_relayed_when_no_retry_handler_is_configured(self):
+        client = _FakeClient([_FakeResp(429, b"limited")])
+        out = _Collect()
+
+        _handle_handler(client, _FakeCache(), out)._handle()
+
+        assert b"429" in bytes(out.data)
+        assert b"limited" in bytes(out.data)
 
 
 class TestStartProxyPortFallback:

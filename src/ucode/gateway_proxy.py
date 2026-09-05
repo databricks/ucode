@@ -1,4 +1,4 @@
-"""Loopback refresh proxy for Claude gateway requests.
+"""Loopback refresh proxy for coding-agent gateway requests.
 
 A relayed Model Provider Service authenticates the caller's own Anthropic
 subscription OAuth (which Claude Code owns in the `Authorization` header) and
@@ -24,6 +24,7 @@ import sys
 import threading
 import time
 import uuid
+from collections.abc import Callable, Mapping
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import httpx
@@ -200,6 +201,9 @@ class _ProxyHandler(BaseHTTPRequestHandler):
     cache: TokenCache
     client: httpx.Client
     token_header = AI_GATEWAY_TOKEN_HEADER
+    request_transform: Callable[[bytes], bytes] | None = None
+    request_gate: Callable[[bytes], None] | None = None
+    rate_limit_retry: Callable[[bytes | None, Mapping[str, str], int], None] | None = None
 
     def log_message(self, format: str, *args: object) -> None:
         return
@@ -225,47 +229,61 @@ class _ProxyHandler(BaseHTTPRequestHandler):
             path=self.path.split("?", 1)[0],
         )
         try:
-            # First attempt with the current token.
-            headers = forwarded_request_headers(self, self.cache.token, self.token_header)
-            with self.client.stream(self.command, url, headers=headers, content=body) as resp:
-                log_proxy_diagnostic(
-                    "upstream_headers",
-                    request_id=diagnostic_id,
-                    attempt=1,
-                    status=resp.status_code,
-                    elapsed_ms=round((time.monotonic() - started) * 1000),
-                )
-                if resp.status_code not in (401, 403):
-                    self._relay_response(resp, diagnostic_id=diagnostic_id, started=started)
-                    return
-                # Auth rejected. Drain the (small) error body so the pooled
-                # connection can be reused, then fall through to one retry.
-                resp.read()
-            # A relayed 401/403 may be a stale Databricks swap token rather than a
-            # bad Anthropic OAuth — the two are indistinguishable from the status
-            # alone. Force-refresh the Databricks token and retry once. If it was the
-            # Anthropic layer, the retry still 401s and we relay it verbatim, so a
-            # genuine re-auth is triggered; a stale-Databricks 401 self-heals here
-            # instead of surfacing to Claude Code as a spurious Anthropic prompt.
-            try:
-                self.cache.refresh()
-            except RuntimeError as exc:
-                # Refresh failed: the Databricks OAuth session is dead (not just the
-                # access token) and can't be re-minted non-interactively. Surface the
-                # `databricks auth login` hint rather than silently relaying a bare 401,
-                # which otherwise reads as an Anthropic `/login` prompt and sends the
-                # user to the wrong re-auth. Still retry + relay with the existing token.
-                log_token_refresh_failure(exc)
-            headers = forwarded_request_headers(self, self.cache.token, self.token_header)
-            with self.client.stream(self.command, url, headers=headers, content=body) as resp:
-                log_proxy_diagnostic(
-                    "upstream_headers",
-                    request_id=diagnostic_id,
-                    attempt=2,
-                    status=resp.status_code,
-                    elapsed_ms=round((time.monotonic() - started) * 1000),
-                )
-                self._relay_response(resp, diagnostic_id=diagnostic_id, started=started)
+            if self.request_transform is not None and body is not None:
+                body = self.request_transform(body)
+            if self.request_gate is not None and body is not None:
+                self.request_gate(body)
+            auth_retried = False
+            rate_limit_attempt = 0
+            upstream_attempt = 0
+            rate_limit_retry = self.rate_limit_retry
+            while True:
+                upstream_attempt += 1
+                headers = forwarded_request_headers(self, self.cache.token, self.token_header)
+                retry_auth = False
+                retry_rate_limit_headers: Mapping[str, str] | None = None
+                with self.client.stream(self.command, url, headers=headers, content=body) as resp:
+                    log_proxy_diagnostic(
+                        "upstream_headers",
+                        request_id=diagnostic_id,
+                        attempt=upstream_attempt,
+                        status=resp.status_code,
+                        elapsed_ms=round((time.monotonic() - started) * 1000),
+                    )
+                    if resp.status_code in (401, 403) and not auth_retried:
+                        # Drain the small auth error so the pooled connection can
+                        # be reused before refreshing and retrying once.
+                        resp.read()
+                        retry_auth = True
+                    elif resp.status_code == 429 and rate_limit_retry is not None:
+                        # Keep the 429 inside the proxy so Codex never spends one
+                        # of its own finite retries. The callback publishes and
+                        # waits on a cross-process cooldown before we try again.
+                        resp.read()
+                        retry_rate_limit_headers = dict(resp.headers)
+                    else:
+                        self._relay_response(resp, diagnostic_id=diagnostic_id, started=started)
+                        return
+
+                if retry_auth:
+                    auth_retried = True
+                    # A relayed 401/403 may be a stale Databricks swap token rather
+                    # than a bad Anthropic OAuth. Force-refresh once; a persistent
+                    # auth rejection is relayed on the next loop.
+                    try:
+                        self.cache.refresh()
+                    except RuntimeError as exc:
+                        log_token_refresh_failure(exc)
+                    continue
+
+                if retry_rate_limit_headers is not None:
+                    rate_limit_attempt += 1
+                    assert rate_limit_retry is not None
+                    rate_limit_retry(body, retry_rate_limit_headers, rate_limit_attempt)
+                    continue
+
+                # Every response either relays or chooses one of the retry paths.
+                raise AssertionError("unreachable proxy response state")
         except (BrokenPipeError, ConnectionResetError):
             # Client closed before/while we relayed headers — routine on cancel.
             log_proxy_diagnostic(
@@ -374,18 +392,30 @@ def start_proxy(
     port: int,
     token_header: str,
     force_refresh_near_expiry: bool,
+    *,
+    upstream_base: str | None = None,
+    request_transform: Callable[[bytes], bytes] | None = None,
+    request_gate: Callable[[bytes], None] | None = None,
+    rate_limit_retry: Callable[[bytes | None, Mapping[str, str], int], None] | None = None,
 ) -> tuple[ThreadingHTTPServer, TokenCache, httpx.Client]:
     """Start the loopback refresh proxy + its background token refresher.
 
     Binds ``port``, falling back to a fresh OS-assigned port when it is already
     in use (e.g. a prior session's proxy that was killed before its teardown ran
     still holds the socket). The caller reads ``server.server_address[1]`` for the
-    actual port and points Claude Code at it.
+    actual port and points the coding agent at it. ``upstream_base`` defaults to
+    Claude's Anthropic gateway path; callers for other APIs provide their own.
+    ``request_transform`` and ``request_gate`` run once per downstream request,
+    before any upstream attempt (including retry paths). The gate receives the
+    transformed body. When provided, ``rate_limit_retry`` receives every drained
+    429 plus the transformed request body and one-based rate-limit attempt. It
+    may block while applying a shared cooldown; the proxy then retries internally
+    instead of exposing the 429 to the coding agent's finite retry budget.
 
     Returns (server, cache, client); the caller runs the server (e.g. in a
     thread) and calls shutdown()/cache.stop()/client.close() on exit.
     """
-    upstream_base = f"{workspace.rstrip('/')}/ai-gateway/anthropic/"
+    upstream_base = upstream_base or f"{workspace.rstrip('/')}/ai-gateway/anthropic/"
     cache = TokenCache(
         workspace,
         profile,
@@ -399,7 +429,20 @@ def start_proxy(
     handler = type(
         "BoundProxyHandler",
         (_ProxyHandler,),
-        {"cache": cache, "client": client, "token_header": token_header},
+        {
+            "cache": cache,
+            "client": client,
+            "token_header": token_header,
+            # Functions stored directly on a class are descriptors and would
+            # otherwise receive the handler instance as an extra argument.
+            "request_transform": (
+                staticmethod(request_transform) if request_transform is not None else None
+            ),
+            "request_gate": staticmethod(request_gate) if request_gate is not None else None,
+            "rate_limit_retry": (
+                staticmethod(rate_limit_retry) if rate_limit_retry is not None else None
+            ),
+        },
     )
     try:
         server = ThreadingHTTPServer(("127.0.0.1", port), handler)
