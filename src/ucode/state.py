@@ -285,3 +285,24 @@ def set_provider_service(state: dict, tool: str, full_name: str | None) -> dict:
     else:
         state.pop("provider_services", None)
     return state
+
+
+# The managed configuration's ``update_time`` last applied to this workspace's agents. A launch
+# compares a freshly fetched config against it to decide whether to re-apply, so it is written only
+# after an apply succeeds — never on a plain fetch.
+APPLIED_MANAGED_UPDATE_TIME_KEY = "applied_managed_update_time"
+
+
+def get_applied_managed_update_time(state: dict) -> str | None:
+    """The ``update_time`` of the managed configuration last applied to this workspace, if any."""
+    value = state.get(APPLIED_MANAGED_UPDATE_TIME_KEY)
+    return value if isinstance(value, str) and value else None
+
+
+def set_applied_managed_update_time(state: dict, update_time: str | None) -> dict:
+    """Record (or clear) the applied managed configuration watermark for this workspace."""
+    if update_time:
+        state[APPLIED_MANAGED_UPDATE_TIME_KEY] = update_time
+    else:
+        state.pop(APPLIED_MANAGED_UPDATE_TIME_KEY, None)
+    return state

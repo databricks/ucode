@@ -125,7 +125,7 @@ def recommendation_line(display_agent: str | None, model: str | None, percent: i
         return None
     used = f"You've used [bold]{percent}%[/bold] of the workspace budget. "
     if display_agent and model:
-        return f"{used}Recommended agent is [bold]{display_agent}[/bold] with model [bold]{model}[/bold]."
+        return f"{used}Your tier recommends [bold]{display_agent}[/bold] with [bold]{model}[/bold]."
     if display_agent:
-        return f"{used}Recommended agent is [bold]{display_agent}[/bold]."
-    return f"{used}Recommended model is [bold]{model}[/bold]."
+        return f"{used}Your tier recommends [bold]{display_agent}[/bold]."
+    return f"{used}Your tier recommends model [bold]{model}[/bold]."

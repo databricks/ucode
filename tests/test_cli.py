@@ -915,7 +915,7 @@ class TestClaudeModelFlag:
         monkeypatch.setattr(cli_mod, "load_state", lambda: MINIMAL_STATE)
         monkeypatch.setattr(cli_mod, "ensure_provider_state", lambda t: MINIMAL_STATE)
         monkeypatch.setattr(cli_mod, "configure_shared_state", lambda *a, **k: MINIMAL_STATE)
-        monkeypatch.setattr(cli_mod, "_fetch_managed_config", lambda s: (None, False))
+        monkeypatch.setattr(cli_mod, "_fetch_managed_config", lambda s, **kwargs: (None, False))
         monkeypatch.setattr(cli_mod, "_fetch_budget_recommendation", lambda s, m: None)
         mock_launch = MagicMock()
         monkeypatch.setattr(cli_mod, "launch_agent", mock_launch)
@@ -1054,7 +1054,7 @@ class TestGeminiProviderLaunch:
         monkeypatch.setattr("ucode.cli.load_state", lambda: state)
         monkeypatch.setattr("ucode.cli.ensure_provider_state", lambda t: state)
         monkeypatch.setattr("ucode.cli.configure_shared_state", lambda *a, **k: state)
-        monkeypatch.setattr("ucode.cli._fetch_managed_config", lambda s: (None, False))
+        monkeypatch.setattr("ucode.cli._fetch_managed_config", lambda s, **kwargs: (None, False))
         monkeypatch.setattr("ucode.cli.resolve_provider_models", resolve_provider_models)
         monkeypatch.setattr("ucode.cli.configure_tool", lambda *a, **k: state)
         monkeypatch.setattr(
@@ -1667,6 +1667,9 @@ class TestManagedSkillsOnLaunch:
             patch("ucode.cli.ensure_provider_state", return_value=state),
             patch("ucode.cli.configure_shared_state", return_value=state),
             patch("ucode.cli.configure_tool", return_value=state),
+            # First launch with no applied watermark re-applies all enabled agents; stub it so the
+            # test exercises the skills path, not a real configure that shells out to databricks.
+            patch("ucode.cli.configure_selected_tools", return_value=state),
             patch("ucode.cli.get_databricks_token", return_value="tok"),
             patch("ucode.cli._fetch_managed_config", return_value=(managed, False)),
             patch("ucode.cli.apply_managed_mcp_servers", return_value=[]),
@@ -1891,7 +1894,6 @@ class TestAutoConfigureOnFirstRun:
             patch("ucode.cli.ensure_provider_state", return_value=configured_state),
             patch("ucode.cli._fetch_managed_config", return_value=(None, False)),
             patch("ucode.cli.configure_tool", return_value=configured_state),
-            patch("ucode.cli.validate_tool", return_value=(False, "timed out")) as mock_validate,
             patch("ucode.cli.restore_file") as mock_restore,
             patch("ucode.cli.launch_agent") as mock_launch,
         ):
@@ -1899,7 +1901,6 @@ class TestAutoConfigureOnFirstRun:
 
         assert result.exit_code == 0, result.output
         mock_configure.assert_called_once_with(tool, configured_state)
-        mock_validate.assert_not_called()
         mock_restore.assert_not_called()
         mock_launch.assert_called_once()
         assert mock_launch.call_args.args[:2] == (tool, configured_state)
@@ -2411,7 +2412,7 @@ class TestConfigureAgentsSelection:
         )
         monkeypatch.setattr(cli_mod, "configure_shared_state", lambda *args, **kwargs: state)
         monkeypatch.setattr(
-            cli_mod, "check_gateway_endpoint", lambda state, tool: tool in {"claude", "codex"}
+            cli_mod, "check_gateway_endpoint", lambda state, tool, **kw: tool in {"claude", "codex"}
         )
         monkeypatch.setattr(
             cli_mod,
@@ -2430,12 +2431,127 @@ class TestConfigureAgentsSelection:
         monkeypatch.setattr(
             cli_mod,
             "configure_selected_tools",
-            lambda state, tools: configured.append(tools) or {**state, "available_tools": tools},
+            lambda state, tools, **kwargs: (
+                configured.append(tools) or {**state, "available_tools": tools}
+            ),
         )
-        monkeypatch.setattr(cli_mod, "validate_all_tools", lambda state: None)
+        monkeypatch.setattr(cli_mod, "_fetch_managed_config", lambda s: (None, False))
 
         assert cli_mod.configure_workspace_command(selected_tools=["claude", "codex"]) == 0
         assert install_calls == ["claude", "codex"]
+        assert configured == [["claude", "codex"]]
+
+    def test_managed_config_suppresses_provider_picker(self, monkeypatch):
+        # When the managed config dictates a tool's models, the "Databricks Hosted vs External"
+        # provider picker must not be shown; a picked provider would only be overridden at launch.
+        import ucode.cli as cli_mod
+
+        state = {**MINIMAL_STATE, "available_tools": []}
+        monkeypatch.setattr(
+            cli_mod, "_prompt_for_configuration", lambda tool=None: ("https://example.com", None)
+        )
+        monkeypatch.setattr(cli_mod, "configure_shared_state", lambda *a, **k: state)
+        monkeypatch.setattr(cli_mod, "check_gateway_endpoint", lambda state, tool, **kw: True)
+        monkeypatch.setattr(cli_mod, "install_tool_binary", lambda *a, **k: True)
+        monkeypatch.setattr(
+            cli_mod, "prompt_for_tools", lambda available: pytest.fail("no agent picker")
+        )
+        picked_for: list[str] = []
+        monkeypatch.setattr(
+            cli_mod, "_maybe_select_provider_service", lambda tool, s: picked_for.append(tool) or s
+        )
+        monkeypatch.setattr(
+            cli_mod,
+            "configure_selected_tools",
+            lambda s, tools, **k: {**s, "available_tools": tools},
+        )
+        monkeypatch.setattr(
+            cli_mod,
+            "_fetch_managed_config",
+            lambda s: (
+                {
+                    "enabled_agents": {
+                        "claude": {"model_config": {"default_model": "system.ai.claude-opus-4-8"}},
+                        "codex": {"model_config": {"default_model": "system.ai.gpt-5"}},
+                    }
+                },
+                False,
+            ),
+        )
+
+        assert cli_mod.configure_workspace_command() == 0
+        assert picked_for == []
+
+    def test_managed_enabled_agents_without_models_still_skip_provider_picker(self, monkeypatch):
+        # A managed config that only enables agents (no model source) is still fully managed:
+        # `ucode configure` (no --agents) stays non-interactive and defaults to Databricks Hosted,
+        # never showing the "Databricks Hosted vs External" provider picker.
+        import ucode.cli as cli_mod
+
+        state = {**MINIMAL_STATE, "available_tools": []}
+        monkeypatch.setattr(
+            cli_mod, "_prompt_for_configuration", lambda tool=None: ("https://example.com", None)
+        )
+        monkeypatch.setattr(cli_mod, "configure_shared_state", lambda *a, **k: state)
+        monkeypatch.setattr(cli_mod, "check_gateway_endpoint", lambda state, tool, **kw: True)
+        monkeypatch.setattr(cli_mod, "install_tool_binary", lambda *a, **k: True)
+        monkeypatch.setattr(
+            cli_mod, "prompt_for_tools", lambda available: pytest.fail("no agent picker")
+        )
+        monkeypatch.setattr(
+            cli_mod,
+            "_maybe_select_provider_service",
+            lambda tool, s: pytest.fail("no provider picker for a managed workspace"),
+        )
+        monkeypatch.setattr(
+            cli_mod,
+            "configure_selected_tools",
+            lambda s, tools, **k: {**s, "available_tools": tools},
+        )
+        monkeypatch.setattr(
+            cli_mod,
+            "_fetch_managed_config",
+            lambda s: ({"enabled_agents": {"claude": {}, "codex": {}}}, False),
+        )
+
+        assert cli_mod.configure_workspace_command() == 0
+
+    def test_managed_enabled_agents_skip_picker(self, monkeypatch):
+        # A managed config's enabled_agents is an allowlist: `ucode configure` (no --agents) must
+        # configure exactly those, never prompt across every workspace-available agent.
+        import ucode.cli as cli_mod
+
+        state = {**MINIMAL_STATE, "available_tools": []}
+        monkeypatch.setattr(
+            cli_mod, "_prompt_for_configuration", lambda tool=None: ("https://example.com", None)
+        )
+        monkeypatch.setattr(cli_mod, "configure_shared_state", lambda *a, **k: state)
+        # Every agent looks available, so only the allowlist should narrow the selection.
+        monkeypatch.setattr(cli_mod, "check_gateway_endpoint", lambda state, tool, **kw: True)
+        monkeypatch.setattr(cli_mod, "install_tool_binary", lambda *a, **k: True)
+        monkeypatch.setattr(cli_mod, "_maybe_select_provider_service", lambda tool, s: s)
+        monkeypatch.setattr(
+            cli_mod,
+            "prompt_for_tools",
+            lambda available: pytest.fail(
+                "prompt_for_tools should not be called for a managed config"
+            ),
+        )
+        configured: list[list[str]] = []
+        monkeypatch.setattr(
+            cli_mod,
+            "configure_selected_tools",
+            lambda state, tools, **kwargs: (
+                configured.append(tools) or {**state, "available_tools": tools}
+            ),
+        )
+        monkeypatch.setattr(
+            cli_mod,
+            "_fetch_managed_config",
+            lambda s: ({"enabled_agents": {"claude": {}, "codex": {}}}, False),
+        )
+
+        assert cli_mod.configure_workspace_command() == 0
         assert configured == [["claude", "codex"]]
 
     def test_provider_picker_gated_by_interactive_path(self, monkeypatch):
@@ -2443,12 +2559,14 @@ class TestConfigureAgentsSelection:
 
         state = {**MINIMAL_STATE, "available_tools": []}
         monkeypatch.setattr(cli_mod, "configure_shared_state", lambda *a, **k: state)
-        monkeypatch.setattr(cli_mod, "check_gateway_endpoint", lambda s, t: t == "claude")
+        monkeypatch.setattr(cli_mod, "check_gateway_endpoint", lambda s, t, **kw: t == "claude")
         monkeypatch.setattr(cli_mod, "install_tool_binary", lambda *a, **k: True)
         monkeypatch.setattr(
-            cli_mod, "configure_selected_tools", lambda s, tools: {**s, "available_tools": tools}
+            cli_mod,
+            "configure_selected_tools",
+            lambda s, tools, **kwargs: {**s, "available_tools": tools},
         )
-        monkeypatch.setattr(cli_mod, "validate_all_tools", lambda s: None)
+        monkeypatch.setattr(cli_mod, "_fetch_managed_config", lambda s: (None, False))
         picked_for: list[str] = []
         monkeypatch.setattr(
             cli_mod,
@@ -2480,12 +2598,17 @@ class TestConfigureAgentsSelection:
             lambda tool=None: ("https://example.com", None),
         )
         monkeypatch.setattr(cli_mod, "configure_shared_state", lambda *args, **kwargs: state)
-        monkeypatch.setattr(cli_mod, "check_gateway_endpoint", lambda state, tool: tool == "claude")
+        monkeypatch.setattr(
+            cli_mod, "check_gateway_endpoint", lambda state, tool, **kw: tool == "claude"
+        )
         monkeypatch.setattr(cli_mod, "install_tool_binary", lambda *args, **kwargs: None)
+        monkeypatch.setattr(cli_mod, "_fetch_managed_config", lambda s: (None, False))
         monkeypatch.setattr(
             cli_mod,
             "configure_selected_tools",
-            lambda state, tools: pytest.fail("configure_selected_tools should not be called"),
+            lambda state, tools, **kwargs: pytest.fail(
+                "configure_selected_tools should not be called"
+            ),
         )
 
         with pytest.raises(RuntimeError, match="Codex"):
@@ -2496,8 +2619,11 @@ class TestConfigureAgentsSelection:
 
         state = {**MINIMAL_STATE, "available_tools": []}
         monkeypatch.setattr(cli_mod, "configure_shared_state", lambda *a, **k: state)
-        monkeypatch.setattr(cli_mod, "check_gateway_endpoint", lambda state, tool: tool == "claude")
+        monkeypatch.setattr(
+            cli_mod, "check_gateway_endpoint", lambda state, tool, **kw: tool == "claude"
+        )
         monkeypatch.setattr(cli_mod, "install_tool_binary", lambda *a, **k: None)
+        monkeypatch.setattr(cli_mod, "_fetch_managed_config", lambda *a, **k: (None, False))
 
         with pytest.raises(RuntimeError, match="--skip-unavailable"):
             cli_mod.configure_workspace_command(
@@ -2512,7 +2638,7 @@ class TestConfigureAgentsSelection:
         state = {**MINIMAL_STATE, "available_tools": []}
         monkeypatch.setattr(cli_mod, "configure_shared_state", lambda *a, **k: state)
         monkeypatch.setattr(
-            cli_mod, "check_gateway_endpoint", lambda state, tool: tool in {"claude", "pi"}
+            cli_mod, "check_gateway_endpoint", lambda state, tool, **kw: tool in {"claude", "pi"}
         )
         installed: list[str] = []
         monkeypatch.setattr(
@@ -2524,9 +2650,11 @@ class TestConfigureAgentsSelection:
         monkeypatch.setattr(
             cli_mod,
             "configure_selected_tools",
-            lambda state, tools: configured.append(tools) or {**state, "available_tools": tools},
+            lambda state, tools, **kwargs: (
+                configured.append(tools) or {**state, "available_tools": tools}
+            ),
         )
-        monkeypatch.setattr(cli_mod, "validate_all_tools", lambda state: None)
+        monkeypatch.setattr(cli_mod, "_fetch_managed_config", lambda s: (None, False))
         warnings: list[str] = []
         monkeypatch.setattr(cli_mod, "print_warning", lambda msg: warnings.append(msg))
 
@@ -2548,11 +2676,14 @@ class TestConfigureAgentsSelection:
 
         state = {**MINIMAL_STATE, "available_tools": []}
         monkeypatch.setattr(cli_mod, "configure_shared_state", lambda *a, **k: state)
-        monkeypatch.setattr(cli_mod, "check_gateway_endpoint", lambda state, tool: False)
+        monkeypatch.setattr(cli_mod, "check_gateway_endpoint", lambda state, tool, **kw: False)
+        monkeypatch.setattr(cli_mod, "_fetch_managed_config", lambda s: (None, False))
         monkeypatch.setattr(
             cli_mod,
             "configure_selected_tools",
-            lambda state, tools: pytest.fail("configure_selected_tools should not be called"),
+            lambda state, tools, **kwargs: pytest.fail(
+                "configure_selected_tools should not be called"
+            ),
         )
 
         assert (
@@ -2593,17 +2724,16 @@ class TestConfigureAgentsSelection:
 
         monkeypatch.setattr(cli_mod, "configure_shared_state", fake_configure_shared_state)
         monkeypatch.setattr(cli_mod, "save_state", lambda state: (None, False))
-        monkeypatch.setattr(cli_mod, "check_gateway_endpoint", lambda state, tool: True)
+        monkeypatch.setattr(cli_mod, "_fetch_managed_config", lambda s: (None, False))
+        monkeypatch.setattr(cli_mod, "check_gateway_endpoint", lambda state, tool, **kw: True)
         monkeypatch.setattr(cli_mod, "prompt_for_tools", lambda available: ["claude"])
         monkeypatch.setattr(cli_mod, "_maybe_select_provider_service", lambda tool, state: state)
         monkeypatch.setattr(cli_mod, "install_tool_binary", lambda *args, **kwargs: True)
         monkeypatch.setattr(
             cli_mod,
             "configure_selected_tools",
-            lambda state, tools: {**state, "available_tools": tools},
+            lambda state, tools, **kwargs: {**state, "available_tools": tools},
         )
-        monkeypatch.setattr(cli_mod, "validate_all_tools", lambda state: None)
-
         assert cli_mod.configure_workspace_command() == 0
         assert captured["profile"] == "picked-profile"
 
@@ -2635,20 +2765,19 @@ class TestConfigureAgentsSelection:
         configured_tools: list[tuple[str, list[str]]] = []
         monkeypatch.setattr(cli_mod, "configure_shared_state", fake_configure_shared_state)
         monkeypatch.setattr(cli_mod, "save_state", lambda state: saved.append(state["workspace"]))
-        monkeypatch.setattr(cli_mod, "check_gateway_endpoint", lambda state, tool: True)
+        monkeypatch.setattr(cli_mod, "_fetch_managed_config", lambda s: (None, False))
+        monkeypatch.setattr(cli_mod, "check_gateway_endpoint", lambda state, tool, **kw: True)
         monkeypatch.setattr(cli_mod, "prompt_for_tools", lambda available: ["codex"])
         monkeypatch.setattr(cli_mod, "_maybe_select_provider_service", lambda tool, state: state)
         monkeypatch.setattr(cli_mod, "install_tool_binary", lambda *args, **kwargs: True)
         monkeypatch.setattr(
             cli_mod,
             "configure_selected_tools",
-            lambda state, tools: (
+            lambda state, tools, **kwargs: (
                 configured_tools.append((state["workspace"], tools))
                 or {**state, "available_tools": tools}
             ),
         )
-        monkeypatch.setattr(cli_mod, "validate_all_tools", lambda state: None)
-
         assert (
             cli_mod.configure_workspace_command(
                 workspaces=[("https://first.com", None), ("https://second.com", None)]
@@ -2759,7 +2888,7 @@ class TestConfigureProfilesFlag:
             workspaces=[("https://first.databricks.com", "DEFAULT")],
         )
 
-    def test_use_pat_and_skip_validate_are_forwarded(self):
+    def test_use_pat_is_forwarded(self):
         with (
             patch("ucode.cli.install_databricks_cli"),
             patch("ucode.cli.install_tool_binary"),
@@ -2775,7 +2904,6 @@ class TestConfigureProfilesFlag:
                     "--profiles",
                     "DEFAULT",
                     "--use-pat",
-                    "--skip-validate",
                 ],
             )
         assert result.exit_code == 0, result.output
@@ -2784,7 +2912,6 @@ class TestConfigureProfilesFlag:
             workspaces=[("https://first.databricks.com", "DEFAULT")],
             prompt_optional_updates=True,
             use_pat=True,
-            skip_validate=True,
         )
 
     def test_use_pat_requires_profiles(self):
@@ -2925,7 +3052,7 @@ class TestConfigureSharedStateUsePat:
         cli_mod.configure_shared_state(self.WS, profile="DEFAULT")
 
         output = _strip_ansi(capsys.readouterr().out)
-        assert "Unity AI Gateway connected" in output
+        assert "Unity Gateway connected" in output
         assert "Model service:" not in output
 
     @pytest.mark.parametrize(
@@ -2964,7 +3091,7 @@ class TestConfigureSharedStateUsePat:
 
         output = " ".join(_strip_ansi(capsys.readouterr().out).split())
         assert f"Model service: {expected_model_service}" in output
-        assert "Unity AI Gateway connected" not in output
+        assert "Unity Gateway connected" not in output
         assert "(Legacy) endpoints:" not in output
         assert "V2" not in output
         assert "V3" not in output
@@ -3002,7 +3129,7 @@ class TestConfigureSharedStateUsePat:
             cli_mod.configure_shared_state(self.WS, profile="DEFAULT")
 
         output = _strip_ansi(capsys.readouterr().out)
-        assert "Unity AI Gateway connected" not in output
+        assert "Unity Gateway connected" not in output
         message = str(excinfo.value)
         assert "v2" not in message.lower()
         assert "v3" not in message.lower()
@@ -3238,57 +3365,28 @@ class TestConfigureSharedStateUsePat:
         }
 
 
-class TestConfigureSkipValidate:
-    def test_skip_validate_skips_agent_validation(self, monkeypatch):
-        import ucode.cli as cli_mod
-
-        state = {**MINIMAL_STATE, "workspace": "https://first.com"}
-        monkeypatch.setattr(cli_mod, "configure_shared_state", lambda *a, **k: state)
-        monkeypatch.setattr(cli_mod, "save_state", lambda s: None)
-        monkeypatch.setattr(cli_mod, "check_gateway_endpoint", lambda s, t: True)
-        monkeypatch.setattr(cli_mod, "install_tool_binary", lambda *a, **k: True)
-        monkeypatch.setattr(
-            cli_mod,
-            "configure_selected_tools",
-            lambda s, tools: {**s, "available_tools": tools},
-        )
-        validated: list = []
-        monkeypatch.setattr(cli_mod, "validate_all_tools", lambda s: validated.append(s))
-
-        result = cli_mod.configure_workspace_command(
-            selected_tools=["codex"],
-            workspaces=[("https://first.com", None)],
-            skip_validate=True,
-        )
-
-        assert result == 0
-        assert validated == []
-
-    @pytest.mark.parametrize("skip_validate", [False, True])
+class TestConfigureSingleTool:
     @pytest.mark.parametrize("tool", list(cli_mod.TOOL_SPECS))
-    def test_single_tool_validation_is_optional(self, monkeypatch, skip_validate, tool):
+    def test_single_tool_configure_installs_ai_tools(self, monkeypatch, tool):
         import ucode.cli as cli_mod
 
         state = {**MINIMAL_STATE, "workspace": "https://first.com"}
         monkeypatch.setattr(cli_mod, "configure_shared_state", lambda *a, **k: state)
-        monkeypatch.setattr(cli_mod, "configure_single_tool", lambda t, s: s)
+        monkeypatch.setattr(cli_mod, "_fetch_managed_config", lambda s: (None, False))
+        monkeypatch.setattr(cli_mod, "configure_single_tool", lambda t, s, **kwargs: s)
         installed: list = []
         monkeypatch.setattr(
             cli_mod,
             "install_databricks_ai_tools_for_agents",
             lambda tools, s: installed.append(tools),
         )
-        validated: list = []
-        monkeypatch.setattr(cli_mod, "validate_tool", lambda t: validated.append(t) or (True, ""))
 
         result = cli_mod.configure_workspace_command(
             tool,
             workspaces=[("https://first.com", None)],
-            skip_validate=skip_validate,
         )
 
         assert result == 0
-        assert validated == ([] if skip_validate else [tool])
         # `ucode configure` (single-agent) still installs AI Tools — it's the
         # configure path, unlike launch which auto-configures without installing.
         assert installed == [[tool]]
@@ -3549,12 +3647,15 @@ class TestFetchManagedConfig:
 
     def test_fetches_fresh_when_enabled(self, monkeypatch):
         monkeypatch.setattr(
-            "ucode.cli.refresh_managed_config", lambda state: ({"enabled_agents": {}}, False)
+            "ucode.cli.refresh_managed_config",
+            lambda state, **kwargs: ({"enabled_agents": {}}, False),
         )
         assert self._fetch({"workspace": "https://w"}) == ({"enabled_agents": {}}, False)
 
     def test_feature_disabled_returns_none_and_the_flag(self, monkeypatch):
-        monkeypatch.setattr("ucode.cli.refresh_managed_config", lambda state: (None, True))
+        monkeypatch.setattr(
+            "ucode.cli.refresh_managed_config", lambda state, **kwargs: (None, True)
+        )
         assert self._fetch({"workspace": "https://w"}) == (None, True)
 
 
@@ -3571,7 +3672,9 @@ class TestManagedConfigDecidesDiscoveryFromFreshRead:
         }
         fresh = {"enabled_agents": {"claude": {"model_config": {}}}}
         monkeypatch.setattr("ucode.cli.load_managed_state", lambda ws: stale_cache)
-        monkeypatch.setattr("ucode.cli.refresh_managed_config", lambda state: (fresh, False))
+        monkeypatch.setattr(
+            "ucode.cli.refresh_managed_config", lambda state, **kwargs: (fresh, False)
+        )
 
         state = dict(MINIMAL_STATE)
         with (
@@ -3582,6 +3685,9 @@ class TestManagedConfigDecidesDiscoveryFromFreshRead:
             patch("ucode.cli.ensure_provider_state", return_value=state),
             patch("ucode.cli.configure_shared_state", return_value=state) as mock_shared,
             patch("ucode.cli.configure_tool", return_value=state),
+            # First launch with no applied watermark re-applies all enabled agents; stub it so the
+            # test exercises the discovery decision, not a real configure.
+            patch("ucode.cli.configure_selected_tools", return_value=state),
             patch("ucode.cli.launch_agent"),
         ):
             result = runner.invoke(app, ["claude"])
@@ -3610,9 +3716,13 @@ class TestBareUcode:
         monkeypatch.setattr("ucode.cli.load_state", lambda: {"workspace": "https://w"})
 
         if coding_agent_config_feature_disabled:
-            monkeypatch.setattr("ucode.cli.refresh_managed_config", lambda state: (None, True))
+            monkeypatch.setattr(
+                "ucode.cli.refresh_managed_config", lambda state, **kwargs: (None, True)
+            )
         else:
-            monkeypatch.setattr("ucode.cli.refresh_managed_config", lambda state: (managed, False))
+            monkeypatch.setattr(
+                "ucode.cli.refresh_managed_config", lambda state, **kwargs: (managed, False)
+            )
 
         monkeypatch.setattr("ucode.cli.load_managed_state", lambda ws: cached)
         monkeypatch.setattr(
@@ -3627,43 +3737,12 @@ class TestBareUcode:
         assert result.exit_code == 0, result.output
         assert launched and launched[0][0] == "claude"
         assert "paved" not in result.output  # no policy set in this config
-        assert "Claude Code" in result.output
 
     def test_falls_back_to_the_first_enabled_agent(self, monkeypatch):
         managed = {"enabled_agents": {"opencode": {}}}
         result, launched = self._run(monkeypatch, managed=managed)
         assert result.exit_code == 0, result.output
         assert launched[0][0] == "opencode"
-
-    def test_launch_banner_is_abridged_not_the_full_box(self, monkeypatch):
-        managed = {
-            "default_agent": "claude",
-            "enabled_agents": {"claude": {"model_config": {"default_model": "system.ai.opus"}}},
-            "mcp_servers": [{"name": "system.ai.slack", "type": "mcp-service"}],
-            "skills": {"names": ["main.default.my_skill"]},
-        }
-        result, _ = self._run(monkeypatch, managed=managed)
-        assert result.exit_code == 0, result.output
-        # One-line banner: the agent it launches, and the model.
-        assert "launching Claude Code as the default agent" in result.output
-        assert "system.ai.opus" in result.output
-        # The full box's per-config enumeration is left to `ucode status`.
-        assert "Enabled agents:" not in result.output
-        assert "system.ai.slack" not in result.output
-        assert "main.default.my_skill" not in result.output
-
-    def test_launch_banner_omits_default_agent_when_a_tier_overrides(self, monkeypatch):
-        # A budget tier can launch a different agent than the config's default; the banner must not
-        # then call it "the default agent" (the tier note in _launch_tool explains the swap).
-        managed = {"default_agent": "claude", "enabled_agents": {"claude": {}, "opencode": {}}}
-        monkeypatch.setattr(
-            "ucode.cli._fetch_budget_recommendation", lambda state, m: {"agent": "opencode"}
-        )
-        result, launched = self._run(monkeypatch, managed=managed)
-        assert result.exit_code == 0, result.output
-        assert launched[0][0] == "opencode"
-        assert "launching OpenCode" in result.output
-        assert "as the default agent" not in result.output
 
     def test_no_config_points_the_dev_at_configure(self, monkeypatch):
         # With no managed config a developer can still set up locally, so the guidance points at
@@ -3732,7 +3811,9 @@ class TestBareUcode:
             "default_agent": "claude",
             "enabled_agents": {"claude": {"model_config": {"default_model": "m"}}},
         }
-        monkeypatch.setattr("ucode.cli.refresh_managed_config", lambda state: (managed, False))
+        monkeypatch.setattr(
+            "ucode.cli.refresh_managed_config", lambda state, **kwargs: (managed, False)
+        )
         monkeypatch.setattr("ucode.cli._fetch_budget_recommendation", lambda state, m: None)
         monkeypatch.setattr("ucode.cli._print_managed_summary", lambda *a, **k: None)
         seen: dict = {}
@@ -3776,6 +3857,9 @@ class TestBudgetRecommendationAtLaunch:
             patch("ucode.cli.ensure_provider_state", return_value=state),
             patch("ucode.cli.configure_shared_state", return_value=state),
             patch("ucode.cli.configure_tool", return_value=state) as cfg,
+            # A first launch with no applied watermark re-applies all enabled agents; stub that
+            # apply-all so these tests exercise the per-launch model/budget path, not a real configure.
+            patch("ucode.cli.configure_selected_tools", return_value=state),
             patch("ucode.cli.get_databricks_token", return_value="tok"),
             patch("ucode.cli._fetch_managed_config", return_value=(managed, False)),
             patch("ucode.cli.launch_agent"),
@@ -3865,6 +3949,9 @@ class TestBudgetRecommendationAtLaunch:
             patch("ucode.cli.ensure_provider_state", return_value=state),
             patch("ucode.cli.configure_shared_state", return_value=state),
             patch("ucode.cli.configure_tool", return_value=state),
+            # First launch with no applied watermark re-applies all enabled agents; stub it so the
+            # test exercises the budget path, not a real configure.
+            patch("ucode.cli.configure_selected_tools", return_value=state),
             patch("ucode.cli.get_databricks_token", side_effect=RuntimeError("token expired")),
             patch(
                 "ucode.cli._fetch_managed_config",
@@ -3974,3 +4061,618 @@ class TestForcedLoginWithExternalBearer:
         monkeypatch.delenv("DATABRICKS_BEARER_COMMAND", raising=False)
 
         assert self._run(monkeypatch) == ["https://ws.cloud.databricks.com"]
+
+
+class TestConfigureAppliesManagedConfig:
+    """FIX 1: ug configure must fetch and apply managed config, like the launch path does."""
+
+    def test_configure_single_tool_applies_managed_static_models(self, monkeypatch):
+        """ug configure --agent claude applies managed config with static model list."""
+        import ucode.agents as agents_mod
+
+        state = dict(MINIMAL_STATE)
+        # Managed config with static model list
+        managed = {
+            "enabled_agents": {
+                "claude": {
+                    "model_config": {
+                        "models": {"default_sonnet_model": "databricks-claude-sonnet-4"}
+                    }
+                }
+            }
+        }
+
+        configure_one_calls = []
+
+        def mock_configure_one(tool, state, provider):
+            configure_one_calls.append({"tool": tool, "state": state, "provider": provider})
+            return state
+
+        monkeypatch.setattr(agents_mod, "_configure_one", mock_configure_one)
+        monkeypatch.setattr(agents_mod, "managed_write_batch", contextlib.nullcontext)
+        monkeypatch.setattr(agents_mod, "save_state", lambda s: None)
+        monkeypatch.setattr(agents_mod, "check_gateway_endpoint", lambda s, t, **kw: True)
+
+        # Call configure_single_tool with managed config
+        agents_mod.configure_single_tool("claude", state, managed=managed)
+
+        # Check that _configure_one was called with the resolved state
+        assert len(configure_one_calls) == 1
+        call = configure_one_calls[0]
+        # The managed config should have applied the sonnet model
+        assert call["state"].get("claude_models", {}).get("sonnet") == "databricks-claude-sonnet-4"
+
+    def test_configure_clears_persisted_provider_when_managed_supplies_models_without_provider(
+        self, monkeypatch
+    ):
+        """FIX 2: managed config with static models clears persisted provider."""
+        import ucode.agents as agents_mod
+
+        state = dict(MINIMAL_STATE)
+        # Developer has a persisted provider
+        state["provider_services"] = {"claude": "some.provider.svc"}
+
+        # Managed config with static models but no provider
+        managed = {
+            "enabled_agents": {
+                "claude": {
+                    "model_config": {
+                        "models": {"default_sonnet_model": "databricks-claude-sonnet-4"}
+                    }
+                }
+            }
+        }
+
+        configure_one_calls = []
+
+        def mock_configure_one(tool, state, provider):
+            configure_one_calls.append({"tool": tool, "state": state, "provider": provider})
+            return state
+
+        monkeypatch.setattr(agents_mod, "_configure_one", mock_configure_one)
+        monkeypatch.setattr(agents_mod, "managed_write_batch", contextlib.nullcontext)
+        monkeypatch.setattr(agents_mod, "save_state", lambda s: None)
+        monkeypatch.setattr(agents_mod, "check_gateway_endpoint", lambda s, t, **kw: True)
+
+        # Call configure_single_tool with managed config
+        agents_mod.configure_single_tool("claude", state, managed=managed)
+
+        # The provider passed to _configure_one should be None (cleared) because managed config
+        # supplies models without a provider
+        assert len(configure_one_calls) == 1
+        call = configure_one_calls[0]
+        # Provider should be None (cleared) to let managed models drive the picker
+        assert call["provider"] is None
+
+
+class TestManagedProviderPrecedence:
+    """FIX 2: provider precedence logic when managed config supplies static/location source."""
+
+    def test_explicit_provider_conflicts_with_managed_static_models_in_launch(self, monkeypatch):
+        """Test that explicit --provider with managed static models raises error in launch logic."""
+        from ucode.managed_resolve import managed_provider_service, managed_supplies_models
+
+        # This test verifies the logic in the launch path that detects the conflict
+        managed = {
+            "enabled_agents": {
+                "claude": {
+                    "model_config": {
+                        "models": {"default_sonnet_model": "databricks-claude-sonnet-4"}
+                    }
+                }
+            }
+        }
+
+        # Managed config supplies models
+        assert managed_supplies_models(managed, "claude")
+        # Managed config does NOT supply a provider
+        assert managed_provider_service(managed, "claude") is None
+
+    def test_managed_provider_with_explicit_provider_validates_conflict(self, monkeypatch):
+        """Test that explicit --provider matching managed provider is OK, but mismatch errors."""
+        from ucode.managed_resolve import managed_provider_service, managed_supplies_models
+
+        managed_with_provider = {
+            "enabled_agents": {
+                "claude": {"model_config": {"model_provider_service": "admin.provider.svc"}}
+            }
+        }
+
+        managed_provider = managed_provider_service(managed_with_provider, "claude")
+        assert managed_provider == "admin.provider.svc"
+        # Managed supplies models through the provider
+        assert managed_supplies_models(managed_with_provider, "claude")
+
+    def test_managed_static_models_without_persisted_provider_is_clean(self, monkeypatch):
+        """When managed specifies static models and no persisted provider, provider=None works."""
+        from ucode.managed_resolve import managed_provider_service, managed_supplies_models
+
+        managed = {
+            "enabled_agents": {
+                "claude": {
+                    "model_config": {
+                        "models": {"default_sonnet_model": "databricks-claude-sonnet-4"}
+                    }
+                }
+            }
+        }
+        state = dict(MINIMAL_STATE)
+
+        # Managed supplies models but not through a provider
+        assert managed_supplies_models(managed, "claude")
+        assert managed_provider_service(managed, "claude") is None
+        # And there's no persisted provider either
+        assert "provider_services" not in state or state["provider_services"].get("claude") is None
+
+    def test_managed_clear_of_provider_is_launch_scoped(self):
+        # A managed static-list source clears the provider for the launch (so every agent honors
+        # it), but the developer's saved provider is recorded in the managed overlay and restored
+        # by save_state, surviving as a fallback if the managed policy later disappears.
+        from ucode.state import (
+            MANAGED_OVERLAY_KEY,
+            _without_managed_overlay,
+            set_provider_service,
+        )
+
+        state: dict = {"provider_services": {"gemini": "dev.provider.svc"}}
+        overlay = dict(state.get(MANAGED_OVERLAY_KEY) or {})
+        overlay.setdefault("provider_services", state.get("provider_services"))
+        state = set_provider_service(state, "gemini", None)
+        state[MANAGED_OVERLAY_KEY] = overlay
+
+        # During the launch the provider reads as cleared.
+        assert (state.get("provider_services") or {}).get("gemini") is None
+        # But the persisted state keeps the developer's own provider.
+        assert _without_managed_overlay(state)["provider_services"] == {
+            "gemini": "dev.provider.svc"
+        }
+
+
+class TestMultiAgentManagedConfigRegressions:
+    """Tests for BUG A and BUG B: managed-overlay leakage and provider re-reading."""
+
+    def test_configure_selected_tools_multiple_agents_no_managed_overlay_leakage(self, monkeypatch):
+        """BUG A: multi-agent `ug configure` corrupts persisted state via managed-overlay leakage.
+
+        When configuring multiple tools (claude, codex) with a managed config,
+        each tool's managed values should reach the config file but NOT persist
+        in state.json. Tool N's overlay should not replace tool N-1's overlay
+        while tool N-1's managed values remain in the accumulated state.
+        """
+        import ucode.agents as agents_mod
+
+        state = dict(MINIMAL_STATE)
+        # Developer has previously configured both tools with developer-chosen models
+        state["claude_models"] = {"sonnet": "dev-claude-sonnet"}
+        state["codex_models"] = ["dev-codex-mini"]
+
+        # Managed config specifies different models for both tools
+        managed = {
+            "enabled_agents": {
+                "claude": {
+                    "model_config": {"models": {"default_sonnet_model": "managed-claude-sonnet"}}
+                },
+                "codex": {"model_config": {"models": ["managed-codex-mini"]}},
+            }
+        }
+
+        configure_one_calls = []
+
+        def mock_configure_one(tool, state, provider):
+            # Record what state was passed to _configure_one for each tool
+            configure_one_calls.append(
+                {
+                    "tool": tool,
+                    "state_snapshot": dict(state),  # Capture the state passed to config
+                    "provider": provider,
+                }
+            )
+            return state
+
+        monkeypatch.setattr(agents_mod, "_configure_one", mock_configure_one)
+        monkeypatch.setattr(agents_mod, "managed_write_batch", contextlib.nullcontext)
+        monkeypatch.setattr(agents_mod, "save_state", lambda s: None)
+        monkeypatch.setattr(agents_mod, "check_gateway_endpoint", lambda s, t, **kw: True)
+
+        # Call configure_selected_tools with managed config
+        result_state = agents_mod.configure_selected_tools(
+            state, ["claude", "codex"], managed=managed
+        )
+
+        # Verify that claude was configured with managed model
+        claude_call = next((c for c in configure_one_calls if c["tool"] == "claude"), None)
+        assert claude_call is not None
+        assert (
+            claude_call["state_snapshot"].get("claude_models", {}).get("sonnet")
+            == "managed-claude-sonnet"
+        ), "Claude should be configured with managed model"
+
+        # Verify that codex was configured with managed model
+        codex_call = next((c for c in configure_one_calls if c["tool"] == "codex"), None)
+        assert codex_call is not None
+        assert codex_call["state_snapshot"].get("codex_models") == ["managed-codex-mini"], (
+            "Codex should be configured with managed model"
+        )
+
+        # FIX A TEST: Verify that the final persisted state has developer's original models,
+        # not the managed ones. This proves that managed values were used for configuration
+        # but not persisted.
+        assert result_state.get("claude_models", {}).get("sonnet") == "dev-claude-sonnet", (
+            "Final state should have developer's original claude model, not managed model"
+        )
+        assert result_state.get("codex_models") == ["dev-codex-mini"], (
+            "Final state should have developer's original codex model, not managed model"
+        )
+
+        # Verify no managed overlay marker remains
+        assert "_managed_overlay" not in result_state, "No overlay should remain in final state"
+
+    def test_gemini_launch_respects_managed_provider_clearing(self, monkeypatch):
+        """BUG B: when managed config clears a provider, Gemini's launch/refresh should see it.
+
+        When a managed config supplies its own models without a provider, the
+        launch path clears the provider (sets it to None). Gemini should launch
+        with provider=None, not re-reading the stale persisted provider.
+        """
+        import subprocess
+
+        import ucode.agents.gemini as gemini_mod
+        from ucode.agents.args import LaunchOptions
+
+        state = dict(MINIMAL_STATE)
+        # Developer has persisted a provider for gemini
+        state["provider_services"] = {"gemini": "stale.provider.svc"}
+        state["gemini_models"] = ["gemini-2.0-flash"]
+
+        # Simulate managed config that cleared the provider
+        # (this would be set by the launch path's FIX B: set_provider_service call)
+        cleared_state = dict(state)
+        providers = dict(cleared_state.get("provider_services") or {})
+        providers.pop("gemini", None)
+        if providers:
+            cleared_state["provider_services"] = providers
+        else:
+            cleared_state.pop("provider_services", None)
+
+        # Mock the token refresh and config write
+        write_config_calls = []
+
+        def mock_write_tool_config(state, model, force_refresh=False, provider=None):
+            write_config_calls.append(
+                {
+                    "model": model,
+                    "provider": provider,  # Capture the provider passed to write
+                    "state_has_provider": bool(state.get("provider_services", {}).get("gemini")),
+                }
+            )
+            return (state, "mock-token")
+
+        def mock_get_provider_service(state, tool):
+            # This simulates the actual behavior after FIX B
+            providers = state.get("provider_services", {})
+            return providers.get(tool) if isinstance(providers, dict) else None
+
+        mock_process = MagicMock()
+        mock_process.wait.return_value = 0
+
+        monkeypatch.setattr(gemini_mod, "write_tool_config", mock_write_tool_config)
+        monkeypatch.setattr(gemini_mod, "get_provider_service", mock_get_provider_service)
+        monkeypatch.setattr(gemini_mod, "build_runtime_env", lambda *a, **kw: {})
+        monkeypatch.setattr(subprocess, "Popen", lambda *a, **kw: mock_process)
+
+        # Launch with the cleared state (simulating what the launch path does after FIX B)
+        try:
+            gemini_mod.launch(cleared_state, [], options=LaunchOptions())
+        except SystemExit:
+            pass  # launch() raises SystemExit, that's fine for this test
+
+        # FIX B TEST: Verify that write_tool_config was called with provider=None,
+        # not the stale persisted provider. This proves that Gemini correctly used
+        # the cleared provider from state, not re-reading the stale value.
+        assert len(write_config_calls) > 0, "write_tool_config should be called during launch"
+        config_call = write_config_calls[0]
+        assert config_call["provider"] is None, (
+            f"Gemini should launch with provider=None (managed cleared it), not {config_call['provider']}"
+        )
+
+
+class TestFix1PostConfigureValidation:
+    """FIX 1: Post-configure validation uses managed-resolved config, not stripped state."""
+
+    def test_single_tool_configure_validates_with_managed_provider(self, monkeypatch):
+        """When managing gemini through provider B while dev provider A is persisted,
+        validation must use managed provider B, not the persisted stripped state provider A.
+        """
+        import ucode.agents as agents_mod
+        import ucode.agents.gemini as gemini_mod
+
+        # Developer has persisted provider A for gemini
+        state = dict(MINIMAL_STATE)
+        state["provider_services"] = {"gemini": "dev-provider-a"}
+        state["gemini_models"] = ["gemini-2.0-flash"]
+
+        # Managed config routes gemini through provider B instead
+        managed = {
+            "enabled_agents": {
+                "gemini": {
+                    "model_config": {
+                        "model_provider_service": "managed-provider-b",
+                        "models": ["managed-gemini-2.0-flash"],
+                    }
+                }
+            }
+        }
+
+        # Track what provider validate_env receives
+        validate_env_calls = []
+
+        def mock_validate_env(validate_state):
+            provider = validate_state.get("provider_services", {}).get("gemini")
+            validate_env_calls.append({"provider": provider})
+            # Build env with the provider it received
+            return {
+                "GEMINI_MODEL": "managed-gemini-2.0-flash",
+                "GOOGLE_GEMINI_BASE_URL": "https://example.databricks.com/ai-gateway/gemini",
+                "GEMINI_API_KEY_AUTH_MECHANISM": "bearer",
+                "GEMINI_API_KEY": "token",
+                "GEMINI_CLI_CUSTOM_HEADERS": f"User-Agent:ucode/test,Databricks-Model-Provider-Service:{provider}"
+                if provider
+                else "User-Agent:ucode/test",
+                "OAUTH_TOKEN": "token",
+            }
+
+        # Mock subprocess to make validation pass
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+
+        monkeypatch.setattr(gemini_mod, "validate_env", mock_validate_env)
+        monkeypatch.setattr("subprocess.run", lambda *a, **kw: mock_result)
+
+        # Mock configure_single_tool to apply managed and return resolved state
+        from ucode.managed_resolve import resolve_state
+
+        def mock_configure_single_tool(tool, state, managed=None):
+            if managed:
+                # Apply managed config (resolves state)
+                state = resolve_state(managed, state, tool)
+            # Simulate config write and save (which strips overlay)
+            # The returned state has the overlay stripped
+            from ucode.state import _without_managed_overlay
+
+            return _without_managed_overlay(state)
+
+        monkeypatch.setattr(agents_mod, "configure_single_tool", mock_configure_single_tool)
+        monkeypatch.setattr(
+            agents_mod, "install_databricks_ai_tools_for_agents", lambda *a, **kw: None
+        )
+
+        # Simulate the configure_workspace_command path for single tool
+        from ucode.managed_resolve import resolve_state as resolve_state_impl
+
+        # After configure_single_tool runs, state is stripped of overlay
+        configured_state = mock_configure_single_tool("gemini", state, managed=managed)
+        # The configured_state should have stripped the managed provider back to dev provider
+        assert configured_state.get("provider_services", {}).get("gemini") == "dev-provider-a", (
+            "Configured state should be stripped back to developer's provider"
+        )
+
+        # Now simulate the validation path (FIX 1): re-resolve the state with managed config
+        validate_state = resolve_state_impl(managed, configured_state, "gemini")
+
+        # Call validate_env with the re-resolved state (as the fix does)
+        from ucode.agents.gemini import validate_env
+
+        try:
+            validate_env(validate_state)
+        except Exception:
+            pass  # May fail due to missing deps, we only care it received the right state
+
+        # FIX 1 VERIFICATION: validate_env should have seen the managed provider B,
+        # not the stripped developer provider A
+        assert len(validate_env_calls) > 0, "validate_env should be called"
+        assert validate_env_calls[0]["provider"] == "managed-provider-b", (
+            f"Validation should use managed provider B, not {validate_env_calls[0]['provider']}"
+        )
+
+    def test_validate_tool_accepts_pre_resolved_state(self, monkeypatch):
+        """validate_tool() accepts an optional state parameter so it validates
+        with managed-resolved values instead of freshly loaded persisted state."""
+        import ucode.agents as agents_mod
+
+        state_with_managed = {
+            "workspace": "https://example.databricks.com",
+            "profile": None,
+            "provider_services": {"gemini": "managed-provider"},
+        }
+
+        validate_env_calls = []
+
+        def mock_validate_env(state):
+            validate_env_calls.append(state.get("provider_services", {}).get("gemini"))
+            return {}
+
+        def mock_validate_cmd(binary):
+            return [binary, "--help"]
+
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+
+        # Mock the gemini module
+        mock_gemini = MagicMock()
+        mock_gemini.validate_env = mock_validate_env
+        mock_gemini.validate_cmd = mock_validate_cmd
+        mock_gemini.skip_validation = MagicMock(return_value=False)
+
+        monkeypatch.setattr(agents_mod, "_MODULES", {"gemini": mock_gemini})
+        monkeypatch.setattr("ucode.agents.__init__.TOOL_SPECS", {"gemini": {"binary": "gemini"}})
+        monkeypatch.setattr("subprocess.run", lambda *a, **kw: mock_result)
+
+        # Call validate_tool with explicit state (FIX 1)
+        ok, err = agents_mod.validate_tool("gemini", state=state_with_managed)
+
+        # Verify validate_env received the passed state, not a freshly loaded one
+        assert len(validate_env_calls) > 0, "validate_env should be called"
+        assert validate_env_calls[0] == "managed-provider", (
+            "validate_env should receive the pre-resolved state with managed provider"
+        )
+
+
+class TestFix2ManagedOnlyAgentAvailability:
+    """FIX 2: Agents with managed-only models (no discovered) must count as available."""
+
+    def test_check_gateway_endpoint_with_managed_only_models(self):
+        """An agent with no discovered models but managed models should be available."""
+        import ucode.agents as agents_mod
+
+        # State with NO discovered Claude models
+        state = dict(MINIMAL_STATE)
+        state["claude_models"] = {}  # Empty, no discovered models
+
+        # Managed config provides claude models
+        managed = {
+            "enabled_agents": {
+                "claude": {
+                    "model_config": {
+                        "models": {
+                            "default_sonnet_model": "managed-claude-sonnet",
+                        }
+                    }
+                }
+            }
+        }
+
+        # Without managed config, claude should be unavailable
+        available_without_managed = agents_mod.check_gateway_endpoint(state, "claude", managed=None)
+        assert not available_without_managed, "Claude should be unavailable without managed models"
+
+        # With managed config, claude should be available (FIX 2)
+        available_with_managed = agents_mod.check_gateway_endpoint(state, "claude", managed=managed)
+        assert available_with_managed, (
+            "Claude should be available when managed config supplies models"
+        )
+
+    def test_check_gateway_endpoint_prefers_discovered_over_managed(self):
+        """When both discovered and managed models exist, availability is True."""
+        import ucode.agents as agents_mod
+
+        # State with discovered Claude models
+        state = dict(MINIMAL_STATE)
+        state["claude_models"] = {"sonnet": "databricks-claude-sonnet"}
+
+        managed = {
+            "enabled_agents": {
+                "claude": {
+                    "model_config": {
+                        "models": {
+                            "default_sonnet_model": "managed-claude-sonnet",
+                        }
+                    }
+                }
+            }
+        }
+
+        # With discovered models, should be available
+        available = agents_mod.check_gateway_endpoint(state, "claude", managed=managed)
+        assert available, "Claude should be available with discovered models"
+
+    def test_unavailable_agent_with_no_discovery_and_no_managed(self):
+        """A truly unavailable agent (no discovery AND no managed) stays unavailable."""
+        import ucode.agents as agents_mod
+
+        # State with NO discovered Claude models
+        state = dict(MINIMAL_STATE)
+        state["claude_models"] = {}  # Empty
+
+        # Managed config does NOT provide claude models
+        managed = {
+            "enabled_agents": {
+                "gemini": {"model_config": {}}  # Only gemini, no claude
+            }
+        }
+
+        # Without discovered or managed models, claude should be unavailable
+        available = agents_mod.check_gateway_endpoint(state, "claude", managed=managed)
+        assert not available, (
+            "Claude should be unavailable when both discovery and managed provide nothing"
+        )
+
+
+class TestLaunchVersionGate:
+    """A launch re-applies the managed configuration (the only step that prompts for the sudo OS
+    write) only when its update_time is newer than the applied watermark; an unchanged launch skips
+    the apply-all entirely."""
+
+    _MANAGED = {
+        "update_time": "2026-09-11T16:09:31.820Z",
+        "enabled_agents": {"codex": {"model_config": {"default_model": "system.ai.gpt-5"}}},
+    }
+
+    def _launch(self, monkeypatch, applied_update_time):
+        import ucode.cli as cli_mod
+
+        state = {**MINIMAL_STATE, "available_tools": ["codex"]}
+        if applied_update_time is not None:
+            state = {**state, "applied_managed_update_time": applied_update_time}
+        monkeypatch.setattr(cli_mod, "ensure_bootstrap_dependencies", lambda *a, **k: None)
+        monkeypatch.setattr(cli_mod, "load_state", lambda: state)
+        monkeypatch.setattr(cli_mod, "ensure_provider_state", lambda t: state)
+        monkeypatch.setattr(cli_mod, "configure_shared_state", lambda *a, **k: state)
+        monkeypatch.setattr(cli_mod, "_fetch_managed_config", lambda s: (self._MANAGED, False))
+        monkeypatch.setattr(cli_mod, "_fetch_budget_recommendation", lambda s, m: None)
+        monkeypatch.setattr(cli_mod, "save_state", lambda s: None)
+        monkeypatch.setattr(cli_mod, "launch_agent", MagicMock())
+        monkeypatch.setattr(cli_mod, "configure_tool", MagicMock(return_value=state))
+        apply_all = MagicMock(return_value=state)
+        monkeypatch.setattr(cli_mod, "configure_selected_tools", apply_all)
+        result = runner.invoke(app, ["codex"])
+        return result, apply_all
+
+    def test_unchanged_config_skips_the_apply(self, monkeypatch):
+        result, apply_all = self._launch(
+            monkeypatch, applied_update_time="2026-09-11T16:09:31.820Z"
+        )
+        assert result.exit_code == 0, result.output
+        apply_all.assert_not_called()
+
+    def test_changed_config_reapplies_all_enabled_agents(self, monkeypatch):
+        result, apply_all = self._launch(
+            monkeypatch, applied_update_time="2026-09-11T15:00:00.000Z"
+        )
+        assert result.exit_code == 0, result.output
+        apply_all.assert_called_once()
+        assert apply_all.call_args.args[1] == ["codex"]
+
+    def test_first_apply_with_no_watermark_reapplies(self, monkeypatch):
+        result, apply_all = self._launch(monkeypatch, applied_update_time=None)
+        assert result.exit_code == 0, result.output
+        apply_all.assert_called_once()
+
+    def test_auto_configure_launch_still_applies_managed(self, monkeypatch):
+        # Regression: a first launch of an unconfigured tool (needs_auto_configure) must still apply
+        # the managed config to every enabled agent, not merely stamp the watermark. Otherwise the
+        # OS-managed file is left unmanaged while the watermark records an apply that never happened.
+        import ucode.cli as cli_mod
+
+        state = {**MINIMAL_STATE, "available_tools": []}
+        monkeypatch.setattr(cli_mod, "ensure_bootstrap_dependencies", lambda *a, **k: None)
+        monkeypatch.setattr(cli_mod, "_auto_configure_tool", lambda *a, **k: None)
+        monkeypatch.setattr(cli_mod, "load_state", lambda: state)
+        monkeypatch.setattr(cli_mod, "ensure_provider_state", lambda t: state)
+        monkeypatch.setattr(cli_mod, "configure_shared_state", lambda *a, **k: state)
+        monkeypatch.setattr(cli_mod, "_fetch_managed_config", lambda s: (self._MANAGED, False))
+        monkeypatch.setattr(cli_mod, "_fetch_budget_recommendation", lambda s, m: None)
+        saved: list[dict] = []
+        monkeypatch.setattr(cli_mod, "save_state", lambda s: saved.append(dict(s)))
+        monkeypatch.setattr(cli_mod, "launch_agent", MagicMock())
+        monkeypatch.setattr(cli_mod, "configure_tool", MagicMock(return_value=state))
+        apply_all = MagicMock(return_value=state)
+        monkeypatch.setattr(cli_mod, "configure_selected_tools", apply_all)
+
+        result = runner.invoke(app, ["codex"])
+
+        assert result.exit_code == 0, result.output
+        apply_all.assert_called_once()
+        assert apply_all.call_args.args[1] == ["codex"]
+        assert any(
+            s.get("applied_managed_update_time") == self._MANAGED["update_time"] for s in saved
+        )

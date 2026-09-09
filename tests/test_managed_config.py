@@ -13,16 +13,19 @@ import ucode.databricks as db_mod
 import ucode.managed_config as mc_mod
 from ucode.managed_config import (
     get_managed_config,
+    load_managed_configuration,
     load_managed_state,
+    managed_config_is_newer,
     managed_state_workspace,
+    managed_update_time,
     normalize_managed_config,
     refresh_managed_config,
     save_managed_state,
 )
 from ucode.managed_setup import serialize_managed_config
 
-# A representative raw CodingAgentConfig proto-JSON manifest (mirrors what the API returns).
-RAW_MANIFEST = {
+# A representative raw CodingAgentConfig proto-JSON manifest using deprecated model_config oneof.
+RAW_MANIFEST_DEPRECATED = {
     "name": "coding-agent-configs/abc-123",
     "workspace_id": 1653573648247579,
     "default_agent": "CODING_AGENT_CLAUDE_CODE",
@@ -81,43 +84,43 @@ RAW_MANIFEST = {
 }
 
 
-class TestNormalize:
+class TestNormalizeDeprecated:
     def test_full_manifest_maps_enums_to_tool_names(self):
-        cfg = normalize_managed_config(RAW_MANIFEST)
+        cfg = normalize_managed_config(RAW_MANIFEST_DEPRECATED)
         assert cfg["name"] == "coding-agent-configs/abc-123"
         assert cfg["default_agent"] == "claude"
         assert set(cfg["enabled_agents"]) == {"claude", "opencode"}
 
     def test_claude_agent_config_fields(self):
-        claude = normalize_managed_config(RAW_MANIFEST)["enabled_agents"]["claude"]
+        claude = normalize_managed_config(RAW_MANIFEST_DEPRECATED)["enabled_agents"]["claude"]
         assert claude["custom_headers"] == {"x-databricks-workspace": "eng-ml-inference"}
         assert claude["tracing_table"] == "main.default.ucode_traces"
         assert claude["model_config"]["default_model"] == "system.ai.claude-opus-4-8"
         assert claude["model_config"]["models"]["default_opus_model"] == "system.ai.claude-opus-4-8"
 
     def test_opencode_model_list_is_flat(self):
-        opencode = normalize_managed_config(RAW_MANIFEST)["enabled_agents"]["opencode"]
+        opencode = normalize_managed_config(RAW_MANIFEST_DEPRECATED)["enabled_agents"]["opencode"]
         assert opencode["model_config"]["models"] == [
             "system.ai.claude-opus-4-8",
             "system.ai.kimi-k2-7-code",
         ]
 
     def test_mcp_servers_map_type_enums_to_tags(self):
-        mcp = normalize_managed_config(RAW_MANIFEST)["mcp_servers"]
+        mcp = normalize_managed_config(RAW_MANIFEST_DEPRECATED)["mcp_servers"]
         assert mcp == [
             {"name": "system.ai.github", "type": "mcp-service"},
             {"name": "some-space-id", "type": "genie-space"},
         ]
 
     def test_skills_and_tracing_and_budget(self):
-        cfg = normalize_managed_config(RAW_MANIFEST)
+        cfg = normalize_managed_config(RAW_MANIFEST_DEPRECATED)
         assert cfg["skills"] == {"names": ["system.ai.pdf-extraction"]}
         assert cfg["tracing_table"] == "main.default.ucode_traces"
         assert cfg["budget_policy"]["budget_id"] == "c6563b45-df9a-4b19-afb2-d42dc2b52576"
         assert cfg["budget_policy"]["tiers"][1]["default_agent"] == "opencode"
 
     def test_reads_top_level_display_name(self):
-        cfg = normalize_managed_config({**RAW_MANIFEST, "display_name": "paved-path"})
+        cfg = normalize_managed_config({**RAW_MANIFEST_DEPRECATED, "display_name": "paved-path"})
         assert cfg["display_name"] == "paved-path"
 
     def test_display_name_survives_the_serialize_round_trip(self):
@@ -138,14 +141,149 @@ class TestNormalize:
         assert normalize_managed_config({}) == {}
 
 
+# A CodingAgentConfig in the current agent-config wire shape as emitted by ai-gateway-api.
+# The wire format uses: default_models map (not separate default_model + default_alias_models),
+# model field names (model_services, unity_catalog_location), tier field names
+# (recommended_agent, recommended_model), and mcp_servers/skills as parallel arrays.
+RAW_MANIFEST = {
+    "spec_version": 1,
+    "retrieved_time": "2026-09-09T22:00:00Z",
+    "default_agent": "CODING_AGENT_CLAUDE_CODE",
+    "enabled_agents": [
+        {
+            "agent": "CODING_AGENT_CLAUDE_CODE",
+            "config": {
+                "models": {
+                    "model_services": [
+                        "system.ai.claude-opus-4-8",
+                        "system.ai.claude-sonnet-4-6",
+                        "system.ai.claude-haiku-4-5",
+                    ],
+                },
+                "default_models": {
+                    "default_model": "system.ai.claude-opus-4-8",
+                    "default_opus_model": "system.ai.claude-opus-4-8",
+                    "default_sonnet_model": "system.ai.claude-sonnet-4-6",
+                    "default_haiku_model": "system.ai.claude-haiku-4-5",
+                },
+                "smart_routing": {"enabled": True},
+                "http_headers": {"x-databricks-workspace": "eng-ml-inference"},
+            },
+        },
+        {
+            "agent": "CODING_AGENT_CODEX",
+            "config": {
+                "models": {"model_provider_service": "main.default.openai-mps"},
+                "default_models": {"default_model": "gpt-5.4"},
+            },
+        },
+    ],
+    "mcp_servers": {
+        "names": ["system.ai.github", "some-space-id"],
+        "tags": ["MCP_SERVER_TYPE_UC_SERVICE", "MCP_SERVER_TYPE_GENIE"],
+    },
+    "skills": {"names": ["system.ai.pdf-extraction"], "tags": []},
+    "tracing": {"enabled": True},
+    "spend_tiers": {
+        "budget_id": "c6563b45-df9a-4b19-afb2-d42dc2b52576",
+        "tiers": [
+            {
+                "spending_percentage": 0.9,
+                "recommended_agent": "CODING_AGENT_CODEX",
+                "recommended_model": "gpt-5.4",
+            },
+        ],
+    },
+}
+
+
+class TestNormalize:
+    def test_maps_agents_to_tool_names(self):
+        cfg = normalize_managed_config(RAW_MANIFEST)
+        assert cfg["default_agent"] == "claude"
+        assert set(cfg["enabled_agents"]) == {"claude", "codex"}
+
+    def test_claude_alias_models_map_to_family_slots(self):
+        claude = normalize_managed_config(RAW_MANIFEST)["enabled_agents"]["claude"]
+        assert claude["model_config"]["models"] == {
+            "default_opus_model": "system.ai.claude-opus-4-8",
+            "default_sonnet_model": "system.ai.claude-sonnet-4-6",
+            "default_haiku_model": "system.ai.claude-haiku-4-5",
+        }
+        assert claude["model_config"]["default_model"] == "system.ai.claude-opus-4-8"
+
+    def test_http_headers_map_to_custom_headers(self):
+        claude = normalize_managed_config(RAW_MANIFEST)["enabled_agents"]["claude"]
+        assert claude["custom_headers"] == {"x-databricks-workspace": "eng-ml-inference"}
+
+    def test_static_names_are_carried(self):
+        claude = normalize_managed_config(RAW_MANIFEST)["enabled_agents"]["claude"]
+        assert claude["model_config"]["names"] == [
+            "system.ai.claude-opus-4-8",
+            "system.ai.claude-sonnet-4-6",
+            "system.ai.claude-haiku-4-5",
+        ]
+
+    def test_unity_catalog_location_is_carried(self):
+        raw = {
+            "spec_version": 1,
+            "enabled_agents": [
+                {
+                    "agent": "CODING_AGENT_CLAUDE_CODE",
+                    "config": {"models": {"unity_catalog_location": "main.agents"}},
+                }
+            ],
+        }
+        claude = normalize_managed_config(raw)["enabled_agents"]["claude"]
+        assert claude["model_config"]["model_service_location"] == "main.agents"
+
+    def test_codex_provider_service(self):
+        codex = normalize_managed_config(RAW_MANIFEST)["enabled_agents"]["codex"]
+        assert codex["model_config"]["model_provider_service"] == "main.default.openai-mps"
+        assert codex["model_config"]["default_model"] == "gpt-5.4"
+
+    def test_budget_policy_carries_budget_id_and_tiers(self):
+        cfg = normalize_managed_config(RAW_MANIFEST)
+        assert cfg["budget_policy"]["budget_id"] == "c6563b45-df9a-4b19-afb2-d42dc2b52576"
+        assert cfg["budget_policy"]["tiers"][0]["default_agent"] == "codex"
+
+    def test_tracing_enabled_carries_no_table(self):
+        # Current config `tracing.enabled` has no table FQN, so nothing lands in the (table-shaped) internal key.
+        assert "tracing_table" not in normalize_managed_config(RAW_MANIFEST)
+
+    def test_spec_version_not_carried_into_internal_manifest(self):
+        # Kept out so the serialize/normalize round trip (which never sees spec_version) is unaffected.
+        assert "spec_version" not in normalize_managed_config(RAW_MANIFEST)
+
+    def test_legacy_agent_config_fields_still_read(self):
+        # An entry with only the deprecated custom_headers + model_config oneof still normalizes.
+        raw = {
+            "enabled_agents": [
+                {
+                    "agent": "CODING_AGENT_CLAUDE_CODE",
+                    "config": {
+                        "custom_headers": {"x-h": "v"},
+                        "model_config": {"claude": {"default_model": "system.ai.claude-opus-4-8"}},
+                    },
+                }
+            ]
+        }
+        claude = normalize_managed_config(raw)["enabled_agents"]["claude"]
+        assert claude["custom_headers"] == {"x-h": "v"}
+        assert claude["model_config"]["default_model"] == "system.ai.claude-opus-4-8"
+
+
 class TestGetManagedConfig:
-    def test_returns_normalized_first_config(self, monkeypatch):
+    def test_returns_the_first_config_raw(self, monkeypatch):
+        # get_managed_config returns the config verbatim now; normalization happens on read.
         monkeypatch.setattr(
-            mc_mod, "fetch_managed_coding_agent_configs", lambda ws, tok: ([RAW_MANIFEST], None)
+            mc_mod,
+            "fetch_managed_coding_agent_configs",
+            lambda ws, tok: ([RAW_MANIFEST_DEPRECATED], None),
         )
         cfg, reason = get_managed_config("https://ws", "tok")
         assert reason is None
-        assert cfg["default_agent"] == "claude"
+        assert cfg == RAW_MANIFEST_DEPRECATED
 
     def test_no_config_is_not_an_error(self, monkeypatch):
         monkeypatch.setattr(
@@ -197,19 +335,106 @@ class TestGetManagedConfig:
         assert cfg is None
         assert reason_out == reason
 
+    def test_returns_raw_wire_shape(self, monkeypatch):
+        # The raw wire config is returned unchanged (enabled_agents stays a list of {agent, config});
+        # normalize_managed_config's translation is covered by its own tests.
+        monkeypatch.setattr(
+            mc_mod, "fetch_managed_coding_agent_configs", lambda ws, tok: ([RAW_MANIFEST], None)
+        )
+        cfg, reason = get_managed_config("https://ws", "tok")
+        assert reason is None
+        assert cfg == RAW_MANIFEST
+
+    def test_spec_version_newer_than_supported_is_refused(self, monkeypatch):
+        raw = {**RAW_MANIFEST, "spec_version": mc_mod.MAX_SPEC_VERSION + 1}
+        monkeypatch.setattr(
+            mc_mod, "fetch_managed_coding_agent_configs", lambda ws, tok: ([raw], None)
+        )
+        cfg, reason = get_managed_config("https://ws", "tok")
+        # Refused (reason set) rather than misread, so the launch path keeps the last-known-good
+        # cache instead of applying a config it can't parse.
+        assert cfg is None
+        assert reason is not None and "spec_version" in reason
+
+    @pytest.mark.parametrize("bad_spec", ["2", 2.0, True])
+    def test_malformed_spec_version_is_refused(self, monkeypatch, bad_spec):
+        raw = {**RAW_MANIFEST, "spec_version": bad_spec}
+        monkeypatch.setattr(
+            mc_mod, "fetch_managed_coding_agent_configs", lambda ws, tok: ([raw], None)
+        )
+        cfg, reason = get_managed_config("https://ws", "tok")
+        assert cfg is None
+        assert reason is not None and "spec_version" in reason
+
+
+class TestManagedConfigStub:
+    def test_stub_short_circuits_the_http_read(self, tmp_path, monkeypatch):
+        stub = tmp_path / "managed.json"
+        stub.write_text(json.dumps(RAW_MANIFEST), encoding="utf-8")
+        monkeypatch.setenv("UCODE_MANAGED_CONFIG_STUB", str(stub))
+
+        def _fail(ws, tok):
+            raise AssertionError("stub set: the HTTP read must not run")
+
+        monkeypatch.setattr(mc_mod, "fetch_managed_coding_agent_configs", _fail)
+        cfg, reason = get_managed_config("https://ws", "tok")
+        assert reason is None
+        assert cfg == RAW_MANIFEST
+
+    def test_stub_applies_the_spec_version_gate(self, tmp_path, monkeypatch):
+        stub = tmp_path / "managed.json"
+        stub.write_text(
+            json.dumps({**RAW_MANIFEST, "spec_version": mc_mod.MAX_SPEC_VERSION + 1}),
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("UCODE_MANAGED_CONFIG_STUB", str(stub))
+        cfg, reason = get_managed_config("https://ws", "tok")
+        assert cfg is None
+        assert reason is not None and "spec_version" in reason
+
+    def test_unreadable_stub_falls_through_to_the_http_read(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("UCODE_MANAGED_CONFIG_STUB", str(tmp_path / "missing.json"))
+        monkeypatch.setattr(
+            mc_mod, "fetch_managed_coding_agent_configs", lambda ws, tok: ([RAW_MANIFEST], None)
+        )
+        cfg, reason = get_managed_config("https://ws", "tok")
+        assert reason is None
+        assert cfg == RAW_MANIFEST
+
+
+class TestUnsupportedSpecFallback:
+    def test_unsupported_spec_warns_on_cold_launch(self, monkeypatch):
+        # No cache + a too-new spec_version is proof a policy exists, so surface it rather than
+        # silently treating the workspace as having no managed config.
+        warnings: list = []
+        monkeypatch.setattr(mc_mod, "print_warning", lambda msg: warnings.append(msg))
+        monkeypatch.setattr(mc_mod, "load_managed_state", lambda ws: None)
+        reason = "This workspace's managed config needs a newer Unity Gateway (spec_version 2)."
+        assert mc_mod._persisted_fallback("https://ws", reason) is None
+        assert warnings and "spec_version" in warnings[0]
+
+    def test_transient_failure_stays_silent_on_cold_launch(self, monkeypatch):
+        warnings: list = []
+        monkeypatch.setattr(mc_mod, "print_warning", lambda msg: warnings.append(msg))
+        monkeypatch.setattr(mc_mod, "load_managed_state", lambda ws: None)
+        assert mc_mod._persisted_fallback("https://ws", "HTTP 503 Service Unavailable") is None
+        assert warnings == []
+
 
 class TestPersistence:
     @pytest.fixture(autouse=True)
     def _managed_path(self, tmp_path, monkeypatch):
-        path = tmp_path / ".ucode" / "managed-state.json"
-        monkeypatch.setattr(mc_mod, "MANAGED_STATE_PATH", path)
+        path = tmp_path / ".ucode" / "managed-configuration.json"
+        monkeypatch.setattr(mc_mod, "MANAGED_CONFIGURATION_PATH", path)
         return path
 
-    def test_save_then_load_round_trips(self, _managed_path):
-        cfg = normalize_managed_config(RAW_MANIFEST)
-        save_managed_state("https://ws.example.com", cfg)
-        loaded = load_managed_state("https://ws.example.com")
-        assert loaded == cfg
+    def test_save_stores_raw_and_load_normalizes(self, _managed_path):
+        # The file holds the raw config verbatim; load_managed_state normalizes on read.
+        save_managed_state("https://ws.example.com", RAW_MANIFEST)
+        assert load_managed_configuration("https://ws.example.com") == RAW_MANIFEST
+        assert load_managed_state("https://ws.example.com") == normalize_managed_config(
+            RAW_MANIFEST
+        )
 
     def test_saved_file_is_0600(self, _managed_path):
         save_managed_state("https://ws.example.com", {"default_agent": "claude"})
@@ -261,7 +486,7 @@ class TestPersistence:
     def test_loaded_config_serializes_to_a_json_encodable_payload(self, _managed_path):
         # `ucode publish` POSTs the serialized config, so a manifest that survives a disk round-trip
         # must still serialize to something json.dumps accepts with no custom encoder.
-        cfg = normalize_managed_config(RAW_MANIFEST)
+        cfg = normalize_managed_config(RAW_MANIFEST_DEPRECATED)
         save_managed_state("https://ws.example.com", cfg)
         loaded = load_managed_state("https://ws.example.com")
         assert loaded is not None
@@ -272,7 +497,7 @@ class TestFetchClient:
     """fetch_managed_coding_agent_configs lives in databricks.py; test its response parsing."""
 
     def test_extracts_configs_list(self, monkeypatch):
-        payload = {"coding_agent_configs": [RAW_MANIFEST]}
+        payload = {"coding_agent_configs": [RAW_MANIFEST_DEPRECATED]}
         monkeypatch.setattr(
             db_mod,
             "_http_get_json",
@@ -333,16 +558,19 @@ class TestRefreshManagedConfig:
     def _stub_token(self, monkeypatch):
         monkeypatch.setattr(mc_mod, "get_databricks_token", lambda ws, profile: "tok")
 
-    def test_persists_and_returns_the_manifest(self, monkeypatch):
+    def test_persists_raw_and_returns_the_normalized_manifest(self, monkeypatch):
         saved: list[tuple] = []
-        monkeypatch.setattr(mc_mod, "get_managed_config", lambda ws, tok: (MANAGED, None))
-        monkeypatch.setattr(mc_mod, "save_managed_state", lambda ws, cfg: saved.append((ws, cfg)))
-        assert refresh_managed_config(_state()) == (MANAGED, False)
-        assert saved == [(WORKSPACE, MANAGED)]
+        monkeypatch.setattr(mc_mod, "get_managed_config", lambda ws, tok: (RAW_MANIFEST, None))
+        monkeypatch.setattr(
+            mc_mod, "save_managed_state", lambda ws, cfg, **kwargs: saved.append((ws, cfg))
+        )
+        # The raw config is persisted verbatim; the caller gets the normalized manifest.
+        assert refresh_managed_config(_state()) == (normalize_managed_config(RAW_MANIFEST), False)
+        assert saved == [(WORKSPACE, RAW_MANIFEST)]
 
     def test_no_managed_config_returns_none(self, monkeypatch):
         monkeypatch.setattr(mc_mod, "get_managed_config", lambda ws, tok: (None, None))
-        monkeypatch.setattr(mc_mod, "save_managed_state", lambda ws, cfg: None)
+        monkeypatch.setattr(mc_mod, "save_managed_state", lambda ws, cfg, **kwargs: None)
         result, _ = refresh_managed_config(_state())
         assert result is None
 
@@ -412,7 +640,9 @@ class TestRefreshManagedConfig:
         monkeypatch.setattr(mc_mod, "load_managed_state", lambda ws: MANAGED)
         monkeypatch.setattr(mc_mod, "print_warning", lambda msg: warnings.append(msg))
         monkeypatch.setattr(
-            mc_mod, "save_managed_state", lambda ws, cfg: pytest.fail("must not clear the cache")
+            mc_mod,
+            "save_managed_state",
+            lambda ws, cfg, **kwargs: pytest.fail("must not clear the cache"),
         )
         assert refresh_managed_config(_state()) == (MANAGED, False)
         assert "not readable by you" in warnings[0]
@@ -421,7 +651,7 @@ class TestRefreshManagedConfig:
         # A successful read saying "no config" means the admin removed it — that's authoritative,
         # so a previously persisted file must not resurrect the old policy.
         monkeypatch.setattr(mc_mod, "get_managed_config", lambda ws, tok: (None, None))
-        monkeypatch.setattr(mc_mod, "save_managed_state", lambda ws, cfg: None)
+        monkeypatch.setattr(mc_mod, "save_managed_state", lambda ws, cfg, **kwargs: None)
         monkeypatch.setattr(
             mc_mod, "load_managed_state", lambda ws: pytest.fail("must not fall back")
         )
@@ -433,7 +663,9 @@ class TestRefreshManagedConfig:
         # failed read would put a dead policy back into force.
         saved: list[tuple] = []
         monkeypatch.setattr(mc_mod, "get_managed_config", lambda ws, tok: (None, None))
-        monkeypatch.setattr(mc_mod, "save_managed_state", lambda ws, cfg: saved.append((ws, cfg)))
+        monkeypatch.setattr(
+            mc_mod, "save_managed_state", lambda ws, cfg, **kwargs: saved.append((ws, cfg))
+        )
         monkeypatch.setattr(mc_mod, "load_managed_state", lambda ws: None)
         result, _ = refresh_managed_config(_state())
         assert result is None
@@ -477,7 +709,9 @@ class TestRefreshManagedConfig:
         reason = 'HTTP 400 Bad Request: {"error_code":"FEATURE_DISABLED"}'
         monkeypatch.setattr(mc_mod, "get_managed_config", lambda ws, tok: (None, reason))
         monkeypatch.setattr(mc_mod, "load_managed_state", lambda ws: MANAGED)
-        monkeypatch.setattr(mc_mod, "save_managed_state", lambda ws, cfg: saved.append((ws, cfg)))
+        monkeypatch.setattr(
+            mc_mod, "save_managed_state", lambda ws, cfg, **kwargs: saved.append((ws, cfg))
+        )
         monkeypatch.setattr(
             mc_mod,
             "print_warning",
@@ -500,11 +734,109 @@ class TestRefreshManagedConfig:
 
     def test_successful_no_config_clears_the_flag(self, monkeypatch):
         monkeypatch.setattr(mc_mod, "get_managed_config", lambda ws, tok: (None, None))
-        monkeypatch.setattr(mc_mod, "save_managed_state", lambda ws, cfg: None)
+        monkeypatch.setattr(mc_mod, "save_managed_state", lambda ws, cfg, **kwargs: None)
         state = _state()
         result, flag = refresh_managed_config(state)
         assert result is None
         assert flag is False
+
+
+class TestRefreshAlwaysFetches:
+    """The launch-time refresh always hits the control plane; the 30-minute TTL is gone.
+
+    Whether to re-apply the fetched config is decided separately by the caller via
+    ``managed_config_is_newer`` against the persisted applied watermark, so refresh never short-
+    circuits on a cached copy.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _stub_token(self, monkeypatch):
+        monkeypatch.setattr(mc_mod, "get_databricks_token", lambda ws, profile: "tok")
+
+    @staticmethod
+    def _counting_fetch(monkeypatch, result=(RAW_MANIFEST, None)):
+        calls = {"n": 0}
+
+        def fetch(ws, tok):
+            calls["n"] += 1
+            return result
+
+        monkeypatch.setattr(mc_mod, "get_managed_config", fetch)
+        return calls
+
+    def test_fetches_even_with_a_persisted_config(self, monkeypatch):
+        # A previously-persisted config no longer short-circuits: every launch re-reads the workspace.
+        save_managed_state(WORKSPACE, RAW_MANIFEST)
+        calls = self._counting_fetch(monkeypatch)
+        result, flag = refresh_managed_config(_state())
+        assert result == normalize_managed_config(RAW_MANIFEST)
+        assert flag is False
+        assert calls["n"] == 1
+
+    def test_persists_the_fetched_config_raw_without_a_timestamp(self, monkeypatch):
+        self._counting_fetch(monkeypatch)
+        refresh_managed_config(_state())
+        # The on-disk payload is the raw config verbatim and carries no retrieved_at field.
+        stored = json.loads(mc_mod.MANAGED_CONFIGURATION_PATH.read_text(encoding="utf-8"))
+        assert "retrieved_at" not in stored
+        assert stored["config"] == RAW_MANIFEST
+
+    def test_first_launch_with_no_cache_fetches(self, monkeypatch):
+        calls = self._counting_fetch(monkeypatch)
+        refresh_managed_config(_state())
+        assert calls["n"] == 1
+
+
+class TestManagedUpdateTime:
+    def test_reads_top_level_update_time(self):
+        assert managed_update_time({"update_time": "2026-09-11T16:09:31.820Z"}) == (
+            "2026-09-11T16:09:31.820Z"
+        )
+
+    def test_none_when_absent_or_not_a_dict(self):
+        assert managed_update_time({}) is None
+        assert managed_update_time(None) is None
+
+    def test_normalize_captures_update_time(self):
+        raw = {
+            "default_agent": "CODING_AGENT_CLAUDE_CODE",
+            "update_time": "2026-09-11T16:09:31.820Z",
+        }
+        assert normalize_managed_config(raw)["update_time"] == "2026-09-11T16:09:31.820Z"
+
+
+class TestManagedConfigIsNewer:
+    OLDER = {"update_time": "2026-09-11T16:00:00.000Z"}
+    NEWER = {"update_time": "2026-09-11T16:09:31.820Z"}
+
+    def test_true_when_fetched_is_newer(self):
+        assert managed_config_is_newer(self.NEWER, self.OLDER["update_time"]) is True
+
+    def test_false_when_equal(self):
+        assert managed_config_is_newer(self.NEWER, self.NEWER["update_time"]) is False
+
+    def test_false_when_fetched_is_older(self):
+        assert managed_config_is_newer(self.OLDER, self.NEWER["update_time"]) is False
+
+    def test_true_when_no_prior_watermark(self):
+        # First apply: nothing applied yet, so any fetched config counts as newer.
+        assert managed_config_is_newer(self.NEWER, None) is True
+
+    def test_true_when_fetched_has_no_update_time(self):
+        # A config without a parseable update_time is treated as newer so a launch re-applies it
+        # rather than trusting possibly-stale local settings.
+        assert managed_config_is_newer({}, self.NEWER["update_time"]) is True
+
+    def test_true_when_watermark_unparseable(self):
+        assert managed_config_is_newer(self.NEWER, "not-a-timestamp") is True
+
+    def test_handles_z_and_offset_suffixes_equivalently(self):
+        assert (
+            managed_config_is_newer(
+                {"update_time": "2026-09-11T16:00:00+00:00"}, "2026-09-11T16:00:00Z"
+            )
+            is False
+        )
 
 
 class TestGetModelRecommendation:

@@ -247,6 +247,39 @@ class TestCheckGatewayEndpoint:
     def test_pi_unavailable_when_no_models(self):
         assert check_gateway_endpoint({}, "pi") is False
 
+    def test_managed_static_list_makes_undiscovered_tool_available(self):
+        # A managed config can name a tool's models even when discovery found none for it, so a
+        # single-agent configure must count that as available rather than erroring out.
+        managed = {"enabled_agents": {"codex": {"model_config": {"models": ["system.ai.gpt-5"]}}}}
+        assert check_gateway_endpoint({}, "codex", managed=managed) is True
+
+    def test_managed_without_models_leaves_undiscovered_tool_unavailable(self):
+        managed = {"enabled_agents": {"codex": {"model_config": {}}}}
+        assert check_gateway_endpoint({}, "codex", managed=managed) is False
+
+
+class TestResolveManagedForTool:
+    def test_none_managed_returns_state_unchanged(self):
+        state = {"provider_services": {"codex": "main.x.svc"}}
+        assert agents_mod.resolve_managed_for_tool(None, state, "codex") is state
+
+    def test_static_list_clears_persisted_provider(self):
+        # A managed static list with no provider should displace the developer's own provider so
+        # availability and validation see the managed models, not a stale routed provider.
+        managed = {"enabled_agents": {"codex": {"model_config": {"models": ["system.ai.gpt-5"]}}}}
+        state = {"provider_services": {"codex": "main.x.svc"}}
+        resolved = agents_mod.resolve_managed_for_tool(managed, state, "codex")
+        assert resolved.get("codex_models") == ["system.ai.gpt-5"]
+        assert "codex" not in (resolved.get("provider_services") or {})
+
+    def test_managed_provider_service_is_kept(self):
+        managed = {
+            "enabled_agents": {"codex": {"model_config": {"model_provider_service": "main.m.svc"}}}
+        }
+        state = {"provider_services": {"codex": "main.x.svc"}}
+        resolved = agents_mod.resolve_managed_for_tool(managed, state, "codex")
+        assert resolved["provider_services"]["codex"] == "main.m.svc"
+
 
 class TestDefaultModelForTool:
     def test_codex_returns_none_without_a_configured_model(self):
@@ -798,7 +831,7 @@ class TestValidateAllToolsVerbosity:
     def _run(self, monkeypatch, capsys):
         from contextlib import nullcontext
 
-        monkeypatch.setattr(agents_mod, "validate_tool", lambda tool: (True, ""))
+        monkeypatch.setattr(agents_mod, "validate_tool", lambda tool, **kwargs: (True, ""))
         monkeypatch.setattr(agents_mod, "save_state", lambda s: None)
         monkeypatch.setattr(agents_mod, "spinner", lambda *_a, **_kw: nullcontext())
         agents_mod.validate_all_tools({"available_tools": ["codex"], "managed_configs": {}})
