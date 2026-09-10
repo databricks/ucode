@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -413,6 +414,38 @@ class TestCodexWriteConfig:
         doc = read_toml_safe(legacy_path)
         assert doc["profiles"]["other"]["model_provider"] == "keep"
         assert doc["profiles"]["ucode"]["model_provider"] == "ucode-databricks"
+
+    def test_legacy_layout_prunes_stale_provider_header_on_transition(self, tmp_path, monkeypatch):
+        # FIX #4: Prune the stale routing header in the legacy layout when transitioning
+        # from provider to static/discovery (no provider).
+        config_dir = tmp_path / ".codex"
+        config_dir.mkdir()
+        legacy_path = config_dir / "config.toml"
+        # Simulates a prior run with a provider that wrote the header.
+        legacy_path.write_text(
+            'profile = "ucode"\n'
+            "[profiles.ucode]\n"
+            'model_provider = "ucode-databricks"\n'
+            "[model_providers.ucode-databricks]\n"
+            'http_headers = { "Databricks-Model-Provider-Service" = "main.old.provider" }\n',
+            encoding="utf-8",
+        )
+        profile_path = config_dir / "ucode.config.toml"
+        backup_path = tmp_path / "codex-ucode-config.backup.toml"
+        legacy_backup_path = tmp_path / "codex-config.backup.toml"
+        monkeypatch.setattr(codex, "CODEX_CONFIG_PATH", profile_path)
+        monkeypatch.setattr(codex, "CODEX_BACKUP_PATH", backup_path)
+        monkeypatch.setattr(codex, "LEGACY_CODEX_CONFIG_PATH", legacy_path)
+        monkeypatch.setattr(codex, "LEGACY_CODEX_BACKUP_PATH", legacy_backup_path)
+        monkeypatch.setattr(codex, "agent_version", lambda binary: "0.133.0")
+        monkeypatch.setattr(codex, "save_state", lambda state: None)
+
+        # Rewrite in legacy layout WITHOUT provider - should prune the stale header.
+        codex.write_tool_config({"workspace": WS, "codex_models": ["gpt-5"]}, provider=None)
+
+        doc = read_toml_safe(legacy_path)
+        headers = doc["model_providers"]["ucode-databricks"].get("http_headers", {})
+        assert "Databricks-Model-Provider-Service" not in headers
 
 
 class TestCodexLegacyLayoutDetection:
@@ -841,3 +874,234 @@ class TestCodexManagedConfig:
 
         with pytest.raises(managed_files.ManagedFileWriteUnavailable, match="sudo denied"):
             codex.write_tool_config({"workspace": WS, "codex_models": ["gpt-5"]})
+
+
+class TestCodexStaticCatalog:
+    """A managed static `names` list is written as a `model_catalog_json` catalog of full presets."""
+
+    def test_build_catalog_fetches_and_filters_gateway_models(self, monkeypatch):
+        # Mock the gateway fetch to return real ModelPreset structures.
+        gateway_response = {
+            "models": [
+                {
+                    "slug": "system.ai.kimi-k3",
+                    "display_name": "kimi-k3",
+                    "priority": 100,
+                    "base_instructions": "Full operating prompt for kimi...",
+                    "visibility": "list",
+                    "shell_type": "shell_command",
+                    "truncation_policy": {"mode": "tokens", "limit": 10000},
+                    "supported_reasoning_levels": [
+                        {"effort": "low", "description": "Fast"},
+                        {"effort": "high", "description": "Deep"},
+                    ],
+                },
+                {
+                    "slug": "gpt-5.4",
+                    "display_name": "gpt-5.4",
+                    "priority": 90,
+                    "base_instructions": "Full operating prompt for gpt-5.4...",
+                    "visibility": "list",
+                    "shell_type": "shell_command",
+                },
+                {
+                    "slug": "other-model",
+                    "display_name": "other",
+                    "priority": 50,
+                    "base_instructions": "Should be filtered out...",
+                    "visibility": "hidden",
+                },
+            ]
+        }
+
+        def mock_fetch(workspace, token):
+            return gateway_response
+
+        monkeypatch.setattr(codex, "_fetch_gateway_codex_models", mock_fetch)
+
+        catalog = codex.build_codex_catalog(WS, "token", ["system.ai.kimi-k3", "gpt-5.4"])
+        assert list(catalog) == ["models"]
+        assert len(catalog["models"]) == 2
+        first, second = catalog["models"]
+
+        # Verify real fields are preserved verbatim from gateway.
+        assert first["slug"] == "system.ai.kimi-k3"
+        assert first["display_name"] == "kimi-k3"
+        assert first["priority"] == 100
+        assert first["base_instructions"] == "Full operating prompt for kimi..."
+        assert first["visibility"] == "list"
+        assert first["shell_type"] == "shell_command"
+        assert first["truncation_policy"] == {"mode": "tokens", "limit": 10000}
+        assert first["supported_reasoning_levels"][0]["effort"] == "low"
+
+        # Gateway order is preserved for filtered entries.
+        assert second["slug"] == "gpt-5.4"
+        assert second["priority"] == 90
+
+    def test_build_catalog_returns_none_on_fetch_failure(self, monkeypatch):
+        # Mock fetch to return None (failure).
+        monkeypatch.setattr(codex, "_fetch_gateway_codex_models", lambda w, t: None)
+
+        result = codex.build_codex_catalog(WS, "token", ["system.ai.kimi-k3"])
+        assert result is None
+
+    def test_build_catalog_returns_none_when_no_matching_slugs(self, monkeypatch):
+        # Mock gateway catalog with models not in the allow-list.
+        gateway_response = {
+            "models": [
+                {
+                    "slug": "other-model",
+                    "display_name": "other",
+                    "priority": 50,
+                    "base_instructions": "prompt",
+                    "visibility": "list",
+                }
+            ]
+        }
+
+        def mock_fetch(workspace, token):
+            return gateway_response
+
+        monkeypatch.setattr(codex, "_fetch_gateway_codex_models", mock_fetch)
+
+        result = codex.build_codex_catalog(WS, "token", ["system.ai.kimi-k3"])
+        assert result is None
+
+    def test_write_config_emits_catalog_file_and_reference(self, tmp_path, monkeypatch):
+        config_path = tmp_path / ".codex" / "ucode.config.toml"
+        catalog_path = tmp_path / ".codex" / "ucode-models.json"
+        monkeypatch.setattr(codex, "CODEX_CONFIG_PATH", config_path)
+        monkeypatch.setattr(codex, "CODEX_BACKUP_PATH", tmp_path / "backup.toml")
+        monkeypatch.setattr(codex, "CODEX_CATALOG_PATH", catalog_path)
+        monkeypatch.setattr(codex, "agent_version", lambda binary: "0.134.0")
+        monkeypatch.setattr(codex, "save_state", lambda state: None)
+        monkeypatch.setattr(codex, "get_databricks_token", lambda w, p: "token")
+
+        # Mock the gateway fetch to return real presets.
+        gateway_response = {
+            "models": [
+                {
+                    "slug": "system.ai.kimi-k3",
+                    "display_name": "kimi-k3",
+                    "priority": 100,
+                    "base_instructions": "kimi prompt",
+                    "visibility": "list",
+                },
+                {
+                    "slug": "gpt-5.4",
+                    "display_name": "gpt-5.4",
+                    "priority": 90,
+                    "base_instructions": "gpt prompt",
+                    "visibility": "list",
+                },
+            ]
+        }
+
+        monkeypatch.setattr(codex, "_fetch_gateway_codex_models", lambda w, t: gateway_response)
+
+        codex.write_tool_config(
+            {"workspace": WS, "codex_static_models": ["system.ai.kimi-k3", "gpt-5.4"]}
+        )
+
+        doc = read_toml_safe(config_path)
+        assert doc["model_catalog_json"] == str(catalog_path)
+        written = json.loads(catalog_path.read_text())
+        assert [m["slug"] for m in written["models"]] == ["system.ai.kimi-k3", "gpt-5.4"]
+        # Verify real fields are preserved from gateway.
+        assert written["models"][0]["base_instructions"] == "kimi prompt"
+
+    def test_catalog_skipped_when_gateway_fetch_fails(self, tmp_path, monkeypatch):
+        config_path = tmp_path / ".codex" / "ucode.config.toml"
+        catalog_path = tmp_path / ".codex" / "ucode-models.json"
+        monkeypatch.setattr(codex, "CODEX_CONFIG_PATH", config_path)
+        monkeypatch.setattr(codex, "CODEX_BACKUP_PATH", tmp_path / "backup.toml")
+        monkeypatch.setattr(codex, "CODEX_CATALOG_PATH", catalog_path)
+        monkeypatch.setattr(codex, "agent_version", lambda binary: "0.134.0")
+        monkeypatch.setattr(codex, "save_state", lambda state: None)
+        monkeypatch.setattr(codex, "get_databricks_token", lambda w, p: "token")
+        # Mock fetch to return None (failure).
+        monkeypatch.setattr(codex, "_fetch_gateway_codex_models", lambda w, t: None)
+
+        codex.write_tool_config({"workspace": WS, "codex_static_models": ["system.ai.kimi-k3"]})
+
+        # On fetch failure, no catalog is written; fallback to discovery.
+        assert not catalog_path.exists()
+        doc = read_toml_safe(config_path)
+        assert "model_catalog_json" not in doc
+
+    def test_stale_catalog_removed_when_no_static_list(self, tmp_path, monkeypatch):
+        config_path = tmp_path / ".codex" / "ucode.config.toml"
+        catalog_path = tmp_path / ".codex" / "ucode-models.json"
+        catalog_path.parent.mkdir(parents=True, exist_ok=True)
+        catalog_path.write_text('{"models": []}')
+        monkeypatch.setattr(codex, "CODEX_CONFIG_PATH", config_path)
+        monkeypatch.setattr(codex, "CODEX_BACKUP_PATH", tmp_path / "backup.toml")
+        monkeypatch.setattr(codex, "CODEX_CATALOG_PATH", catalog_path)
+        monkeypatch.setattr(codex, "agent_version", lambda binary: "0.134.0")
+        monkeypatch.setattr(codex, "save_state", lambda state: None)
+
+        codex.write_tool_config({"workspace": WS})
+
+        assert not catalog_path.exists()
+        assert "model_catalog_json" not in read_toml_safe(config_path)
+
+    def test_provider_suppresses_static_catalog(self, tmp_path, monkeypatch):
+        config_path = tmp_path / ".codex" / "ucode.config.toml"
+        catalog_path = tmp_path / ".codex" / "ucode-models.json"
+        monkeypatch.setattr(codex, "CODEX_CONFIG_PATH", config_path)
+        monkeypatch.setattr(codex, "CODEX_BACKUP_PATH", tmp_path / "backup.toml")
+        monkeypatch.setattr(codex, "CODEX_CATALOG_PATH", catalog_path)
+        monkeypatch.setattr(codex, "agent_version", lambda binary: "0.134.0")
+        monkeypatch.setattr(codex, "save_state", lambda state: None)
+
+        codex.write_tool_config(
+            {"workspace": WS, "codex_static_models": ["system.ai.kimi-k3"]},
+            provider="main.default.mps",
+        )
+
+        assert not catalog_path.exists()
+        assert "model_catalog_json" not in read_toml_safe(config_path)
+
+    def test_stale_provider_header_removed_on_transition_to_static(self, tmp_path, monkeypatch):
+        """P1-4: Stale Databricks-Model-Provider-Service header removed on provider->static transition."""
+        config_path = tmp_path / ".codex" / "ucode.config.toml"
+        catalog_path = tmp_path / ".codex" / "ucode-models.json"
+        # Pre-populate config with a stale provider header from a prior provider run.
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(
+            'model_provider = "ucode-databricks"\n'
+            "[model_providers.ucode-databricks]\n"
+            'name = "Gateway"\n'
+            "[model_providers.ucode-databricks.http_headers]\n"
+            '"Databricks-Model-Provider-Service" = "main.old.provider"\n',
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(codex, "CODEX_CONFIG_PATH", config_path)
+        monkeypatch.setattr(codex, "CODEX_BACKUP_PATH", tmp_path / "backup.toml")
+        monkeypatch.setattr(codex, "CODEX_CATALOG_PATH", catalog_path)
+        monkeypatch.setattr(codex, "agent_version", lambda binary: "0.134.0")
+        monkeypatch.setattr(codex, "save_state", lambda state: None)
+        monkeypatch.setattr(codex, "get_databricks_token", lambda w, p: "token")
+
+        # Mock the gateway fetch.
+        gateway_response = {
+            "models": [
+                {
+                    "slug": "system.ai.kimi-k3",
+                    "display_name": "kimi-k3",
+                    "priority": 100,
+                    "base_instructions": "prompt",
+                    "visibility": "list",
+                }
+            ]
+        }
+        monkeypatch.setattr(codex, "_fetch_gateway_codex_models", lambda w, t: gateway_response)
+
+        # Transition from provider to static (no provider parameter).
+        codex.write_tool_config({"workspace": WS, "codex_static_models": ["system.ai.kimi-k3"]})
+
+        # Verify stale header is removed.
+        doc = read_toml_safe(config_path)
+        headers = doc.get("model_providers", {}).get("ucode-databricks", {}).get("http_headers", {})
+        assert "Databricks-Model-Provider-Service" not in headers
+        assert "model_catalog_json" in doc  # Static catalog is present.
