@@ -119,14 +119,25 @@ ug configure mcp
 ```
 
 Add Databricks MCP servers to installed MCP-capable tools: Codex, Claude Code, Gemini CLI, OpenCode, GitHub Copilot CLI, and Cursor Agent.
-Options are shown in this order:
 
-- Discovered external MCP connections
-- Databricks SQL
-- Managed Databricks MCPs (Vector Search, UC Functions, etc.)
-- Custom MCP server URL
+The interactive picker discovers **MCP services** (the `system.ai.*` and workspace-wide
+`<catalog>.<schema>` Unity Catalog MCP services) and a custom MCP server URL.
 
-Discovered external MCP connections are listed directly.
+V2 AI Gateway servers — Vector Search, UC Functions, external connections, Genie spaces, and
+Databricks apps — are **not** offered in the picker, because consumer-only identities can't
+reach the V2 AI Gateway. Workspace users add them non-interactively by naming them in
+`--services` with a typed selector:
+
+```bash
+ug mcp add --services vector-search:main.docs
+ug mcp add --services uc-functions:main.tools
+ug mcp add --services external:my-connection
+ug mcp add --services genie-space:<space-id>
+ug mcp add --services app:my-app
+```
+
+These require workspace access; a consumer-only identity is gated at the AI Gateway (which
+`ug` already hits when it sets up models), not by this command.
 
 Every Databricks MCP server is registered as a local **stdio** server that runs `ug mcp-proxy`
 — a small bridge (shipped with `ug`) between the coding tool and the Databricks
@@ -236,21 +247,42 @@ you to run `ug <agent>` (existing agent sessions need a restart before the MCP t
 
 #### Add skill scopes without replacing existing ones
 
-`ucode skill add` registers skills additively, keeping anything already configured. With `--mcp` it
+`ug skill add` registers skills additively, keeping anything already configured. With `--mcp` it
 adds the schemas to the connection's scope, otherwise it downloads their skills to disk. `--skills`
 narrows a download to a subset of one schema's skills.
 
 ```bash
 # Add schemas to the skills MCP scope, keeping any already configured.
-ucode skill add --location main.default,ml.prod --mcp
+ug skill add --location main.default,ml.prod --mcp
+
+# Scope the schemas to specific agents. Any not set up yet are configured first.
+ug skill add --location main.default --mcp --agents claude,codex
 
 # Download a schema's skills to disk, keeping existing downloads.
-ucode skill add --location main.default
+ug skill add --location main.default
 
 # Download a named subset, by bare name (with --location) or fully-qualified name.
-ucode skill add --location main.default --skills my-skill,other-skill
-ucode skill add --skills main.default.my-skill,main.default.other-skill
+ug skill add --location main.default --skills my-skill,other-skill
+ug skill add --skills main.default.my-skill,main.default.other-skill
 ```
+
+With `--mcp`, `--agents` limits the change to the named agents; without it the schemas go to every
+configured agent. It applies only to `--mcp`, since downloaded skills are shared across agents.
+
+#### Remove skill scopes
+
+Remove schemas from the skills MCP connection with `ug skill remove --mcp`:
+
+```bash
+# Pick schemas to remove; each is removed from every agent it's on.
+ug skill remove --mcp
+
+# Remove from specific agents only. A schema scoped to several agents is
+# removed from the named ones and kept on the rest.
+ug skill remove --mcp --agents claude
+```
+
+`--mcp` is required; removing downloaded skills from disk isn't supported yet.
 
 ### Managed config for a workspace (admins)
 
@@ -359,11 +391,10 @@ The output looks like:
 
 | Command | Description |
 |---------|-------------|
-| `ug status` | Show current workspace, base URLs, managed config files, and selected models |
+| `ug status` | Show current workspace, base URLs, managed config files, selected models, and each agent's skill MCP scope |
 | `ug export` | Print the workspace's managed config as portable JSON (`--file <file>` / `-f` to write a file) |
 | `ug doctor` | Diagnose local issues (uv, npm, Databricks CLI, workspace, credentials, agent CLIs, tracing) and offer to fix any problems found |
-| `ug usage` | Show AI Gateway usage summary, plus your budget spend against its alert threshold when the workspace reports one |
-| `ug usage --warehouse-id <id>` | Query a specific SQL warehouse instead of discovering one |
+| `ug usage` | Show your AI Gateway dollars spent and total budget |
 | `ug revert` | Clear saved state and restore backed-up config files |
 | `ug configure --dry-run` | Preview config files without writing them |
 | `ug configure --agents claude,codex` | Configure specific agents without the interactive picker |
@@ -387,8 +418,11 @@ The output looks like:
 | `ug configure skills --location main.default --skill my-skill` | Download only the named skill(s) from a schema (comma-separated for several) |
 | `ug configure skills --location main.default --mcp` | Expose a schema's skills as MCP tools (override-only) instead of downloading |
 | `ug skill add --location main.default --mcp` | Add schemas to the skills MCP scope, keeping any already configured (additive; never replaces) |
+| `ug skill add --location main.default --mcp --agents claude,codex` | Add schemas to specific agents' skills MCP scope (sets up any not yet configured) |
 | `ug skill add --location main.default` | Download a schema's skills to disk without removing existing downloads |
 | `ug skill add --skills main.default.my-skill` | Download a named subset of skills (bare names need `--location`; fully-qualified names stand alone) |
+| `ug skill remove --mcp` | Remove skill schemas from the skills MCP connection (every agent) |
+| `ug skill remove --mcp --agents claude` | Remove skill schemas from specific agents only, keeping them on the rest |
 | `ug setup` | Author the managed config's agents and models (workspace admins only) |
 | `ug setup mcps` | Add or change the managed config's MCP servers |
 | `ug setup skills [--location a.b,c.d]` | Add or change the managed config's skills |

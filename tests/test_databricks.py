@@ -28,15 +28,12 @@ from ucode.databricks import (
     build_tool_base_url,
     classify_model_family,
     databricks_cli_version,
-    discover_sql_warehouses,
     ensure_databricks_cli_version,
     ensure_pat_bearer,
     get_databricks_profiles,
     get_databricks_token,
     install_ai_tools,
     list_databricks_apps,
-    list_databricks_connections,
-    list_genie_spaces,
     list_workspace_budgets,
     resolve_current_budget_spend,
     upgrade_databricks_cli,
@@ -695,20 +692,19 @@ class TestMapClaudeFamilyModels:
 
 
 class TestResolveProviderLaunchModel:
-    def test_none_when_service_offers_opus(self):
-        # Claude Code's own opus default already works, so we pin nothing (and avoid the duplicate
-        # /model picker row that setting ANTHROPIC_MODEL causes).
+    def test_defaults_to_sonnet_when_offered(self):
+        # No --model: pin sonnet (Claude Code's own default tier) when the service allows it.
         models = {
             "opus": "claude-opus-4-8",
             "sonnet": "claude-sonnet-5",
             "haiku": "claude-haiku-4-5",
         }
-        assert db_mod.resolve_provider_launch_model(None, models) is None
-
-    def test_falls_back_to_best_tier_when_no_opus(self):
-        # No opus target: launch on the most capable tier the service does offer (sonnet > haiku).
-        models = {"sonnet": "claude-sonnet-5", "haiku": "claude-haiku-4-5"}
         assert db_mod.resolve_provider_launch_model(None, models) == "claude-sonnet-5"
+
+    def test_falls_back_to_opus_when_no_sonnet(self):
+        # Sonnet not offered: pin the next preferred allowed tier (opus) rather than the default.
+        models = {"opus": "claude-opus-4-8", "haiku": "claude-haiku-4-5"}
+        assert db_mod.resolve_provider_launch_model(None, models) == "claude-opus-4-8"
 
     def test_falls_back_to_haiku_when_only_haiku(self):
         assert db_mod.resolve_provider_launch_model(None, {"haiku": "claude-haiku-4-5"}) == (
@@ -1787,120 +1783,6 @@ class TestGetDatabricksProfiles:
         assert get_databricks_profiles() == []
 
 
-class TestListDatabricksConnections:
-    def test_lists_paginated_connections_with_workspace_env(self, monkeypatch):
-        calls: list[dict] = []
-
-        def fake_run(args, **kwargs):
-            calls.append({"args": args, "kwargs": kwargs})
-            if "--page-token" in args:
-                payload = {"connections": [{"name": "jira-mcp", "connection_type": "HTTP"}]}
-            else:
-                payload = {
-                    "connections": [{"name": "confluence-mcp", "connection_type": "HTTP"}],
-                    "next_page_token": "next-page",
-                }
-            return subprocess.CompletedProcess(args, 0, stdout=json.dumps(payload))
-
-        monkeypatch.setattr(db_mod, "run", fake_run)
-
-        assert list_databricks_connections(WS) == [
-            {"name": "confluence-mcp", "connection_type": "HTTP"},
-            {"name": "jira-mcp", "connection_type": "HTTP"},
-        ]
-        assert calls[0]["args"] == [
-            "databricks",
-            "connections",
-            "list",
-            "--max-results",
-            "0",
-            "--output",
-            "json",
-        ]
-        assert calls[0]["kwargs"]["env"]["DATABRICKS_HOST"] == WS
-        assert calls[1]["args"][-2:] == ["--page-token", "next-page"]
-
-    def test_passes_profile_when_provided(self, monkeypatch):
-        calls: list[list[str]] = []
-
-        def fake_run(args, **kwargs):
-            calls.append(args)
-            return subprocess.CompletedProcess(args, 0, stdout=json.dumps({"connections": []}))
-
-        monkeypatch.setattr(db_mod, "run", fake_run)
-
-        list_databricks_connections(WS, "my-profile")
-
-        assert "--profile" in calls[0]
-        assert calls[0][calls[0].index("--profile") + 1] == "my-profile"
-
-    def test_raises_on_invalid_json(self, monkeypatch):
-        def fake_run(args, **kwargs):
-            return subprocess.CompletedProcess(args, 0, stdout="not-json")
-
-        monkeypatch.setattr(db_mod, "run", fake_run)
-
-        with pytest.raises(RuntimeError, match="invalid JSON"):
-            list_databricks_connections(WS)
-
-
-class TestListGenieSpaces:
-    def test_lists_paginated_spaces_with_workspace_env(self, monkeypatch):
-        calls: list[dict] = []
-
-        def fake_run(args, **kwargs):
-            calls.append({"args": args, "kwargs": kwargs})
-            if "--page-token" in args:
-                payload = {"spaces": [{"space_id": "space-2", "title": "Second"}]}
-            else:
-                payload = {
-                    "spaces": [{"space_id": "space-1", "title": "First"}],
-                    "next_page_token": "next-page",
-                }
-            return subprocess.CompletedProcess(args, 0, stdout=json.dumps(payload))
-
-        monkeypatch.setattr(db_mod, "run", fake_run)
-
-        assert list_genie_spaces(WS) == [
-            {"space_id": "space-1", "title": "First"},
-            {"space_id": "space-2", "title": "Second"},
-        ]
-        assert calls[0]["args"] == [
-            "databricks",
-            "genie",
-            "list-spaces",
-            "--page-size",
-            "100",
-            "--output",
-            "json",
-        ]
-        assert calls[0]["kwargs"]["env"]["DATABRICKS_HOST"] == WS
-        assert calls[1]["args"][-2:] == ["--page-token", "next-page"]
-
-    def test_passes_profile_when_provided(self, monkeypatch):
-        calls: list[list[str]] = []
-
-        def fake_run(args, **kwargs):
-            calls.append(args)
-            return subprocess.CompletedProcess(args, 0, stdout=json.dumps({"spaces": []}))
-
-        monkeypatch.setattr(db_mod, "run", fake_run)
-
-        list_genie_spaces(WS, "my-profile")
-
-        assert "--profile" in calls[0]
-        assert calls[0][calls[0].index("--profile") + 1] == "my-profile"
-
-    def test_raises_on_invalid_json(self, monkeypatch):
-        def fake_run(args, **kwargs):
-            return subprocess.CompletedProcess(args, 0, stdout="not-json")
-
-        monkeypatch.setattr(db_mod, "run", fake_run)
-
-        with pytest.raises(RuntimeError, match="invalid JSON"):
-            list_genie_spaces(WS)
-
-
 class TestListDatabricksApps:
     def test_lists_apps_with_workspace_env(self, monkeypatch):
         calls: list[dict] = []
@@ -1968,6 +1850,27 @@ class TestListDatabricksApps:
 
         with pytest.raises(RuntimeError, match="invalid JSON"):
             list_databricks_apps(WS)
+
+    def test_permission_failure_raises_permission_denied_error(self, monkeypatch):
+        def fake_run(args, **kwargs):
+            raise subprocess.CalledProcessError(
+                1, "databricks", stderr="Error: permission denied on apps"
+            )
+
+        monkeypatch.setattr(db_mod, "run", fake_run)
+
+        with pytest.raises(db_mod.PermissionDeniedError):
+            list_databricks_apps(WS)
+
+    def test_non_permission_cli_failure_stays_generic_runtime_error(self, monkeypatch):
+        def fake_run(args, **kwargs):
+            raise subprocess.CalledProcessError(1, "databricks", stderr="Error: connection reset")
+
+        monkeypatch.setattr(db_mod, "run", fake_run)
+
+        with pytest.raises(RuntimeError) as exc:
+            list_databricks_apps(WS)
+        assert not isinstance(exc.value, db_mod.PermissionDeniedError)
 
 
 class TestProbeUnityGatewayCapabilities:
@@ -2440,113 +2343,6 @@ class TestRunDatabricksCliInstaller:
         # databricks/tap and fails if absent, rather than falling back to the
         # unrelated `databricks` cask.
         assert calls == [["brew", brew_subcommand, "databricks/tap/databricks"]]
-
-
-class TestIsUsageTableAccessError:
-    """Pin which `ServerOperationError` strings trigger the friendly
-    `system.ai_gateway.usage` permissions hint vs. fall through to the
-    generic `Usage query failed: ...` arm."""
-
-    @staticmethod
-    def _err(msg: str):
-        from databricks.sql.exc import ServerOperationError
-
-        return ServerOperationError(msg)
-
-    def test_table_level_select_denial_matches(self):
-        msg = (
-            "[INSUFFICIENT_PERMISSIONS] Insufficient privileges: "
-            "User does not have SELECT on Table 'system.ai_gateway.usage'. "
-            "SQLSTATE: 42501"
-        )
-        assert db_mod._is_usage_table_access_error(self._err(msg)) is True
-
-    def test_schema_level_use_schema_denial_matches(self):
-        msg = (
-            "[INSUFFICIENT_PERMISSIONS] Insufficient privileges: "
-            "User does not have USE SCHEMA on Schema 'system.ai_gateway'. "
-            "SQLSTATE: 42501"
-        )
-        assert db_mod._is_usage_table_access_error(self._err(msg)) is True
-
-    def test_unrelated_catalog_denial_falls_through(self):
-        msg = (
-            "[INSUFFICIENT_PERMISSIONS] Insufficient privileges: "
-            "User does not have USE CATALOG on Catalog 'schema1'. "
-            "SQLSTATE: 42501"
-        )
-        assert db_mod._is_usage_table_access_error(self._err(msg)) is False
-
-    def test_other_error_code_on_same_table_falls_through(self):
-        """Different code on the right table must not trip the gate — the
-        helper requires INSUFFICIENT_PERMISSIONS specifically so we don't
-        mask e.g. missing-table failures with a permissions-shaped hint."""
-        msg = (
-            "[TABLE_OR_VIEW_NOT_FOUND] The table or view "
-            "`system`.`ai_gateway`.`usage` cannot be found. SQLSTATE: 42P01"
-        )
-        assert db_mod._is_usage_table_access_error(self._err(msg)) is False
-
-    @pytest.mark.parametrize(
-        "quoted",
-        [
-            "`system`.`ai_gateway`.`usage`",
-            "[system].[ai_gateway].[usage]",
-        ],
-    )
-    def test_identifier_quoting_variants_all_match(self, quoted):
-        msg = (
-            f"[INSUFFICIENT_PERMISSIONS] User does not have SELECT on Table "
-            f"{quoted}. SQLSTATE: 42501"
-        )
-        assert db_mod._is_usage_table_access_error(self._err(msg)) is True
-
-
-class TestRunUsageQuery:
-    """Cover the two control-flow arms `_is_usage_table_access_error` gates:
-    friendly RuntimeError for matching errors, raw-text fallback for the rest.
-    `from exc` chaining is also pinned so `--debug` still surfaces the
-    underlying connector error."""
-
-    @staticmethod
-    def _patch_connect_to_raise(monkeypatch, exc):
-        import databricks.sql as sql_mod
-
-        def fake_connect(*args, **kwargs):
-            raise exc
-
-        monkeypatch.setattr(sql_mod, "connect", fake_connect)
-
-    def test_raises_actionable_message_for_table_access_error(self, monkeypatch):
-        from databricks.sql.exc import ServerOperationError
-
-        original = ServerOperationError(
-            "[INSUFFICIENT_PERMISSIONS] Insufficient privileges: "
-            "User does not have SELECT on Table 'system.ai_gateway.usage'. "
-            "SQLSTATE: 42501"
-        )
-        self._patch_connect_to_raise(monkeypatch, original)
-
-        with pytest.raises(RuntimeError, match="Ask your workspace admin") as exc_info:
-            db_mod.run_usage_query(WS, "/sql/1.0/warehouses/abc", "tok", "SELECT 1")
-        assert "system.ai_gateway.usage" in str(exc_info.value)
-        # The original ServerOperationError must survive on __cause__ so
-        # `--debug` / stack traces still show the underlying connector error.
-        assert exc_info.value.__cause__ is original
-
-    def test_falls_through_for_unrelated_permission_error(self, monkeypatch):
-        from databricks.sql.exc import ServerOperationError
-
-        original = ServerOperationError(
-            "[INSUFFICIENT_PERMISSIONS] Insufficient privileges: "
-            "User does not have USE CATALOG on Catalog 'schema1'. SQLSTATE: 42501"
-        )
-        self._patch_connect_to_raise(monkeypatch, original)
-
-        with pytest.raises(RuntimeError, match="schema1") as exc_info:
-            db_mod.run_usage_query(WS, "/sql/1.0/warehouses/abc", "tok", "SELECT 1")
-        assert "Ask your workspace admin" not in str(exc_info.value)
-        assert str(exc_info.value).startswith("Usage query failed:")
 
 
 class TestHttpGetJsonTimeout:
@@ -3335,73 +3131,6 @@ class TestListWorkspaceBudgets:
         assert budgets[0]["per_user_threshold"] is None
 
 
-class TestDiscoverSqlWarehouses:
-    def _payload(self, *entries: dict) -> dict:
-        return {"warehouses": list(entries)}
-
-    def test_explicit_id_skips_discovery(self, monkeypatch):
-        def fail(*a, **k):
-            raise AssertionError("discovery should not be called")
-
-        monkeypatch.setattr(db_mod.urllib_request, "urlopen", fail)
-        assert discover_sql_warehouses(WS, "token", warehouse_id="abc") == [
-            db_mod.SqlWarehouse("/sql/1.0/warehouses/abc", "abc", "REQUESTED")
-        ]
-
-    def test_running_sorted_before_stopped(self, monkeypatch):
-        payload = self._payload(
-            {"id": "s1", "name": "stopped", "state": "STOPPED"},
-            {"id": "r1", "name": "running", "state": "RUNNING"},
-        )
-        monkeypatch.setattr(
-            db_mod.urllib_request, "urlopen", lambda *a, **k: _FakeResponse(payload)
-        )
-        result = discover_sql_warehouses(WS, "token")
-        assert [w.label for w in result] == ["running", "stopped"]
-
-    def test_returns_all_candidates(self, monkeypatch):
-        payload = self._payload(
-            {"id": "a", "name": "A", "state": "RUNNING"},
-            {"id": "b", "name": "B", "state": "RUNNING"},
-        )
-        monkeypatch.setattr(
-            db_mod.urllib_request, "urlopen", lambda *a, **k: _FakeResponse(payload)
-        )
-        assert len(discover_sql_warehouses(WS, "token")) == 2
-
-    def test_skips_entries_without_id(self, monkeypatch):
-        payload = self._payload(
-            {"name": "no id", "state": "RUNNING"},
-            {"id": "b", "name": "B", "state": "RUNNING"},
-        )
-        monkeypatch.setattr(
-            db_mod.urllib_request, "urlopen", lambda *a, **k: _FakeResponse(payload)
-        )
-        assert [w.label for w in discover_sql_warehouses(WS, "token")] == ["B"]
-
-    def test_falls_back_to_id_as_label(self, monkeypatch):
-        payload = self._payload({"id": "abc", "state": "RUNNING"})
-        monkeypatch.setattr(
-            db_mod.urllib_request, "urlopen", lambda *a, **k: _FakeResponse(payload)
-        )
-        assert discover_sql_warehouses(WS, "token")[0].label == "abc"
-
-    def test_empty_list_raises_with_flag_hint(self, monkeypatch):
-        monkeypatch.setattr(
-            db_mod.urllib_request, "urlopen", lambda *a, **k: _FakeResponse({"warehouses": []})
-        )
-        with pytest.raises(RuntimeError, match="--warehouse-id"):
-            discover_sql_warehouses(WS, "token")
-
-    def test_only_unusable_entries_raises(self, monkeypatch):
-        payload = self._payload({"name": "no id", "state": "RUNNING"})
-        monkeypatch.setattr(
-            db_mod.urllib_request, "urlopen", lambda *a, **k: _FakeResponse(payload)
-        )
-        with pytest.raises(RuntimeError, match="No usable SQL warehouse"):
-            discover_sql_warehouses(WS, "token")
-
-
 class TestAllUsersCanUseSchema:
     def _stub(self, monkeypatch, payload, reason=None):
         monkeypatch.setattr(
@@ -3464,3 +3193,126 @@ class TestAllUsersCanUseSchema:
         all_users_can_use_schema("https://ws", "tok", "main.tien_le")
         assert "effective-permissions/schema/main.tien_le" in seen["url"]
         assert "principal=account%20users" in seen["url"]
+
+
+class TestBearerCommand:
+    """``DATABRICKS_BEARER_COMMAND`` is the command form of the static
+    ``DATABRICKS_BEARER`` hatch, for callers whose bearer expires and has to be
+    re-minted mid-session (an external credential broker, a sidecar)."""
+
+    def _env(self, tmp_path, monkeypatch, command: str | None):
+        """Patch in an env with a recording fake `databricks` on PATH.
+
+        The fake would happily serve a token, so any test asserting the marker
+        is absent is asserting the OAuth path was never reached.
+        """
+        marker = tmp_path / "cli-calls"
+        fake = tmp_path / "databricks"
+        fake.write_text(
+            f"#!/bin/sh\necho called >> {marker}\n"
+            'echo \'{"access_token": "oauth-token", "token_type": "Bearer"}\'\n'
+        )
+        fake.chmod(0o755)
+        path = os.environ.get("PATH", "")
+        env = {**os.environ, "PATH": f"{tmp_path}{os.pathsep}{path}"}
+        env.pop("DATABRICKS_BEARER", None)
+        env.pop("DATABRICKS_BEARER_COMMAND", None)
+        if command is not None:
+            env["DATABRICKS_BEARER_COMMAND"] = command
+        monkeypatch.setattr("os.environ", env)
+        return marker
+
+    def _broker(self, tmp_path, body: str) -> str:
+        script = tmp_path / "broker.sh"
+        script.write_text(f"#!/bin/sh\n{body}\n")
+        script.chmod(0o755)
+        return str(script)
+
+    def test_serves_the_command_output_without_touching_the_cli(self, tmp_path, monkeypatch):
+        broker = self._broker(tmp_path, 'echo "brokered-token"')
+        marker = self._env(tmp_path, monkeypatch, broker)
+
+        assert get_databricks_token(WS) == "brokered-token"
+        assert not marker.exists()
+
+    def test_reruns_the_command_on_every_fetch(self, tmp_path, monkeypatch):
+        # The whole point: a static env var cannot be rewritten in a running
+        # process, so an expiring bearer has to be re-minted per fetch.
+        counter = tmp_path / "mints"
+        counter.write_text("0")
+        broker = self._broker(
+            tmp_path,
+            f'n=$(cat {counter})\nn=$((n + 1))\necho $n > {counter}\necho "token-$n"',
+        )
+        self._env(tmp_path, monkeypatch, broker)
+
+        assert get_databricks_token(WS) == "token-1"
+        assert get_databricks_token(WS) == "token-2"
+
+    def test_passes_arguments_without_a_shell(self, tmp_path, monkeypatch):
+        # Argv is shlex-split, not handed to `sh -c`, so this stays cross-platform.
+        seen = tmp_path / "args"
+        broker = self._broker(tmp_path, f'printf "%s" "$1:$2" > {seen}\necho tok')
+        self._env(tmp_path, monkeypatch, f"{broker} --coords 'a path'")
+
+        assert get_databricks_token(WS) == "tok"
+        assert seen.read_text() == "--coords:a path"
+
+    def test_windows_hands_the_command_line_over_verbatim(self, tmp_path, monkeypatch):
+        # CreateProcess splits the string itself. shlex's POSIX rules would turn
+        # `C:\bin\broker.exe` into `C:binbroker.exe`, and posix=False would keep
+        # the quotes around a path containing spaces.
+        self._env(tmp_path, monkeypatch, r"C:\bin\broker.exe --arg")
+        monkeypatch.setattr(db_mod.os, "name", "nt")
+        seen = {}
+
+        def fake_run(args, **kwargs):
+            seen["args"] = args
+            return subprocess.CompletedProcess(args, 0, stdout="win-token\n", stderr="")
+
+        monkeypatch.setattr(db_mod, "run", fake_run)
+
+        assert get_databricks_token(WS) == "win-token"
+        assert seen["args"] == r"C:\bin\broker.exe --arg"
+
+    def test_fails_closed_when_the_command_prints_no_token(self, tmp_path, monkeypatch):
+        # Exit 0 with an empty stdout. Falling through to OAuth would report a
+        # misleading stale-login error: a broker-backed profile carries no OAuth
+        # cache to refresh. Stderr rides along so the error names a cause.
+        broker = self._broker(tmp_path, 'echo "nothing to vend" >&2')
+        marker = self._env(tmp_path, monkeypatch, broker)
+
+        with pytest.raises(RuntimeError, match="printed no token") as excinfo:
+            get_databricks_token(WS)
+        assert "nothing to vend" in str(excinfo.value)
+        assert not marker.exists()
+
+    def test_fails_closed_when_the_command_exits_non_zero(self, tmp_path, monkeypatch):
+        # Stdout on a failing command is a diagnostic, not a bearer. Forwarding it
+        # would only resurface as a 401 far from the real cause.
+        broker = self._broker(tmp_path, 'echo "broker unreachable"\nexit 7')
+        marker = self._env(tmp_path, monkeypatch, broker)
+
+        with pytest.raises(RuntimeError, match="exited 7"):
+            get_databricks_token(WS)
+        assert not marker.exists()
+
+    def test_reports_an_unrunnable_command(self, tmp_path, monkeypatch):
+        self._env(tmp_path, monkeypatch, str(tmp_path / "does-not-exist"))
+
+        with pytest.raises(RuntimeError, match="could not be run"):
+            get_databricks_token(WS)
+
+    def test_static_bearer_still_wins(self, tmp_path, monkeypatch):
+        broker = self._broker(tmp_path, 'echo "brokered-token"')
+        self._env(tmp_path, monkeypatch, broker)
+        os.environ["DATABRICKS_BEARER"] = "ci-bearer"
+
+        assert get_databricks_token(WS) == "ci-bearer"
+
+    def test_has_valid_auth_short_circuits(self, tmp_path, monkeypatch):
+        # Otherwise `ensure_databricks_auth` probes the CLI and can open a browser.
+        marker = self._env(tmp_path, monkeypatch, self._broker(tmp_path, "echo tok"))
+
+        assert db_mod.has_valid_databricks_auth(WS) is True
+        assert not marker.exists()

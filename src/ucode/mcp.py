@@ -8,8 +8,10 @@ import shutil
 import string
 import subprocess
 import threading
+import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import suppress
 from typing import Any
 from urllib.parse import urlparse
 
@@ -29,6 +31,7 @@ from questionary.styles import merge_styles_default
 from ucode.agents import copilot, cursor, gemini, opencode
 from ucode.config_io import restore_file
 from ucode.databricks import (
+    PermissionDeniedError,
     apply_pat_environment,
     build_mcp_proxy_argv,
     build_mcp_service_url,
@@ -37,11 +40,7 @@ from ucode.databricks import (
     get_databricks_token,
     list_all_mcp_services,
     list_databricks_apps,
-    list_databricks_connections,
-    list_genie_spaces,
     list_mcp_services,
-    list_uc_functions_catalog_schemas,
-    list_vector_search_catalog_schemas,
     workspace_hostname,
 )
 from ucode.state import load_full_state, load_state, save_state
@@ -101,6 +100,7 @@ MCP_CLIENTS = {
 }
 SKILLS_MCP_KIND = "skills"
 SKILLS_MCP_SERVER_NAME = "databricks-skill-registry"
+SKILL_LOCATIONS_BY_CLIENT_KEY = "skill_locations_by_client"
 # MCP-only clients ucode never launches for model routing, so they never land in
 # `available_tools`; they're eligible for MCP config purely on being installed.
 MCP_ONLY_CLIENTS = ("cursor",)
@@ -112,13 +112,6 @@ MCP_SERVICE_SELECTION_PREFIX = "mcp-service:"
 VECTOR_SEARCH_SELECTION_PREFIX = "vector-search:"
 UC_FUNCTIONS_SELECTION_PREFIX = "uc-functions:"
 MCP_ADD_PREFIX = "add:"
-MCP_CONNECTION_MARKERS = (
-    "is_mcp",
-    "is_mcp_connection",
-    "mcp",
-    "mcp_enabled",
-    "enable_mcp",
-)
 
 
 def add_claude_mcp_server(
@@ -379,59 +372,6 @@ def revert_mcp_configs(state: dict) -> dict[str, bool]:
     return results
 
 
-def _coerce_bool(value: object) -> bool | None:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        normalized = value.strip().lower()
-        if normalized in {"1", "true", "yes", "y"}:
-            return True
-        if normalized in {"0", "false", "no", "n"}:
-            return False
-    return None
-
-
-def _mcp_marker_value(connection: dict) -> bool | None:
-    containers = [connection]
-    options = connection.get("options")
-    if isinstance(options, dict):
-        containers.append(options)
-
-    for container in containers:
-        for marker in MCP_CONNECTION_MARKERS:
-            if marker in container:
-                value = _coerce_bool(container.get(marker))
-                if value is not None:
-                    return value
-    return None
-
-
-def is_external_mcp_connection(connection: dict) -> bool:
-    connection_type = connection.get("connection_type")
-    if not isinstance(connection_type, str) or connection_type.upper() != "HTTP":
-        return False
-
-    marker_value = _mcp_marker_value(connection)
-    if marker_value is False:
-        return False
-    return True
-
-
-def external_mcp_connection_names(connections: list[dict]) -> list[str]:
-    names: set[str] = set()
-    for connection in connections:
-        if not is_external_mcp_connection(connection):
-            continue
-        name = connection.get("name")
-        if isinstance(name, str) and name.strip():
-            names.add(name.strip())
-    return sorted(names)
-
-
-def discover_external_mcp_connection_names(workspace: str, profile: str | None = None) -> list[str]:
-    return external_mcp_connection_names(list_databricks_connections(workspace, profile))
-
-
 def discover_mcp_service_names(workspace: str, profile: str | None = None) -> list[str]:
     """Curated `system.ai.*` MCP services. Empty list if discovery fails so
     callers can fall back to legacy connection discovery without surfacing
@@ -445,13 +385,17 @@ def discover_all_mcp_service_names(
     workspace: str,
     profile: str | None = None,
     on_progress: Callable[[int, int, int], None] | None = None,
+    on_services: Callable[[list[str]], None] | None = None,
 ) -> list[str]:
     """All MCP services across every `<catalog>.<schema>` in the workspace. This
     walks the workspace (see `list_all_mcp_services`) and is the workspace-wide
     counterpart to `discover_mcp_service_names`. `on_progress` is forwarded to
-    the walk for live count reporting."""
+    the walk for live count reporting, and `on_services` to stream newly-found
+    service names into the picker as the walk progresses."""
     token = get_databricks_token(workspace, profile)
-    names, _reason = list_all_mcp_services(workspace, token, on_progress=on_progress)
+    names, _reason = list_all_mcp_services(
+        workspace, token, on_progress=on_progress, on_services=on_services
+    )
     return names
 
 
@@ -466,46 +410,6 @@ def _normalize_workspace_title(text: str) -> str:
         elif chars and chars[-1] != "-":
             chars.append("-")
     return "".join(chars).strip("-")
-
-
-def _genie_server_name(title: str, space_id: str, taken: set[str]) -> str:
-    """Prefer a friendly name derived from the Genie space title; fall back to
-    the raw space_id when there is no title or the derived name collides with
-    one we already emitted."""
-    slug = _normalize_workspace_title(title) if title else ""
-    if slug:
-        candidate = f"databricks-genie-{slug}"
-        if candidate not in taken:
-            return candidate
-    return f"databricks-genie-{space_id}"
-
-
-def genie_mcp_servers(spaces: list[dict], workspace: str) -> list[dict]:
-    servers: list[dict] = []
-    seen_names: set[str] = set()
-    for space in spaces:
-        space_id = space.get("space_id")
-        if not isinstance(space_id, str) or not space_id.strip():
-            continue
-        space_id = space_id.strip()
-        raw_title = space.get("title")
-        title = raw_title.strip() if isinstance(raw_title, str) and raw_title.strip() else ""
-        server_name = _genie_server_name(title, space_id, seen_names)
-        if server_name in seen_names:
-            continue
-        seen_names.add(server_name)
-        servers.append(
-            {
-                "name": server_name,
-                "title": title or space_id,
-                "url": f"{workspace}/api/2.0/mcp/genie/{space_id}",
-            }
-        )
-    return sorted(servers, key=lambda server: str(server["title"]).lower())
-
-
-def discover_genie_mcp_servers(workspace: str, profile: str | None = None) -> list[dict]:
-    return genie_mcp_servers(list_genie_spaces(workspace, profile), workspace)
 
 
 def app_mcp_servers(apps: list[dict]) -> list[dict]:
@@ -552,66 +456,6 @@ def _catalog_schema_server_name(prefix: str, catalog: str, schema: str, taken: s
     while f"{candidate}-{counter}" in taken:
         counter += 1
     return f"{candidate}-{counter}"
-
-
-def vector_search_mcp_servers(pairs: list[tuple[str, str]], workspace: str) -> list[dict]:
-    servers: list[dict] = []
-    seen_names: set[str] = set()
-    for catalog, schema in pairs:
-        if not catalog or not schema:
-            continue
-        name = _catalog_schema_server_name("databricks-vector-search", catalog, schema, seen_names)
-        seen_names.add(name)
-        servers.append(
-            {
-                "name": name,
-                "title": f"{catalog}.{schema}",
-                "catalog": catalog,
-                "schema": schema,
-                "url": f"{workspace}/api/2.0/mcp/vector-search/{catalog}/{schema}",
-            }
-        )
-    return sorted(servers, key=lambda server: str(server["title"]).lower())
-
-
-def discover_vector_search_mcp_servers(
-    workspace: str,
-    profile: str | None = None,
-    on_progress: Callable[[int, int, int], None] | None = None,
-) -> list[dict]:
-    token = get_databricks_token(workspace, profile)
-    pairs, _reason = list_vector_search_catalog_schemas(workspace, token, on_progress=on_progress)
-    return vector_search_mcp_servers(pairs, workspace)
-
-
-def uc_functions_mcp_servers(pairs: list[tuple[str, str]], workspace: str) -> list[dict]:
-    servers: list[dict] = []
-    seen_names: set[str] = set()
-    for catalog, schema in pairs:
-        if not catalog or not schema:
-            continue
-        name = _catalog_schema_server_name("databricks-functions", catalog, schema, seen_names)
-        seen_names.add(name)
-        servers.append(
-            {
-                "name": name,
-                "title": f"{catalog}.{schema}",
-                "catalog": catalog,
-                "schema": schema,
-                "url": f"{workspace}/api/2.0/mcp/functions/{catalog}/{schema}",
-            }
-        )
-    return sorted(servers, key=lambda server: str(server["title"]).lower())
-
-
-def discover_uc_functions_mcp_servers(
-    workspace: str,
-    profile: str | None = None,
-    on_progress: Callable[[int, int, int], None] | None = None,
-) -> list[dict]:
-    token = get_databricks_token(workspace, profile)
-    pairs, _reason = list_uc_functions_catalog_schemas(workspace, token, on_progress=on_progress)
-    return uc_functions_mcp_servers(pairs, workspace)
 
 
 def _picker_style() -> questionary.Style:
@@ -706,24 +550,98 @@ def _add_choice(selection: str, title: str) -> questionary.Choice:
     return questionary.Choice(title=title, value=f"{MCP_ADD_PREFIX}{selection}")
 
 
+def _mcp_service_choice(name: str, known_names: set[str], additive: bool) -> questionary.Choice:
+    """Picker choice for one MCP-service full name (`<catalog>.<schema>.<id>`).
+
+    Shared by the initial `build_mcp_picker_choices` render and the background walk that
+    streams more services in, so a streamed row is built identically to an up-front one
+    (and dedupes by value against what's already shown). An already-registered service is
+    a removable toggle under `configure mcp` and a non-toggleable note under `mcp add`
+    (additive); an unregistered one is an add-choice."""
+    registered_as = name.replace(".", "-")
+    display_title = f"MCP: {name}"
+    if registered_as in known_names:
+        if additive:
+            return questionary.Choice(
+                title=display_title, value=registered_as, disabled="already configured"
+            )
+        return _server_choice(registered_as, True, display_title)
+    return _add_choice(f"{MCP_SERVICE_SELECTION_PREFIX}{name}", display_title)
+
+
+class _StreamingInquirerControl(InquirerControl):
+    """`InquirerControl` that tolerates an empty or all-disabled choice list.
+
+    Stock `InquirerControl.__init__` ends with ``if not self.is_selection_valid(): raise`` and
+    `is_selection_valid` dereferences `pointed_at`, which `_init_choices` leaves unset when no row
+    is selectable — so constructing it with an empty (or every-row-disabled) list raises, and
+    navigation later hits the same unset cursor. Our picker intentionally opens on an empty list
+    and fills it in via the background loader, and `ug mcp add` can legitimately show only
+    already-configured (disabled) rows. Default the cursor and treat "nothing selectable" as valid
+    so construction, rendering, and navigation don't crash."""
+
+    def is_selection_valid(self) -> bool:
+        if getattr(self, "pointed_at", None) is None:
+            self.pointed_at = 0
+        selectable = any(
+            not isinstance(c, questionary.Separator) and not c.disabled for c in self.choices
+        )
+        if not selectable:
+            # Empty, or every row a separator/disabled: nothing to validate, and nothing for the
+            # navigation skip-loop to land on — report valid so we neither raise nor spin.
+            return True
+        if self.pointed_at >= len(self.choices):
+            return False
+        return super().is_selection_valid()
+
+    def _get_choice_tokens(self):
+        # Stock rendering unconditionally reads `filtered_choices[pointed_at]`, which raises on an
+        # empty list. Render nothing when there are no rows (the picker is still streaming them in).
+        if not self.filtered_choices:
+            return []
+        return super()._get_choice_tokens()
+
+
+def _merge_new_choices(
+    existing: list[questionary.Choice | questionary.Separator],
+    new_choices: list[questionary.Choice],
+) -> list[questionary.Choice]:
+    """Return the choices from ``new_choices`` not already present in ``existing`` (compared by
+    Choice value). Used to dedupe background-streamed picker rows against what's already shown."""
+    shown = {c.value for c in existing if isinstance(c, questionary.Choice)}
+    return [c for c in new_choices if isinstance(c, questionary.Choice) and c.value not in shown]
+
+
 def _scrolling_checkbox(
     message: str,
     choices: list[questionary.Choice | questionary.Separator],
     instruction: str,
     style: questionary.Style,
     allow_back: bool = False,
+    background_loader: Callable[[Callable[[list[questionary.Choice]], None]], None] | None = None,
 ) -> Question:
+    """Multi-select checkbox picker.
+
+    ``background_loader``, if given, streams more choices in after the picker is already
+    on screen: it's run on a daemon thread and handed an ``append(choices)`` callback that
+    adds rows (deduped by value) and repaints, so the picker opens instantly on whatever
+    ``choices`` are ready and fills in the rest without blocking. A footer shows a live
+    "loading more…" count while it runs."""
     merged_style = merge_styles_default(
         [
             questionary.Style([("bottom-toolbar", "noreverse")]),
             style,
         ]
     )
-    control = InquirerControl(
+    # Empty-tolerant control: the picker can open with zero selectable rows (streaming in via the
+    # background loader, or an `mcp add` where everything is already configured) — see the subclass.
+    control = _StreamingInquirerControl(
         choices,
         pointer="›",
         show_description=False,
     )
+    # Live loading state for the background-loader footer (see below).
+    loading = {"active": background_loader is not None, "found": 0}
 
     def get_prompt_tokens() -> list[tuple[str, str]]:
         tokens = [("class:qmark", ""), ("class:question", f" {message} ")]
@@ -742,8 +660,19 @@ def _scrolling_checkbox(
         control.error_message = None
         return True
 
-    visible_rows = min(MCP_PICKER_VISIBLE_ROWS, max(1, len(choices)))
-    has_more_choices = len(choices) > MCP_PICKER_VISIBLE_ROWS
+    @Condition
+    def has_more_choices() -> bool:
+        # Live so the scroll hint appears as background-loaded rows stream in.
+        return len(control.choices) > MCP_PICKER_VISIBLE_ROWS
+
+    @Condition
+    def is_loading() -> bool:
+        return bool(loading["active"])
+
+    def loading_tokens() -> list[tuple[str, str]]:
+        return [
+            ("class:instruction", f"  ⏳ loading more MCP services… ({loading['found']} found)")
+        ]
 
     @Condition
     def has_search_string() -> bool:
@@ -761,7 +690,15 @@ def _scrolling_checkbox(
                     content=FormattedTextControl(get_prompt_tokens),
                 ),
                 ConditionalContainer(
-                    Window(control, height=Dimension(preferred=visible_rows, max=visible_rows)),
+                    # Height tracks the live choice count (capped at the visible max) so the
+                    # window grows as background-loaded rows stream in, with no blank gap when
+                    # only a few choices are present.
+                    Window(
+                        control,
+                        height=lambda: Dimension.exact(
+                            min(MCP_PICKER_VISIBLE_ROWS, max(1, len(control.choices)))
+                        ),
+                    ),
                     filter=~IsDone(),
                 ),
                 ConditionalContainer(
@@ -771,7 +708,14 @@ def _scrolling_checkbox(
                             lambda: [("class:instruction", "  ↑/↓ scroll for more")]
                         ),
                     ),
-                    filter=Condition(lambda: has_more_choices) & ~IsDone(),
+                    filter=has_more_choices & ~IsDone(),
+                ),
+                ConditionalContainer(
+                    Window(
+                        height=Dimension.exact(1),
+                        content=FormattedTextControl(loading_tokens),
+                    ),
+                    filter=is_loading & ~IsDone(),
                 ),
                 ConditionalContainer(
                     Window(
@@ -797,7 +741,12 @@ def _scrolling_checkbox(
 
     @bindings.add(" ", eager=True)
     def _(_event: Any) -> None:
-        pointed_choice = control.get_pointed_at().value
+        if control.choice_count == 0:
+            return  # nothing to toggle (e.g. picker still streaming, or all rows filtered out)
+        pointed = control.get_pointed_at()
+        if isinstance(pointed, questionary.Separator) or pointed.disabled:
+            return  # separators and already-configured (disabled) rows aren't toggleable
+        pointed_choice = pointed.value
         if pointed_choice in control.selected_options:
             control.selected_options.remove(pointed_choice)
         else:
@@ -820,14 +769,23 @@ def _scrolling_checkbox(
         perform_validation()
 
     def move_cursor_down(event: Any) -> None:
+        if control.choice_count == 0:
+            return
         control.select_next()
-        while not control.is_selection_valid():
+        # Bound the skip-past-disabled scan so an all-disabled list can't spin forever.
+        tries = 0
+        while not control.is_selection_valid() and tries < control.choice_count:
             control.select_next()
+            tries += 1
 
     def move_cursor_up(event: Any) -> None:
+        if control.choice_count == 0:
+            return
         control.select_previous()
-        while not control.is_selection_valid():
+        tries = 0
+        while not control.is_selection_valid() and tries < control.choice_count:
             control.select_previous()
+            tries += 1
 
     def search_filter(event: Any) -> None:
         control.add_search_character(event.key_sequence[0].key)
@@ -863,13 +821,59 @@ def _scrolling_checkbox(
     def _(_event: Any) -> None:
         """Ignore other text input."""
 
-    return Question(
-        Application(
-            layout=layout,
-            key_bindings=bindings,
-            style=merged_style,
-        )
+    app: Application = Application(
+        layout=layout,
+        key_bindings=bindings,
+        style=merged_style,
     )
+
+    if background_loader is not None:
+        started = False
+
+        def run_on_loop(fn: Callable[[], None]) -> None:
+            # Background updates MUST run on the picker's event-loop thread: mutating the control
+            # off-thread drops rows (prompt_toolkit's invalidate() no-ops until the app is running)
+            # and disturbs live input (toggling/removal). Wait briefly for the app to start, then
+            # hand `fn` to the loop; bail once the picker has closed or if it never starts in time.
+            nonlocal started
+            deadline = time.monotonic() + 15.0
+            while not (app.is_running and app.loop is not None):
+                if started or time.monotonic() > deadline:
+                    return
+                time.sleep(0.02)
+            started = True
+            with suppress(Exception):
+                app.loop.call_soon_threadsafe(fn)
+
+        def append(new_choices: list[questionary.Choice]) -> None:
+            def apply() -> None:
+                # On the UI thread: rebind choices (atomic; render reads the list live) and repaint.
+                # Selections track by value, so appended rows never disturb checkboxes/scroll/filter.
+                additions = _merge_new_choices(control.choices, new_choices)
+                if additions:
+                    control.choices = [*control.choices, *additions]
+                    loading["found"] += len(additions)
+                    app.invalidate()
+
+            run_on_loop(apply)
+
+        def worker() -> None:
+            try:
+                background_loader(append)
+            except Exception:
+                # Discovery is best-effort; a failed background walk just stops streaming.
+                pass
+            finally:
+
+                def finish() -> None:
+                    loading["active"] = False
+                    app.invalidate()
+
+                run_on_loop(finish)
+
+        threading.Thread(target=worker, name="mcp-picker-loader", daemon=True).start()
+
+    return Question(app)
 
 
 def build_mcp_picker_choices(
@@ -899,23 +903,17 @@ def build_mcp_picker_choices(
     choices: list[questionary.Choice | questionary.Separator] = []
     displayed_names: set[str] = set()
 
-    if "databricks-sql" in known_names:
-        choices.append(known_choice("databricks-sql", "Databricks SQL"))
-    else:
-        choices.append(_add_choice(SQL_MCP_VALUE, "Databricks SQL"))
-    displayed_names.add("databricks-sql")
+    # Databricks SQL is intentionally NOT offered as an up-front add-choice — we don't promote
+    # it. If it's exposed as a `system.ai` MCP service it shows like any other service, and an
+    # already-configured `databricks-sql` still appears (removable) via the known-server fallback
+    # at the end. The `managed:sql` selection value is still resolvable for managed configs.
 
     for name in available_mcp_service_names or []:
         # Picker shows the dotted UC name; state/agents store the dashed form
-        # (see resolver). Compare against the dashed form when checking what's
-        # already registered.
-        registered_as = name.replace(".", "-")
-        display_title = f"MCP: {name}"
-        if registered_as in known_names:
-            choices.append(known_choice(registered_as, display_title))
-        else:
-            choices.append(_add_choice(f"{MCP_SERVICE_SELECTION_PREFIX}{name}", display_title))
-        displayed_names.add(registered_as)
+        # (see resolver). The shared helper is also used by the background walk that
+        # streams more services in, so up-front and streamed rows match exactly.
+        choices.append(_mcp_service_choice(name, known_names, additive))
+        displayed_names.add(name.replace(".", "-"))
 
     for name in available_external_names:
         display_title = f"Connection: {name}"
@@ -1010,13 +1008,18 @@ def prompt_for_mcp_server_choices(
     available_uc_functions_servers: list[dict] | None = None,
     allow_back: bool = False,
     additive: bool = False,
+    background_loader: Callable[[Callable[[list[questionary.Choice]], None]], None] | None = None,
 ) -> list[str] | None | _Back:
     """Show the MCP server picker. Returns the list of selected values, `None`
     if cancelled (Ctrl-C), or `_BACK` if `allow_back` and the user pressed Left
     to return to the previous wizard step.
 
     ``additive`` (``ucode mcp add``) shows already-configured servers as
-    non-toggleable notes instead of pre-checked, removable boxes."""
+    non-toggleable notes instead of pre-checked, removable boxes.
+
+    ``background_loader`` streams more choices in after the picker opens (see
+    `_scrolling_checkbox`) — used to load the workspace-wide MCP-services walk without
+    blocking on it up front."""
     instruction = "(space to toggle, ctrl-a all, enter to save, type to filter)"
     if allow_back:
         instruction = "(space to toggle, ctrl-a all, ← back, enter to save, type to filter)"
@@ -1035,6 +1038,7 @@ def prompt_for_mcp_server_choices(
         style=_picker_style(),
         instruction=instruction,
         allow_back=allow_back,
+        background_loader=background_loader,
     ).ask()
     if selection is None:
         return None
@@ -1276,120 +1280,59 @@ def _discover_mcp_source(label: str, discover: Callable[[], list[Any]]) -> list[
     try:
         with spinner(f"Discovering {label}..."):
             return discover()
+    except PermissionDeniedError:
+        # Consumer-only identities lack workspace access, so this source 403s for them.
+        # Skip it quietly (not as a scary warning) so setup completes (AIGTWY-4471).
+        print_note(f"Skipped {label} (no workspace access).")
+        return []
     except (RuntimeError, OSError) as exc:
-        # Discovery is best-effort: a failure here (auth error, network timeout)
+        # Discovery is best-effort: a failure here (network timeout, transient error)
         # skips just this source so the rest of the picker still works.
         print_warning(f"Skipped {label} ({exc}).")
         return []
 
 
-def _discover_mcp_source_with_progress(
-    label: str,
-    unit: str,
-    discover: Callable[[Callable[[int, int, int], None]], list[Any]],
-) -> list[Any]:
-    """Run a walk-based discovery behind a spinner whose message shows a live
-    count (e.g. `Searching Vector Search... 3/8 endpoints, 2 found`). `discover`
-    receives an `on_progress(done, total, found)` callback and `unit` names what
-    is being counted. Best-effort like `_discover_mcp_source`: any failure is
-    warned and yields an empty list."""
-    progress = {"done": 0, "total": 0, "found": 0}
+def _mcp_services_background_loader(
+    workspace: str,
+    profile: str | None,
+    known_names: set[str],
+    additive: bool,
+) -> Callable[[Callable[[list[questionary.Choice]], None]], None]:
+    """Return a picker `background_loader` that runs the workspace-wide MCP-services walk and
+    streams each schema's newly-found services into the open picker as choices, so the walk
+    never blocks the picker from opening. Deduping against already-shown rows (e.g. the fast
+    `system.ai` list) is handled by the picker's append."""
 
-    def on_progress(done: int, total: int, found: int) -> None:
-        progress.update(done=done, total=total, found=found)
+    def loader(append: Callable[[list[questionary.Choice]], None]) -> None:
+        def on_services(new_names: list[str]) -> None:
+            append([_mcp_service_choice(name, known_names, additive) for name in new_names])
 
-    def message() -> str:
-        if progress["total"]:
-            return (
-                f"Searching {label}... {progress['done']}/{progress['total']} {unit}, "
-                f"{progress['found']} found"
-            )
-        return f"Searching {label}..."
+        discover_all_mcp_service_names(workspace, profile, on_services=on_services)
 
-    try:
-        with spinner(message):
-            return discover(on_progress)
-    except (RuntimeError, OSError) as exc:
-        print_warning(f"Skipped {label} ({exc}).")
-        return []
+    return loader
 
 
 def _discover_selected_mcp_sources(
     workspace: str, profile: str | None, sources: set[str]
 ) -> dict[str, list]:
-    """Run discovery for the sources the user selected on the search screen.
-    Returns a dict keyed by picker argument (external/apps/services/genie/
-    vector_search/uc_functions); unselected sources yield empty lists so the
-    picker still renders (and can still remove already-registered servers)."""
-    external = (
-        _discover_mcp_source(
-            "external connections",
-            lambda: discover_external_mcp_connection_names(workspace, profile),
-        )
-        if "external" in sources
-        else []
-    )
-    apps = (
-        _discover_mcp_source(
-            "Databricks apps",
-            lambda: discover_app_mcp_servers(workspace, profile),
-        )
-        if "apps" in sources
-        else []
-    )
-    # MCP services: curated `system.ai` list plus the workspace-wide walk,
-    # merged and de-duplicated (the walk skips the `system` catalog).
+    """Discover the picker's sources. The picker searches a single source — MCP services — so
+    this fetches the fast curated `system.ai` list synchronously (the slow workspace-wide walk
+    streams in afterward via the picker's background loader). The other keys stay in the returned
+    dict as empty lists so the picker call is unchanged and can still render/remove
+    already-registered servers of any type."""
     services: list[str] = []
-    if "mcp-services" in sources:
-        curated = _discover_mcp_source(
+    if MCP_SERVICES_SOURCE in sources:
+        services = _discover_mcp_source(
             "MCP services",
             lambda: discover_mcp_service_names(workspace, profile),
         )
-        walked = _discover_mcp_source_with_progress(
-            "all MCP services",
-            "schemas",
-            lambda on_progress: discover_all_mcp_service_names(
-                workspace, profile, on_progress=on_progress
-            ),
-        )
-        services = list(dict.fromkeys(curated + walked))
-    genie = (
-        _discover_mcp_source(
-            "Genie spaces",
-            lambda: discover_genie_mcp_servers(workspace, profile),
-        )
-        if "genie" in sources
-        else []
-    )
-    vector_search = (
-        _discover_mcp_source_with_progress(
-            "Vector Search",
-            "endpoints",
-            lambda on_progress: discover_vector_search_mcp_servers(
-                workspace, profile, on_progress=on_progress
-            ),
-        )
-        if "vector-search" in sources
-        else []
-    )
-    uc_functions = (
-        _discover_mcp_source_with_progress(
-            "UC functions",
-            "schemas",
-            lambda on_progress: discover_uc_functions_mcp_servers(
-                workspace, profile, on_progress=on_progress
-            ),
-        )
-        if "uc-functions" in sources
-        else []
-    )
     return {
-        "external": external,
-        "apps": apps,
+        "external": [],
+        "apps": [],
         "services": services,
-        "genie": genie,
-        "vector_search": vector_search,
-        "uc_functions": uc_functions,
+        "genie": [],
+        "vector_search": [],
+        "uc_functions": [],
     }
 
 
@@ -1440,27 +1383,7 @@ def apply_mcp_server_changes(
             )
         changed = True
 
-    total_ops = sum(len(ops) for ops in work.values())
-    if total_ops == 0:
-        return changed
-
-    completed = _Counter()
-
-    def run_client_ops(ops: list[Callable[[], object]]) -> None:
-        for op in ops:
-            op()
-            completed.increment()
-
-    def message() -> str:
-        return f"Configuring MCP servers... {completed.value()}/{total_ops}"
-
-    with spinner(message):
-        with ThreadPoolExecutor(max_workers=max(1, len(work))) as pool:
-            futures = [pool.submit(run_client_ops, ops) for ops in work.values() if ops]
-            # Surface the first failure (if any) once all client threads finish.
-            for future in as_completed(futures):
-                future.result()
-
+    _run_client_work(work)
     return changed
 
 
@@ -1478,6 +1401,29 @@ class _Counter:
     def value(self) -> int:
         with self._lock:
             return self._value
+
+
+def _run_client_work(work: dict[str, list[Callable[[], object]]]) -> None:
+    total_ops = sum(len(ops) for ops in work.values())
+    if total_ops == 0:
+        return
+
+    completed = _Counter()
+
+    def run_client_ops(ops: list[Callable[[], object]]) -> None:
+        for op in ops:
+            op()
+            completed.increment()
+
+    def message() -> str:
+        return f"Configuring MCP servers... {completed.value()}/{total_ops}"
+
+    with spinner(message):
+        with ThreadPoolExecutor(max_workers=max(1, len(work))) as pool:
+            futures = [pool.submit(run_client_ops, ops) for ops in work.values() if ops]
+            # Surface the first failure (if any) once all client threads finish.
+            for future in as_completed(futures):
+                future.result()
 
 
 def purge_cross_workspace_mcp_residue(state: dict, workspace: str) -> None:
@@ -1617,42 +1563,31 @@ def _resolve_location_mcp_servers(
     return [*working_servers, *_skills_entries(original_servers)]
 
 
-# The first wizard step lets the user choose which sources to search. Each is a
-# (key, label, default_checked) triple. Vector Search and UC functions default
-# off because they walk the workspace (endpoints/catalogs/schemas) and are slow;
-# everything else is a cheap listing and defaults on.
-MCP_SEARCH_SOURCES = (
-    ("external", "External connections", True),
-    ("apps", "Databricks apps", True),
-    ("mcp-services", "MCP services", True),
-    ("genie", "Genie spaces", True),
-    ("vector-search", "Vector Search indexes (slower)", False),
-    ("uc-functions", "UC functions (slower)", False),
+# The interactive picker searches a single source: MCP services (the `/ai-gateway/mcp-services/`
+# path), the one source a consumer-only identity can reach. The V2 AI Gateway sources — external
+# connections, Databricks apps, Genie spaces, Vector Search, and UC functions, all served under
+# `/api/2.0/mcp/*` — aren't offered in the picker because consumer entitlements don't grant access
+# to them; workspace users add one non-interactively with a typed `--services` selector (see
+# `V2_MCP_SELECTOR_PREFIXES` and `_configure_v2_mcp_selectors`). Since there's a single source,
+# there is no "choose sources" wizard step.
+MCP_SERVICES_SOURCE = "mcp-services"
+
+# Typed `--services` selectors that name a V2 AI Gateway MCP server directly, e.g.
+# `vector-search:main.docs` or `uc-functions:main.tools`. These bypass the interactive
+# picker (which no longer offers V2 sources) so workspace users can still add them on
+# request; a consumer-only identity is blocked with a clear error before registering.
+V2_MCP_SELECTOR_PREFIXES = (
+    VECTOR_SEARCH_SELECTION_PREFIX,
+    UC_FUNCTIONS_SELECTION_PREFIX,
+    EXTERNAL_MCP_SELECTION_PREFIX,
+    GENIE_SPACE_SELECTION_PREFIX,
+    APP_MCP_SELECTION_PREFIX,
 )
 
 
-def prompt_for_mcp_search_sources(exclude_sources: set[str] | None = None) -> set[str] | None:
-    """First wizard step: choose which sources to search. Returns the set of
-    selected source keys, or `None` if the user cancelled (Ctrl-C).
-
-    ``exclude_sources`` drops source keys the caller can't use — e.g. `ucode setup` excludes
-    ``apps`` because a managed config can't carry an app's off-workspace host, so offering it would
-    let an admin pick a server that is then silently dropped."""
-    excluded = exclude_sources or set()
-    choices = [
-        questionary.Choice(title=label, value=key, checked=checked)
-        for key, label, checked in MCP_SEARCH_SOURCES
-        if key not in excluded
-    ]
-    selection = _scrolling_checkbox(
-        "Search for:",
-        choices=choices,
-        style=_picker_style(),
-        instruction="(space to toggle, ctrl-a all, enter to search)",
-    ).ask()
-    if selection is None:
-        return None
-    return {str(value) for value in selection}
+def _is_v2_mcp_selector(service: str) -> bool:
+    """Whether a `--services` entry is a typed V2 MCP selector (see `V2_MCP_SELECTOR_PREFIXES`)."""
+    return service.startswith(V2_MCP_SELECTOR_PREFIXES)
 
 
 def setup_mcp_clients(
@@ -1758,6 +1693,74 @@ def add_mcp_command(
     return configure_mcp_command(location=location, services=services, append=True, agents=agents)
 
 
+def _configure_v2_mcp_selectors(
+    selectors: list[str],
+    *,
+    append: bool,
+    agents: set[str] | None,
+) -> int:
+    """Non-interactive add for V2 AI Gateway MCP servers named by typed `--services`
+    selectors (`vector-search:`/`uc-functions:`/`external:`/`genie-space:`/`app:`).
+
+    The interactive picker no longer offers these sources; this is how a workspace user adds one
+    on request. These require workspace access, which consumer-only identities lack — but that's
+    enforced upstream at the AI Gateway (which ucode already hits during model setup), not here:
+    the listing calls this uses don't reliably signal consumer access (see `PermissionDeniedError`).
+    Registration mirrors the interactive add path: additive under ``append`` (`ucode mcp add`), an
+    exact replacement otherwise (`ucode configure mcp`), always preserving the skills connection."""
+    state = load_state()
+    workspace, profile, clients = setup_mcp_clients(
+        state, "Add MCP Servers" if append else "MCP Servers", agents=agents
+    )
+
+    # `app:` selectors need the app's off-workspace URL, which only discovery knows. A 403 here
+    # means the caller can't list apps (no workspace access, or no apps permission).
+    available_app_servers: list[dict] = []
+    if any(s.startswith(APP_MCP_SELECTION_PREFIX) for s in selectors):
+        try:
+            available_app_servers = discover_app_mcp_servers(workspace, profile)
+        except PermissionDeniedError as exc:
+            raise RuntimeError(
+                f"{exc} This needs workspace access to the Databricks apps listing; ask a "
+                "workspace admin if you're missing it."
+            ) from exc
+
+    original_mcp_servers: list[dict] = list(state.get("mcp_servers") or [])
+    skills_servers = _skills_entries(original_mcp_servers)
+    picker_servers = [s for s in original_mcp_servers if s.get("kind") != SKILLS_MCP_KIND]
+    original_by_name = _servers_by_name(picker_servers)
+
+    working_mcp_servers: list[dict] = list(skills_servers)
+    working_names: set[str] = set()
+    for selection in selectors:
+        entry_name, url = _resolve_mcp_selection(selection, workspace, available_app_servers)
+        if entry_name in working_names:
+            continue
+        working_mcp_servers.append(
+            {"name": entry_name, "url": url, "auth": "proxy", "clients": clients}
+        )
+        working_names.add(entry_name)
+
+    if append:
+        working_mcp_servers = _union_missing(original_mcp_servers, working_mcp_servers)
+
+    changed = apply_mcp_server_changes(
+        original_mcp_servers,
+        working_mcp_servers,
+        clients,
+        workspace,
+        profile,
+        use_pat=bool(state.get("use_pat")),
+    )
+    if changed or original_mcp_servers != working_mcp_servers:
+        state["mcp_servers"] = working_mcp_servers
+        save_state(state)
+        added = sorted(working_names - set(original_by_name))
+        removed = [] if append else sorted(set(original_by_name) - working_names)
+        print_success(_mcp_change_summary(added, removed, clients))
+    return 0
+
+
 def configure_mcp_command(
     location: str | None = None,
     services: set[str] | None = None,
@@ -1774,6 +1777,21 @@ def configure_mcp_command(
     final server list is unioned with the already-configured servers, so nothing
     outside the current selection is removed. ``agents`` scopes the operation to
     that subset of configured MCP clients."""
+    if services is not None:
+        # A typed V2 MCP selector (`vector-search:main.docs`, `uc-functions:main.tools`,
+        # `external:conn`, `genie-space:<id>`, `app:<name>`) names a server the picker no
+        # longer offers. Route it through the dedicated non-interactive path so workspace
+        # users can still add it on request; consumer-only identities are blocked there.
+        v2_selectors = sorted(s for s in services if _is_v2_mcp_selector(s))
+        if v2_selectors:
+            other = sorted(s for s in services if not _is_v2_mcp_selector(s))
+            if other or location is not None:
+                raise RuntimeError(
+                    "V2 MCP selectors (vector-search:/uc-functions:/external:/genie-space:/app:) "
+                    "can't be combined with --location or plain MCP-service names in one call; add "
+                    "them in a separate command."
+                )
+            return _configure_v2_mcp_selectors(v2_selectors, append=append, agents=agents)
     if services is not None and location is None:
         # `--services` works standalone with full names (`system.ai.github`): the
         # `<catalog>.<schema>` to configure is derived from them. Bare short names
@@ -1831,31 +1849,28 @@ def configure_mcp_command(
         picker_servers = [s for s in picker_servers if not _is_app_mcp_server(s)]
     original_by_name = _servers_by_name(picker_servers)
 
-    # Two-step wizard: (1) choose which sources to search, (2) pick servers from
-    # the results. Pressing Left (←) in the picker returns to step 1, so the user
-    # can revise their source selection without restarting the command.
-    while True:
-        sources = prompt_for_mcp_search_sources(exclude_sources=excluded_sources)
-        if sources is None:
-            return 0
-        discovered = _discover_selected_mcp_sources(workspace, profile, sources)
-
-        selections = prompt_for_mcp_server_choices(
-            discovered["external"],
-            discovered["genie"],
-            discovered["apps"],
-            picker_servers,
-            discovered["services"],
-            discovered["vector_search"],
-            discovered["uc_functions"],
-            allow_back=True,
-            additive=append,
-        )
-        if selections is None:
-            return 0
-        if isinstance(selections, _Back):
-            continue
-        break
+    # Single source (MCP services), so there's no "choose sources" step — discover the fast
+    # `system.ai` list, show the picker immediately, and let the workspace-wide walk stream in
+    # behind it via the background loader so the picker never blocks on it.
+    discovered = _discover_selected_mcp_sources(workspace, profile, {MCP_SERVICES_SOURCE})
+    services_loader = _mcp_services_background_loader(
+        workspace, profile, set(original_by_name), additive=append
+    )
+    selections = prompt_for_mcp_server_choices(
+        discovered["external"],
+        discovered["genie"],
+        discovered["apps"],
+        picker_servers,
+        discovered["services"],
+        discovered["vector_search"],
+        discovered["uc_functions"],
+        additive=append,
+        background_loader=services_loader,
+    )
+    if selections is None or isinstance(selections, _Back):
+        # No back-navigation without the source step; `_Back` can't occur, but keep the guard
+        # so the type narrows to a selection list below.
+        return 0
 
     available_app_mcp_servers = discovered["apps"]
     available_genie_mcp_servers = discovered["genie"]
@@ -2047,23 +2062,78 @@ def _merge_clients(prior: list[str] | None, new: list[str]) -> list[str]:
     return prior + [c for c in new if c not in prior]
 
 
-def _build_skills_entry(workspace: str, locations: list[str], clients: list[str]) -> dict:
-    """Canonical single skills-registry entry. ``skill_locations`` is the source
-    of truth; the URL is always derived from it, never parsed back."""
+def _dedupe_locations(locations: list[str]) -> list[str]:
+    """Return valid locations once each, preserving their input order."""
+    return list(dict.fromkeys(loc for loc in locations if isinstance(loc, str) and loc))
+
+
+def _skill_locations_by_client(entry: dict | None) -> dict[str, list[str]]:
+    """Per-client skill locations. Reads the stored per-client map when present; otherwise derives
+    it from a legacy flat ``skill_locations``, mirrored to every client, so reads work on both shapes."""
+    stored = (entry or {}).get(SKILL_LOCATIONS_BY_CLIENT_KEY)
+    if isinstance(stored, dict):
+        return {
+            client: _dedupe_locations(locations)
+            for client, locations in stored.items()
+            if client in MCP_CLIENTS and isinstance(locations, list)
+        }
+    flat = (entry or {}).get("skill_locations")
+    flat = _dedupe_locations(flat if isinstance(flat, list) else [])
+    return {
+        client: list(flat)
+        for client in ((entry or {}).get("clients") or [])
+        if client in MCP_CLIENTS
+    }
+
+
+def _skill_locations_by_client_from_state(state: dict) -> dict[str, list[str]]:
+    return _skill_locations_by_client(_skills_entry(list(state.get("mcp_servers") or [])))
+
+
+def skill_locations_for_client(entry: dict | None, client: str) -> list[str]:
+    """One client's skills scope from a persisted skills entry."""
+    return _skill_locations_by_client(entry).get(client, [])
+
+
+def agents_share_one_scope(scopes: dict[str, list[str]]) -> bool:
+    return len({tuple(locations) for locations in scopes.values()}) <= 1
+
+
+def _build_skills_entry(
+    workspace: str,
+    locations_by_client: dict[str, list[str]],
+    clients: list[str],
+) -> dict:
+    """Build the skills-registry entry from a per-client developer scope. ``skill_locations`` mirrors
+    the union across clients so legacy readers and a downgrade to a flat-scope build stay coherent."""
+    by_client = {
+        client: _dedupe_locations(locations)
+        for client, locations in (locations_by_client or {}).items()
+        if client in MCP_CLIENTS and _dedupe_locations(locations)
+    }
+    mirror: list[str] = []
+    for locations in by_client.values():
+        mirror = _union_locations(mirror, locations)
     return {
         "name": SKILLS_MCP_SERVER_NAME,
         "kind": SKILLS_MCP_KIND,
-        "skill_locations": list(locations),
-        "url": build_skills_mcp_url(workspace, locations),
+        "skill_locations": mirror,
+        SKILL_LOCATIONS_BY_CLIENT_KEY: by_client,
+        "url": build_skills_mcp_url(workspace, mirror),
         "auth": "proxy",
         "clients": clients,
     }
 
 
+def _skills_entry(servers: list[dict]) -> dict | None:
+    """Return the skills-registry entry, if one is present."""
+    return next((server for server in servers if server.get("kind") == SKILLS_MCP_KIND), None)
+
+
 def _resolve_skills_mcp_servers(
     workspace: str,
     clients: list[str],
-    locations: list[str],
+    locations_by_client: dict[str, list[str]],
     original_servers: list[dict],
 ) -> list[dict]:
     """Rebuild the MCP server list around exactly one skills entry.
@@ -2074,14 +2144,14 @@ def _resolve_skills_mcp_servers(
     else, and appends one rebuilt entry whose clients merge the prior skills
     entry's clients with ``clients``.
     """
-    prior = next((s for s in original_servers if s.get("kind") == SKILLS_MCP_KIND), None)
+    prior = _skills_entry(original_servers)
     merged = _merge_clients((prior or {}).get("clients"), clients)
     kept = [
         s
         for s in original_servers
         if s.get("kind") != SKILLS_MCP_KIND and _server_name(s) != SKILLS_MCP_SERVER_NAME
     ]
-    return [*kept, _build_skills_entry(workspace, locations, merged)]
+    return [*kept, _build_skills_entry(workspace, locations_by_client, merged)]
 
 
 def _join_with_and(items: list[str]) -> str:
@@ -2096,6 +2166,12 @@ def _skills_tools_description(locations: list[str]) -> str:
     return f"UC skill utility tools + skills tools in schema {_join_with_and(locations)}"
 
 
+def _skills_workspace(entry: dict) -> str:
+    """Extract the workspace base URL from a skills-registry entry."""
+    url = str(entry.get("url") or "")
+    return url.split("/ai-gateway/skills/", 1)[0]
+
+
 def _print_skills_summary(entry: dict) -> None:
     """Report the registered skills connection and how to start using it."""
     clients = [
@@ -2106,42 +2182,112 @@ def _print_skills_summary(entry: dict) -> None:
     console.print()
     print_success("Skills MCP registered")
     print_kv("Server", str(entry.get("name") or SKILLS_MCP_SERVER_NAME))
-    print_kv("URL", str(entry.get("url") or ""))
-    print_kv("Configured", ", ".join(clients) if clients else "none")
-    print_kv("Tools", _skills_tools_description(entry.get("skill_locations") or []))
+    scopes = {
+        client: skill_locations_for_client(entry, client)
+        for client in (entry.get("clients") or [])
+        if client in MCP_CLIENTS
+    }
+    if agents_share_one_scope(scopes):
+        locations = next(iter(scopes.values()), [])
+        print_kv("URL", build_skills_mcp_url(_skills_workspace(entry), locations))
+        print_kv("Configured", ", ".join(clients) if clients else "none")
+        print_kv("Tools", _skills_tools_description(locations))
+    else:
+        print_kv("Configured", ", ".join(clients) if clients else "none")
+        workspace = _skills_workspace(entry)
+        for client, locations in scopes.items():
+            display = str(MCP_CLIENTS[client]["display"])
+            print_kv(f"{display} URL", build_skills_mcp_url(workspace, locations))
+            print_kv(f"{display} tools", _skills_tools_description(locations))
     print_note(
         "Run `ucode <agent>` to use the skills MCP. For existing sessions, "
         "restart the agent for the skills to take effect."
     )
 
 
+def apply_skills_mcp_changes(
+    original_entry: dict | None,
+    working_entry: dict,
+    clients: list[str],
+    workspace: str,
+    profile: str | None = None,
+    *,
+    use_pat: bool = False,
+) -> bool:
+    """Register the skills connection for every client in one concurrent batch, each with its own scoped URL."""
+    configured_before = set(original_entry.get("clients") or []) if original_entry else set()
+    work: dict[str, list[Callable[[], object]]] = {}
+    changed = False
+    for client in clients:
+        locations = skill_locations_for_client(working_entry, client)
+        unchanged = (
+            client in configured_before
+            and skill_locations_for_client(original_entry, client) == locations
+        )
+        if unchanged:
+            continue
+        url = build_skills_mcp_url(workspace, locations)
+        work[client] = [
+            lambda c=client, u=url: configure_client_mcp_server(
+                c, SKILLS_MCP_SERVER_NAME, u, workspace, profile, use_pat=use_pat, always_load=True
+            )
+        ]
+        changed = True
+
+    _run_client_work(work)
+    return changed
+
+
 def _update_skills_mcp(
-    state: dict, workspace: str, profile: str | None, clients: list[str], locations: list[str]
-) -> None:
-    """Rebuild the single skills connection for ``locations`` and persist it."""
+    state: dict,
+    workspace: str,
+    profile: str | None,
+    clients: list[str],
+    locations_by_client: dict[str, list[str]],
+    *,
+    print_summary: bool = True,
+    use_pat: bool | None = None,
+) -> bool:
+    """Persist one skills entry and update only clients whose scope changed."""
     original = list(state.get("mcp_servers") or [])
-    working = _resolve_skills_mcp_servers(workspace, clients, locations, original)
-    changed = apply_mcp_server_changes(original, working, clients, workspace, profile)
+    working = _resolve_skills_mcp_servers(workspace, clients, locations_by_client, original)
+    original_entry = _skills_entry(original)
+    working_entry = _skills_entry(working)
+    if working_entry is None:
+        raise RuntimeError("Failed to build the Skills MCP connection.")
+
+    changed = apply_skills_mcp_changes(
+        original_entry,
+        working_entry,
+        clients,
+        workspace,
+        profile,
+        use_pat=bool(state.get("use_pat")) if use_pat is None else use_pat,
+    )
     if changed or original != working:
         state["mcp_servers"] = working
         save_state(state)
-    entry = next(s for s in working if s.get("kind") == SKILLS_MCP_KIND)
-    _print_skills_summary(entry)
+    if print_summary:
+        _print_skills_summary(working_entry)
+    return changed or original != working
 
 
 def configure_skills_mcp_command(locations: list[str]) -> int:
-    """Set the skills MCP connection's ``skill_locations`` to exactly ``locations``,
-    replacing any previous set."""
+    """Set every configured client's skill scope to ``locations``."""
     state = load_state()
     workspace, profile, clients = setup_mcp_clients(state, "Skills MCP")
-    _update_skills_mcp(state, workspace, profile, clients, locations)
+    locations_by_client = _skill_locations_by_client_from_state(state)
+    for client in clients:
+        locations_by_client[client] = list(locations)
+    _update_skills_mcp(state, workspace, profile, clients, locations_by_client)
     return 0
 
 
 def _skill_mcp_locations(state: dict) -> list[str]:
     """The skills MCP connection's ``skill_locations``, or ``[]`` if none exists."""
-    entry = next(iter(_skills_entries(list(state.get("mcp_servers") or []))), None)
-    return list((entry or {}).get("skill_locations") or [])
+    entry = _skills_entry(list(state.get("mcp_servers") or []))
+    locations = (entry or {}).get("skill_locations")
+    return _dedupe_locations(locations if isinstance(locations, list) else [])
 
 
 def register_schemaless_skills_connection(
@@ -2149,13 +2295,15 @@ def register_schemaless_skills_connection(
 ) -> None:
     """Register/keep the skills MCP connection without changing its schema set.
 
-    Download mode calls this after writing files: it preserves any prior
-    ``--mcp`` ``skill_locations`` and otherwise registers the bare schema-less
-    route (utility tools only)."""
-    _update_skills_mcp(state, workspace, profile, clients, _skill_mcp_locations(state))
+    Download mode calls this after writing files: it preserves each client's prior
+    ``--mcp`` scope and otherwise registers the bare schema-less route (utility tools only)."""
+    _update_skills_mcp(
+        state, workspace, profile, clients, _skill_locations_by_client_from_state(state)
+    )
 
 
 def _union_locations(base: list[str], new: list[str]) -> list[str]:
+    """Return an order-preserving union of two skill-location lists."""
     have = set(base)
     merged = list(base)
     for location in new:
@@ -2165,10 +2313,96 @@ def _union_locations(base: list[str], new: list[str]) -> list[str]:
     return merged
 
 
-def add_skills_command(locations: list[str]) -> int:
-    """Add ``locations`` to the skills MCP connection's scope, keeping any already configured."""
+def add_skills_command(locations: list[str], agents: set[str] | None = None) -> int:
+    """Add ``locations`` to each targeted client's skill scope, keeping any already configured.
+
+    ``agents`` (from ``--agents``) scopes the update to that subset of configured clients; omitting
+    it targets every configured client. This mirrors ``ucode mcp add`` exactly: the client set is
+    the only thing ``--agents`` changes."""
     state = load_state()
-    workspace, profile, clients = setup_mcp_clients(state, "Add Skills MCP")
-    merged = _union_locations(_skill_mcp_locations(state), locations)
-    _update_skills_mcp(state, workspace, profile, clients, merged)
+    workspace, profile, clients = setup_mcp_clients(state, "Add Skills MCP", agents=agents)
+    locations_by_client = _skill_locations_by_client_from_state(state)
+    for client in clients:
+        locations_by_client[client] = _union_locations(
+            locations_by_client.get(client, []), locations
+        )
+    _update_skills_mcp(state, workspace, profile, clients, locations_by_client)
+    return 0
+
+
+def _prompt_for_skill_removal(locations_by_client: dict[str, list[str]]) -> list[str] | None:
+    """Checklist of skill schemas to remove, each annotated with the clients it's scoped to.
+    Returns the selected locations, ``None`` if cancelled (Ctrl-C), or ``[]`` if nothing checked."""
+    choices: list[questionary.Choice | questionary.Separator] = []
+    ordered_locations = list(
+        dict.fromkeys(
+            location for locations in locations_by_client.values() for location in locations
+        )
+    )
+    for location in ordered_locations:
+        displays = [
+            str(MCP_CLIENTS[client]["display"])
+            for client, locations in locations_by_client.items()
+            if location in locations
+        ]
+        choices.append(
+            questionary.Choice(
+                title=f"{location} ({', '.join(displays)})",
+                value=location,
+                checked=False,
+            )
+        )
+    if not choices:
+        return []
+    selection = _scrolling_checkbox(
+        "Remove skill schemas:",
+        choices=choices,
+        style=_picker_style(),
+        instruction="(space to toggle, ctrl-a all, enter to remove, type to filter)",
+    ).ask()
+    if selection is None:
+        return None
+    return [str(value) for value in selection]
+
+
+def remove_skills_command(agents: set[str] | None = None) -> int:
+    """`ucode skill remove --mcp`: interactively drop skill schemas from clients' skills scopes.
+
+    Shows the schemas in each targeted client's skills scope and removes the ones you select from
+    those clients. Without ``agents`` a selected schema is removed from every configured client;
+    with ``agents`` (from ``--agents``) removal is scoped to the named clients and kept on the rest.
+    It never adds or reconfigures anything, and needs no Databricks auth."""
+    state = load_state()
+    workspace, profile, clients = setup_mcp_clients(
+        state,
+        "Remove Skills MCP",
+        require_auth=False,
+        action_note="Removing from",
+        agents=agents,
+    )
+    locations_by_client = _skill_locations_by_client_from_state(state)
+    offered = {client: locations_by_client.get(client, []) for client in clients}
+    if not any(offered.values()):
+        scope = "" if agents is None else f" for {', '.join(sorted(agents))}"
+        print_note(f"No skill schemas are configured to remove{scope}.")
+        return 0
+
+    selection = _prompt_for_skill_removal(offered)
+    if selection is None:
+        return 0
+    if not selection:
+        print_note("No skill schemas selected.")
+        return 0
+
+    remove_locations = set(selection)
+    for client in clients:
+        locations_by_client[client] = [
+            location
+            for location in locations_by_client.get(client, [])
+            if location not in remove_locations
+        ]
+    _update_skills_mcp(state, workspace, profile, clients, locations_by_client, print_summary=False)
+    print_success(
+        f"Removed {len(remove_locations)} skill schema{'s' if len(remove_locations) != 1 else ''}."
+    )
     return 0
