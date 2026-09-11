@@ -2959,6 +2959,16 @@ class TestCliWiring:
             runner.invoke(app, ["setup", "skills", "--location", "main.a,main.b"])
         assert fn.call_args.args[0] == ["main.a", "main.b"]
 
+    def test_setup_skills_requires_cli_floor(self):
+        from ucode.databricks import SKILLS_MCP_MIN_DATABRICKS_CLI_VERSION
+
+        with (
+            patch("ucode.cli.install_databricks_cli") as install,
+            patch("ucode.cli.setup_skills_command", return_value=0),
+        ):
+            runner.invoke(app, ["setup", "skills", "--location", "main.a"])
+        install.assert_called_once_with(minimum=SKILLS_MCP_MIN_DATABRICKS_CLI_VERSION)
+
     def test_setup_help_needs_no_auth(self):
         # `ug setup help` reads the local draft only — it must not shell out to install the CLI.
         with (
