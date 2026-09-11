@@ -1421,13 +1421,13 @@ class TestSkillsAddCommand:
         with patch("ucode.cli.add_skills_command") as mock_add:
             result = runner.invoke(app, ["skill", "add", "--location", "a.b", "--mcp"])
         assert result.exit_code == 0, result.output
-        mock_add.assert_called_once_with(["a.b"])
+        mock_add.assert_called_once_with(["a.b"], agents=None)
 
     def test_comma_location_yields_multiple_schemas(self):
         with patch("ucode.cli.add_skills_command") as mock_add:
             result = runner.invoke(app, ["skill", "add", "--location", "a.b, c.d", "--mcp"])
         assert result.exit_code == 0, result.output
-        mock_add.assert_called_once_with(["a.b", "c.d"])
+        mock_add.assert_called_once_with(["a.b", "c.d"], agents=None)
 
     def test_default_mode_dispatches_download(self):
         with patch("ucode.cli.configure_skills_download_command") as mock_download:
@@ -1532,6 +1532,94 @@ class TestSkillsAddCommand:
         assert result.exit_code == 1
         assert "--location" in _strip_ansi(result.output)
         mock_add.assert_not_called()
+
+    def test_agents_scope_delegates_to_helper_and_forwards_returned_scope(self):
+        with (
+            patch(
+                "ucode.cli._configure_agents_for_mcp", return_value={"claude", "codex"}
+            ) as configure,
+            patch("ucode.cli.add_skills_command") as mock_add,
+        ):
+            result = runner.invoke(
+                app,
+                ["skill", "add", "--location", "a.b", "--mcp", "--agents", "codex,claude"],
+            )
+
+        assert result.exit_code == 0, result.output
+        configure.assert_called_once_with(["claude", "codex"])
+        mock_add.assert_called_once_with(["a.b"], agents={"claude", "codex"})
+
+    def test_empty_agents_folds_to_global_scope(self):
+        with (
+            patch("ucode.cli._configure_agents_for_mcp") as configure,
+            patch("ucode.cli.add_skills_command") as mock_add,
+        ):
+            result = runner.invoke(
+                app,
+                ["skill", "add", "--location", "a.b", "--mcp", "--agents", ","],
+            )
+
+        assert result.exit_code == 0, result.output
+        configure.assert_not_called()
+        mock_add.assert_called_once_with(["a.b"], agents=None)
+
+    def test_agents_is_rejected_for_download_mode(self):
+        with patch("ucode.cli.configure_skills_download_command") as mock_download:
+            result = runner.invoke(app, ["skill", "add", "--location", "a.b", "--agents", "claude"])
+
+        assert result.exit_code == 1
+        assert "--agents is only supported when using --mcp" in _strip_ansi(result.output)
+        mock_download.assert_not_called()
+
+
+class TestConfigureAgentsForMcp:
+    def test_bootstraps_only_unconfigured_and_returns_full_scope(self):
+        with (
+            patch("ucode.cli.load_state", return_value={"workspace": "https://ws"}),
+            patch("ucode.cli.available_mcp_clients", return_value=["claude", "codex"]),
+            patch("ucode.cli.configured_mcp_clients", return_value=["claude"]),
+            patch("ucode.cli.configure_workspace_command") as mock_cfg,
+        ):
+            scope = cli_mod._configure_agents_for_mcp(["claude", "codex"])
+
+        assert scope == {"claude", "codex"}
+        mock_cfg.assert_called_once_with(selected_tools=["codex"], prompt_optional_updates=True)
+
+    def test_all_configured_skips_bootstrap(self):
+        with (
+            patch("ucode.cli.load_state", return_value={"workspace": "https://ws"}),
+            patch("ucode.cli.available_mcp_clients", return_value=["claude", "codex"]),
+            patch("ucode.cli.configured_mcp_clients", return_value=["claude", "codex"]),
+            patch("ucode.cli.configure_workspace_command") as mock_cfg,
+        ):
+            scope = cli_mod._configure_agents_for_mcp(["claude", "codex"])
+
+        assert scope == {"claude", "codex"}
+        mock_cfg.assert_not_called()
+
+
+class TestSkillsRemoveCommand:
+    def test_requires_mcp_until_download_removal_is_supported(self):
+        with patch("ucode.cli.remove_skills_command") as remove:
+            result = runner.invoke(app, ["skill", "remove"])
+
+        assert result.exit_code == 1
+        assert "Removing downloaded skills is not supported yet" in _strip_ansi(result.output)
+        remove.assert_not_called()
+
+    def test_mcp_remove_dispatches_global_removal(self):
+        with patch("ucode.cli.remove_skills_command") as remove:
+            result = runner.invoke(app, ["skill", "remove", "--mcp"])
+
+        assert result.exit_code == 0, result.output
+        remove.assert_called_once_with(agents=None)
+
+    def test_mcp_remove_forwards_agent_scope(self):
+        with patch("ucode.cli.remove_skills_command") as remove:
+            result = runner.invoke(app, ["skill", "remove", "--mcp", "--agents", "claude, codex"])
+
+        assert result.exit_code == 0, result.output
+        remove.assert_called_once_with(agents={"claude", "codex"})
 
 
 class TestManagedSkillsOnLaunch:
@@ -1687,6 +1775,32 @@ class TestStatusSkillsSection:
                 assert "databricks-skill-registry" not in line
         assert "Skill MCP Locations: main.default" in out
 
+    def test_renders_per_agent_locations_when_scopes_diverge(self):
+        state = {
+            **MINIMAL_STATE,
+            "mcp_servers": [
+                {
+                    "name": "databricks-skill-registry",
+                    "kind": "skills",
+                    "skill_locations": ["main.default", "claude.only"],
+                    "skill_locations_by_client": {
+                        "claude": ["main.default", "claude.only"],
+                        "codex": ["main.default"],
+                    },
+                    "url": "https://example.databricks.com/ai-gateway/skills/?schema=main.default&schema=claude.only",
+                    "auth": "proxy",
+                    "clients": ["claude", "codex"],
+                }
+            ],
+        }
+
+        result = self._run(state)
+
+        assert result.exit_code == 0, result.output
+        out = _strip_ansi(result.output)
+        assert "Claude Code skill MCP locations: main.default, claude.only" in out
+        assert "Codex skill MCP locations: main.default" in out
+
 
 class TestRevert:
     def test_reverts_mcp_configs_before_clearing_state(self):
@@ -1731,6 +1845,38 @@ class TestDoctorCommand:
 
 
 class TestAutoConfigureOnFirstRun:
+    @pytest.mark.parametrize("tool", list(cli_mod.TOOL_SPECS))
+    @pytest.mark.parametrize("has_workspace", [False, True])
+    def test_launch_autoconfigures_without_test_prompt(self, tool, has_workspace):
+        initial_state = {**MINIMAL_STATE, "available_tools": []} if has_workspace else {}
+        configured_state = {**MINIMAL_STATE, "available_tools": [tool]}
+        with (
+            patch("ucode.cli.ensure_bootstrap_dependencies"),
+            patch("ucode.cli.load_state", return_value=initial_state),
+            patch(
+                "ucode.cli._prompt_for_configuration",
+                return_value=(MINIMAL_STATE["workspace"], None),
+            ),
+            patch("ucode.cli.configure_shared_state", return_value=configured_state),
+            patch(
+                "ucode.cli.configure_single_tool", return_value=configured_state
+            ) as mock_configure,
+            patch("ucode.cli.ensure_provider_state", return_value=configured_state),
+            patch("ucode.cli._fetch_managed_config", return_value=(None, False)),
+            patch("ucode.cli.configure_tool", return_value=configured_state),
+            patch("ucode.cli.validate_tool", return_value=(False, "timed out")) as mock_validate,
+            patch("ucode.cli.restore_file") as mock_restore,
+            patch("ucode.cli.launch_agent") as mock_launch,
+        ):
+            result = runner.invoke(app, [tool])
+
+        assert result.exit_code == 0, result.output
+        mock_configure.assert_called_once_with(tool, configured_state)
+        mock_validate.assert_not_called()
+        mock_restore.assert_not_called()
+        mock_launch.assert_called_once()
+        assert mock_launch.call_args.args[:2] == (tool, configured_state)
+
     def test_triggers_when_no_workspace(self):
         """Auto-configure runs when state has no workspace."""
         empty_state = {}
@@ -3091,7 +3237,9 @@ class TestConfigureSkipValidate:
         assert result == 0
         assert validated == []
 
-    def test_skip_validate_skips_single_tool_validation(self, monkeypatch):
+    @pytest.mark.parametrize("skip_validate", [False, True])
+    @pytest.mark.parametrize("tool", list(cli_mod.TOOL_SPECS))
+    def test_single_tool_validation_is_optional(self, monkeypatch, skip_validate, tool):
         import ucode.cli as cli_mod
 
         state = {**MINIMAL_STATE, "workspace": "https://first.com"}
@@ -3107,16 +3255,16 @@ class TestConfigureSkipValidate:
         monkeypatch.setattr(cli_mod, "validate_tool", lambda t: validated.append(t) or (True, ""))
 
         result = cli_mod.configure_workspace_command(
-            "claude",
+            tool,
             workspaces=[("https://first.com", None)],
-            skip_validate=True,
+            skip_validate=skip_validate,
         )
 
         assert result == 0
-        assert validated == []
+        assert validated == ([] if skip_validate else [tool])
         # `ucode configure` (single-agent) still installs AI Tools — it's the
         # configure path, unlike launch which auto-configures without installing.
-        assert installed == [["claude"]]
+        assert installed == [[tool]]
 
 
 class TestConfigureSharedStateMcpCleanup:
