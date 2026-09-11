@@ -2529,14 +2529,19 @@ def walk_catalog_schemas[T](
     collect: Callable[[T, int, int], None],
     skip_catalogs: frozenset[str] = _UC_FUNCTIONS_SKIP_CATALOGS,
 ) -> str | None:
-    """Walk every user `<catalog>.<schema>` in the workspace, probing each in parallel.
+    """Discover every user `<catalog>.<schema>` in the workspace and probe each one in parallel.
 
-    Phase 1 lists catalogs (minus `skip_catalogs`) and their schemas in parallel, dropping
-    `information_schema`. Phase 2 runs `probe(catalog, schema)` on each surviving pair in parallel,
-    draining under `deadline` (an absolute `time.monotonic()` value) so a slow workspace degrades to
-    partial results. Each completed probe's value is handed to `collect(result, done, total)`, which
-    owns accumulation, progress, and any streaming. Returns a short reason when phase 1 finds
-    nothing, else None."""
+    Catalogs and their schemas are listed (skipping `skip_catalogs` and `information_schema`), then
+    each schema is probed concurrently until `deadline` (an absolute `time.monotonic()` value)
+    passes, so a slow workspace returns partial results instead of hanging. The caller supplies two
+    callables and owns whatever they accumulate:
+
+      - `probe(catalog, schema) -> result`: fetch one schema's data (e.g. its MCP services).
+      - `collect(result, done, total)`: handle each probe result as it lands — accumulating,
+        de-duping, streaming — where `done`/`total` are the completed and total schema counts.
+
+    Returns None once the probes run, or a short reason string if there are no catalogs or schemas
+    to probe."""
     hostname = workspace_hostname(workspace)
 
     catalogs, catalogs_reason = _paginated_json_items(
@@ -2576,9 +2581,13 @@ def walk_catalog_schemas[T](
         def collect_schemas(result, catalog):
             schemas, _ = result
             for schema in schemas:
-                name = schema.get("name")
-                if isinstance(name, str) and name and name != "information_schema":
-                    schema_refs.append((catalog, name))
+                schema_name = schema.get("name")
+                if (
+                    isinstance(schema_name, str)
+                    and schema_name
+                    and schema_name != "information_schema"
+                ):
+                    schema_refs.append((catalog, schema_name))
 
         _drain_with_deadline(schema_futures, deadline, collect_schemas)
         pool.shutdown(wait=False, cancel_futures=True)
