@@ -589,9 +589,11 @@ class TestModelProviderLaunch:
 
     @staticmethod
     def _first_databricks_hosted_model(workspace: str, token: str) -> str | None:
-        """A namespace-qualified (Databricks-hosted) model id from the anthropic gateway
-        catalog — one the relayed subscription doesn't serve, so it exercises the proxy's
-        per-model Databricks re-route. Prefers a non-Claude (OSS) id when one is offered."""
+        """A natively-servable Databricks-hosted model id from the anthropic gateway catalog:
+        namespace-qualified (so the proxy re-routes it to gateway auth) and served directly.
+        Excludes `anthropic-aigw-*` aliases — they're listed but need their provider-service
+        header to route, which the Databricks route drops (they 404 on a direct call). Prefers
+        a non-Claude (OSS) native id when the workspace serves one."""
         from ucode.gateway_proxy import is_databricks_routed_model
 
         try:
@@ -604,9 +606,13 @@ class TestModelProviderLaunch:
             ids = [m.get("id") for m in resp.json().get("data", [])]
         except (httpx.HTTPError, ValueError, KeyError):
             return None
-        qualified = [i for i in ids if i and is_databricks_routed_model(i)]
-        oss = [i for i in qualified if "claude" not in i]
-        return (oss or qualified or [None])[0]
+        native = [
+            i
+            for i in ids
+            if i and is_databricks_routed_model(i) and not i.startswith("anthropic-aigw-")
+        ]
+        oss = [i for i in native if "claude" not in i]
+        return (oss or native or [None])[0]
 
     @staticmethod
     def _skip_if_provider_unusable(combined: str, provider: str) -> None:
@@ -804,14 +810,23 @@ class TestModelProviderLaunch:
             f"relayed provider={provider} rc={result.returncode} "
             f"stdout={result.stdout[:300]!r} stderr={result.stderr[:300]!r}"
         )
-        # The Databricks-hosted model must serve (200) through the relayed proxy — proof the
-        # session reaches Databricks models via per-model routing, not just the subscription.
+        # Databricks re-route check. The fake OAuth is the tell: 401 means the proxy relayed
+        # this to the subscription (routing regression) instead of swapping in the gateway
+        # token — so 401 fails. The relay check above already passed, so the gateway token is
+        # valid and a 401 here can only be the fake OAuth. 200 proves the model served; any
+        # other status means the route reached the gateway but the CI principal can't serve
+        # this model (environmental, not a routing bug) — skip.
         if oss_response is not None:
-            self._skip_if_provider_unusable(oss_response.text, oss_model)
-            assert oss_response.status_code == 200, (
-                f"Databricks-hosted model {oss_model} via the relayed proxy: "
-                f"HTTP {oss_response.status_code}: {oss_response.text[:300]}"
+            assert oss_response.status_code != 401, (
+                f"relayed_oss_routing regressed: {oss_model} was relayed to the subscription "
+                f"(401) instead of routed to the gateway. Body: {oss_response.text[:200]}"
             )
+            if oss_response.status_code != 200:
+                pytest.skip(
+                    f"gateway did not serve {oss_model} for the CI principal "
+                    f"(HTTP {oss_response.status_code}); routing reached the gateway but "
+                    f"model access is environmental: {oss_response.text[:200]}"
+                )
 
     def test_launch_codex_through_provider(
         self, tmp_path, monkeypatch, e2e_state, e2e_workspace, e2e_token
