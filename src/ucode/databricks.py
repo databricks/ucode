@@ -2097,14 +2097,11 @@ def build_skills_mcp_url(workspace: str, locations: list[str]) -> str:
 
 
 # Maps the gateway routing dialect a coding tool speaks to the Model Provider
-# Service `provider_type`s it can be backed by. claude speaks Anthropic's API,
-# which both the `anthropic` and `amazon_bedrock` provider types serve (Bedrock
-# just exposes different model ids); codex speaks OpenAI's; gemini speaks
-# Google's, served by a Gemini Enterprise provider. Tags are the short form
-# produced by `_provider_type_tag` (e.g. `amazon_bedrock`).
+# Service `provider_type`s it can be backed by. Bedrock exposes both Anthropic
+# and OpenAI dialects, so target capabilities decide whether it is usable.
 _TOOL_PROVIDER_TYPES: dict[str, tuple[str, ...]] = {
     "claude": ("anthropic", "amazon_bedrock"),
-    "codex": ("openai",),
+    "codex": ("openai", "amazon_bedrock"),
     "gemini": ("gemini_enterprise",),
 }
 
@@ -2112,6 +2109,7 @@ _TOOL_PROVIDER_TYPES: dict[str, tuple[str, ...]] = {
 # `us.anthropic.claude-sonnet-4-6`) instead of the agent's canonical model
 # names, so ucode must pin them explicitly.
 BEDROCK_PROVIDER_TYPES: tuple[str, ...] = ("amazon_bedrock",)
+CODEX_NATIVE_API_TYPE = "openai/v1/responses"
 
 
 def tool_supports_provider_type(tool: str, provider_type: str) -> bool:
@@ -2141,7 +2139,7 @@ def list_model_provider_services(
 
     Returns ``(services, reason)`` where each service is
     ``{"name": "<catalog>.<schema>.<service>", "provider_type": "anthropic"|...,
-    "targets": [model_id, ...], "allow_all_targets": bool, "relayed": bool}``.
+    "targets": [model_id, ...], "target_api_types": {model_id: [api_type, ...]}, ...}``.
     ``targets`` is the provider-side model ids the service exposes (used to pin
     Bedrock model names). ``relayed`` is True for a credential-less Anthropic
     service (Claude Max/Team/Enterprise subscription relay). A non-None
@@ -2225,13 +2223,21 @@ def _provider_service_entry(raw_service: object) -> dict | None:
     raw_config = service.get("config")
     config = cast("dict[str, object]", raw_config) if isinstance(raw_config, dict) else {}
     targets: list[str] = []
+    target_api_types: dict[str, list[str]] = {}
     raw_targets = config.get("targets")
     for target in raw_targets if isinstance(raw_targets, list) else []:
         if not isinstance(target, dict):
             continue
-        model_id = cast("dict[str, object]", target).get("model")
+        target_config = cast("dict[str, object]", target)
+        model_id = target_config.get("model")
         if isinstance(model_id, str) and model_id:
             targets.append(model_id)
+            raw_api_types = target_config.get("native_api_types")
+            target_api_types[model_id] = [
+                api_type
+                for api_type in (raw_api_types if isinstance(raw_api_types, list) else [])
+                if isinstance(api_type, str)
+            ]
     # Relayed = credential-less Anthropic (subscription relay). Only whether
     # it's relayed matters here; the tier (Max vs Team/Enterprise) is governed
     # server-side, so both launch identically.
@@ -2242,6 +2248,7 @@ def _provider_service_entry(raw_service: object) -> dict | None:
         "name": full_name,
         "provider_type": _provider_type_tag(raw_type if isinstance(raw_type, str) else None),
         "targets": targets,
+        "target_api_types": target_api_types,
         "allow_all_targets": bool(config.get("allow_all_targets")),
         "relayed": relayed,
     }
@@ -2330,16 +2337,20 @@ def list_tool_provider_services(
 def service_usable_for_tool(tool: str, service: dict) -> bool:
     """True when ``tool`` can actually route through ``service``.
 
-    Beyond the provider-type match, a Bedrock service is only usable for claude
-    if it exposes at least one Claude model in its targets — otherwise there's no
-    routable model id to pin. (Anthropic services use canonical names, so any
-    match is usable.)
+    Bedrock services must expose a target compatible with the tool's dialect.
     """
     provider_type = service.get("provider_type", "")
     if not tool_supports_provider_type(tool, provider_type):
         return False
     if provider_type in BEDROCK_PROVIDER_TYPES:
-        return bool(map_claude_family_models(service.get("targets") or []))
+        if tool == "claude":
+            return bool(map_claude_family_models(service.get("targets") or []))
+        if tool == "codex":
+            raw_api_types = service.get("target_api_types")
+            return isinstance(raw_api_types, dict) and any(
+                isinstance(api_types, list) and CODEX_NATIVE_API_TYPE in api_types
+                for api_types in raw_api_types.values()
+            )
     return True
 
 
@@ -2366,9 +2377,7 @@ def resolve_provider_service(
         # fetched directly. Only when that 404s is it really absent.
         match, get_reason = get_model_provider_service(service_name, workspace, token)
         if match is None:
-            usable = [
-                s["name"] for s in services if tool_supports_provider_type(tool, s["provider_type"])
-            ]
+            usable = [s["name"] for s in services if service_usable_for_tool(tool, s)]
             suffix = f" Available for {tool}: {', '.join(usable)}." if usable else ""
             detail = f" ({get_reason})" if get_reason and "404" not in get_reason else ""
             return None, f"Model provider service '{service_name}' was not found.{detail}{suffix}"
@@ -2379,12 +2388,15 @@ def resolve_provider_service(
             f"Model provider service '{service_name}' is a '{provider_type}' provider, "
             f"which {tool} can't route to (supported: {supported})."
         )
-    if provider_type in BEDROCK_PROVIDER_TYPES and not map_claude_family_models(
-        match.get("targets") or []
-    ):
+    if provider_type in BEDROCK_PROVIDER_TYPES and not service_usable_for_tool(tool, match):
+        if tool == "claude":
+            return None, (
+                f"Model provider service '{service_name}' exposes no Claude models — "
+                f"add Claude targets to it or pick a different service."
+            )
         return None, (
-            f"Model provider service '{service_name}' exposes no Claude models — "
-            f"add Claude targets to it or pick a different service."
+            f"Model provider service '{service_name}' exposes no targets supporting "
+            f"{CODEX_NATIVE_API_TYPE}."
         )
     return match, None
 
