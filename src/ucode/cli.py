@@ -1690,7 +1690,11 @@ def claude_router_hook_cmd(
 
 
 def _auto_configure_tool(tool: str, custom_oauth: CustomOAuthConfig | None = None) -> None:
-    """First-time setup for a single tool — mirrors configure_workspace_command."""
+    """Configure a tool for launch without sending a separate validation prompt.
+
+    The real agent session follows immediately; explicit configure retains the
+    test-prompt validation.
+    """
     existing = load_state()
     workspace = existing.get("workspace")
     profile = existing.get("profile")
@@ -1712,19 +1716,6 @@ def _auto_configure_tool(tool: str, custom_oauth: CustomOAuthConfig | None = Non
             expand=False,
         )
     )
-
-    with spinner(f"Validating {spec['display']}..."):
-        ok, err = validate_tool(tool)
-    if ok:
-        print_success(f"{spec['display']} is working")
-    else:
-        print_err(f"{spec['display']}: {provider_permission_error(tool, state, err)}")
-        managed = bool(state.get("managed_configs", {}).get(tool))
-        restore_file(spec["config_path"], spec["backup_path"], managed)
-        available_tools = [t for t in (state.get("available_tools") or []) if t != tool]
-        state["available_tools"] = available_tools
-        save_state(state)
-        raise RuntimeError(f"{spec['display']} validation failed — config reverted.")
 
 
 CAN_USE_CACHED_CONFIG_AGENTS = frozenset({"claude", "codex"})
