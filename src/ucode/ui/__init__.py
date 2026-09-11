@@ -21,13 +21,21 @@ from rich.markup import escape
 from rich.panel import Panel
 from rich.progress import BarColumn, MofNCompleteColumn, Progress, TextColumn
 
+from ucode.ui.interactive_picker import _BACK as _BACK
+from ucode.ui.interactive_picker import PICKER_VISIBLE_ROWS as PICKER_VISIBLE_ROWS
+from ucode.ui.interactive_picker import StreamingInquirerControl as StreamingInquirerControl
+from ucode.ui.interactive_picker import _Back as _Back
+from ucode.ui.interactive_picker import merge_new_choices as merge_new_choices
+from ucode.ui.interactive_picker import picker_style as picker_style
+from ucode.ui.interactive_picker import scrolling_checkbox as scrolling_checkbox
+
 console = Console(highlight=False)
 err_console = Console(stderr=True, highlight=False)
 
 # Past this many options the choice list is pinned to a fixed-height scrolling viewport (see
 # `_cap_choice_viewport`) rather than growing to fill the terminal, and the pickers append a
 # "↑/↓ scroll" note to their instruction line. The value is both the boundary and the number of
-# rows shown at once; matches mcp.py's MCP_PICKER_VISIBLE_ROWS so both picker families agree.
+# rows shown at once; matches interactive_picker's PICKER_VISIBLE_ROWS so both picker families agree.
 _SCROLL_HINT_THRESHOLD = 10
 
 
