@@ -43,7 +43,7 @@ class TestLaunchCodex:
     def test_codex_smart_routing_launch_dispatches_to_v2(self, monkeypatch, tool_args, options):
         calls = []
         monkeypatch.setenv(v2.ENV_VAR, "1")
-        monkeypatch.setattr(codex, "default_model", lambda state: "gpt-start")
+        monkeypatch.setattr(codex, "_smart_routing_config_model", lambda state: "gpt-start")
         monkeypatch.setattr(codex, "clear_model_preferences", lambda state: False)
 
         def launch_v2(state, tool_args, **kwargs):
@@ -105,7 +105,7 @@ class TestLaunchCodex:
         calls = []
         monkeypatch.setenv(v2.ENV_VAR, "1")
         monkeypatch.setattr(codex, "clear_model_preferences", lambda state: False)
-        monkeypatch.setattr(codex, "default_model", lambda state: None)
+        monkeypatch.setattr(codex, "_smart_routing_config_model", lambda state: None)
 
         def launch_v2(state, tool_args, **kwargs):
             calls.append(kwargs)
@@ -121,6 +121,51 @@ class TestLaunchCodex:
             )
 
         assert calls[0]["start_model"] == "gpt-5.6-luna"
+
+    @pytest.mark.parametrize("custom_home", [False, True])
+    @pytest.mark.parametrize(
+        "managed,profile,user,expected",
+        [
+            ('model = "managed"', 'model = "profile"', 'model = "user"', "managed"),
+            ("", 'model = "profile"', 'model = "user"', "profile"),
+            ("", "", 'model = "user"', "user"),
+            ('model = " "', "model = 12", 'model = "user"', "user"),
+            ("", "invalid toml", 'model = "user"', "user"),
+            (None, None, None, "gpt-5.6-luna"),
+        ],
+    )
+    def test_startup_config_precedence(
+        self, tmp_path, monkeypatch, custom_home, managed, profile, user, expected
+    ):
+        config_home = tmp_path / "codex"
+        config_home.mkdir()
+        managed_path = tmp_path / "managed_config.toml"
+        profile_path = config_home / "ucode.config.toml"
+        user_path = config_home / "config.toml"
+        monkeypatch.setenv(v2.ENV_VAR, "1")
+        monkeypatch.delenv("CODEX_HOME", raising=False)
+        monkeypatch.setattr(codex, "CODEX_CONFIG_PATH", profile_path)
+        monkeypatch.setattr(codex, "_managed_config_path", lambda: managed_path)
+        monkeypatch.setattr(codex, "agent_version", lambda _: "0.145.0")
+        if custom_home:
+            monkeypatch.setenv("CODEX_HOME", str(config_home))
+            monkeypatch.setattr(codex, "CODEX_CONFIG_PATH", tmp_path / "unused.config.toml")
+        for path, content in ((managed_path, managed), (profile_path, profile), (user_path, user)):
+            if content is not None:
+                path.write_text(content)
+        calls = []
+        monkeypatch.setattr(v2, "launch_codex", lambda *args, **kwargs: calls.append(kwargs))
+
+        # Model resolution and cleanup also run before the actual smart-routing launch.
+        codex.default_model({})
+        assert codex.clear_model_preferences({}) is False
+        codex.launch({"workspace": WS}, [], options=LaunchOptions(launch_smart_routing=True))
+
+        assert calls[0]["start_model"] == expected
+        for path, content in ((managed_path, managed), (profile_path, profile), (user_path, user)):
+            if content is not None:
+                assert path.read_text() == content
+        assert codex._smart_routing_config_model({"codex_default_model": "admin"}) == "admin"
 
     def test_owns_app_server_interposer_and_tui_lifecycle(self, monkeypatch):
         processes = []

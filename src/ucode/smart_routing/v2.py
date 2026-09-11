@@ -513,7 +513,7 @@ def launch_codex(
     available_models = _cached_routing_models(state)
     if not available_models:
         print_note(
-            "Smart routing model metadata is unavailable; starting Codex on gpt-5.6-luna "
+            f"Smart routing model metadata is unavailable; starting Codex on {start_model} "
             "without automatic model switching. Run `ucode configure codex` to enable routing."
         )
     overlay = render_overlay(
