@@ -1283,6 +1283,11 @@ def _launch_relayed(state: dict, binary: str, tool_args: list[str]) -> None:
         port,
         token_header=gateway_proxy.AI_GATEWAY_TOKEN_HEADER,
         force_refresh_near_expiry=False,
+        # Let a relayed session also reach Databricks-hosted (OSS / system.ai) models:
+        # the proxy re-routes those requests to gateway auth while relayed subscription
+        # models keep the OAuth passthrough. Bare Anthropic ids are unaffected, so a
+        # pure-relay session behaves exactly as before.
+        hybrid_oss_routing=True,
     )
     # start_proxy falls back to an OS-assigned port when the cached one is taken
     # (stale proxy from a killed session). Reconcile settings + state to whatever
