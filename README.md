@@ -489,7 +489,13 @@ uv sync
    uv run ruff check .    # lint
    ```
 
-4. For end-to-end testing against a real workspace:
+4. For **integration tests** of installed ug and agent versions against the same
+   real workspace, see [the integration suite](tests/integration/README.md).
+   It uses separate processes and fresh homes, with no application mocks or
+   monkeypatching. The runner accepts ug/Claude/Codex versions and dependency
+   constraints to reproduce user issues.
+
+   The existing e2e tests remain available separately:
 
    ```bash
    UCODE_TEST_WORKSPACE=<db_workspace_url> uv run pytest tests/test_e2e.py -v
