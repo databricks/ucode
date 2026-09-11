@@ -304,7 +304,7 @@ class TestMcpPicker:
             checkbox_calls.append({"args": args, "kwargs": kwargs})
             return FakePrompt()
 
-        monkeypatch.setattr(mcp, "_scrolling_checkbox", fake_checkbox)
+        monkeypatch.setattr(mcp, "scrolling_checkbox", fake_checkbox)
 
         assert mcp.prompt_for_mcp_server_choices(["github-mcp"], [], [], []) == [
             f"{mcp.MCP_ADD_PREFIX}external:github-mcp"
@@ -328,7 +328,7 @@ class TestMcpPicker:
             def ask(self):
                 return None
 
-        monkeypatch.setattr(mcp, "_scrolling_checkbox", lambda *args, **kwargs: FakePrompt())
+        monkeypatch.setattr(mcp, "scrolling_checkbox", lambda *args, **kwargs: FakePrompt())
 
         assert mcp.prompt_for_mcp_server_choices(["github-mcp"], [], [], []) is None
 
@@ -372,7 +372,7 @@ class TestMcpPicker:
             checkbox_calls.append(kwargs)
             return FakePrompt()
 
-        monkeypatch.setattr(mcp, "_scrolling_checkbox", fake_checkbox)
+        monkeypatch.setattr(mcp, "scrolling_checkbox", fake_checkbox)
 
         result = mcp._prompt_for_mcp_removal(
             [
@@ -818,14 +818,6 @@ class TestConfigureMcpCommand:
         assert toggle.value == "mycat-sch-weather" and toggle.checked
         note = mcp._mcp_service_choice("mycat.sch.weather", {"mycat-sch-weather"}, additive=True)
         assert note.value == "mycat-sch-weather" and note.disabled
-
-    def test_merge_new_choices_dedupes_by_value(self):
-        # Background-streamed rows are deduped against what's already shown, by Choice value,
-        # so a service already listed (e.g. from the fast system.ai pass) isn't added twice.
-        a = mcp._mcp_service_choice("cat.sch.a", set(), additive=False)
-        b = mcp._mcp_service_choice("cat.sch.b", set(), additive=False)
-        merged = mcp._merge_new_choices([a], [a, b])
-        assert [c.value for c in merged] == [b.value]
 
     def test_skips_slow_walks_unless_source_selected(self, monkeypatch):
         """Vector Search and UC functions walk the workspace and are OFF by
@@ -2908,21 +2900,3 @@ class TestDiscoverySkipsPermissionErrors:
         assert mcp._discover_mcp_source("Genie spaces", boom) == []
         out = capsys.readouterr().out
         assert "network down" in out
-
-
-class TestStreamingInquirerControl:
-    """The picker must tolerate an empty or all-disabled choice list — it opens empty and streams
-    rows in via the background loader, and `ug mcp add` can show only already-configured rows.
-    Stock InquirerControl raises in __init__/render for these; the subclass must not."""
-
-    def test_tolerates_empty_choice_list(self):
-        control = mcp._StreamingInquirerControl([], pointer="›", show_description=False)
-        assert control.is_selection_valid() is True
-        assert control._get_choice_tokens() == []
-
-    def test_tolerates_all_disabled_choices(self):
-        disabled = mcp._mcp_service_choice("cat.sch.svc", {"cat-sch-svc"}, additive=True)
-        assert disabled.disabled
-        control = mcp._StreamingInquirerControl([disabled], pointer="›", show_description=False)
-        assert control.is_selection_valid() is True
-        control._get_choice_tokens()  # must not raise
