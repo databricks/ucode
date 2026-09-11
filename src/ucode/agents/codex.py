@@ -365,7 +365,7 @@ def write_tool_config(state: dict, model: str | None = None, provider: str | Non
     def compose(base: dict) -> dict:
         deep_merge_dict(base, copy.deepcopy(overlay))
         # deep_merge can't drop keys, so clear model preferences from an earlier run.
-        if chosen_model is None:
+        if chosen_model is None and not smart_routing_v2.enabled():
             for key in ("model", "model_reasoning_effort"):
                 base.pop(key, None)
         return base
@@ -489,12 +489,36 @@ def default_model(state: dict) -> str | None:
     """Return a managed Codex model, or leave selection to Codex."""
     if isinstance(state.get("codex_default_model"), str):
         return state["codex_default_model"]
+    if smart_routing_v2.enabled():
+        return _smart_routing_config_model(state)
     clear_model_preferences(state)
+    return None
+
+
+def _smart_routing_config_model(state: dict) -> str | None:
+    """Read the startup model in managed, profile, then user config precedence."""
+    model = state.get("codex_default_model")
+    if isinstance(model, str) and model.strip():
+        return model
+    config_home = os.environ.get("CODEX_HOME")
+    profile_path = (
+        Path(config_home).expanduser() / f"{CODEX_PROFILE_NAME}.config.toml"
+        if config_home
+        else CODEX_CONFIG_PATH
+    )
+    for path in (_managed_config_path(), profile_path, profile_path.parent / "config.toml"):
+        if path is None:
+            continue
+        model = read_toml_safe(path).get("model")
+        if isinstance(model, str) and model.strip():
+            return model
     return None
 
 
 def clear_model_preferences(state: dict) -> bool:
     """Remove ucode profile model preferences so Codex selects its default."""
+    if smart_routing_v2.enabled():
+        return False
     if isinstance(state.get("codex_default_model"), str):
         return False
     doc = read_toml_safe(CODEX_CONFIG_PATH)
@@ -546,7 +570,6 @@ def launch(
 
 def _launch_smart_routing(state: dict, tool_args: list[str]) -> None:
     """Launch the Codex TUI through the smart-routing interposer."""
-    clear_model_preferences(state)
     binary = SPEC["binary"]
     version_text = agent_version(binary)
     parsed_version = _parse_version(version_text)
@@ -556,10 +579,10 @@ def _launch_smart_routing(state: dict, tool_args: list[str]) -> None:
             f"{MINIMUM_ROUTING_CODEX_VERSION_TEXT} or newer; found {version_text}."
         )
 
-    managed_model = default_model(state)
+    configured_model = _smart_routing_config_model(state)
     models = routing_models(state)
     start_model = (
-        managed_model
+        configured_model
         or (codex_model_id(models[0]) if models else None)
         or APP_SERVER_SMART_ROUTING_STARTING_MODEL
     )

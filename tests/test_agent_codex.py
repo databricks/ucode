@@ -174,6 +174,22 @@ class TestCodexWriteConfig:
         assert "model_reasoning_effort" not in doc
         assert "profiles" not in doc
 
+    def test_smart_routing_preserves_configured_startup_model(self, tmp_path, monkeypatch):
+        config_path = tmp_path / "ucode.config.toml"
+        config_path.write_text('model = "gpt-5.6-sol"\n')
+        monkeypatch.setattr(codex, "CODEX_CONFIG_PATH", config_path)
+        monkeypatch.setattr(codex, "CODEX_BACKUP_PATH", tmp_path / "backup.toml")
+        monkeypatch.setattr(codex, "agent_version", lambda _: "0.145.0")
+        monkeypatch.setenv(codex.smart_routing_v2.ENV_VAR, "1")
+        monkeypatch.delenv("CODEX_HOME", raising=False)
+        state = {"workspace": WS}
+
+        assert codex.default_model(state) == "gpt-5.6-sol"
+        codex.write_tool_config(state)
+
+        assert read_toml_safe(config_path)["model"] == "gpt-5.6-sol"
+        assert codex._smart_routing_config_model(state) == "gpt-5.6-sol"
+
     def test_removes_discovered_model_id(self, tmp_path, monkeypatch):
         config_path = tmp_path / ".codex" / "ucode.config.toml"
         backup_path = tmp_path / "codex-ucode-config.backup.toml"
