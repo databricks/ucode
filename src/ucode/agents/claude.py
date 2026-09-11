@@ -28,7 +28,6 @@ from ucode.constants import (
     LOOPBACK_HOST,
     MODEL_PROVIDER_SERVICE_HEADER,
     MODEL_SERVICE_PARENT_SCHEMA_HEADER,
-    MODEL_SERVICE_ROUTING_HEADER_NAMES,
 )
 from ucode.custom_oauth import CustomOAuthConfig, build_custom_auth_shell_command
 from ucode.databricks import (
@@ -171,7 +170,8 @@ CLAUDE_MANAGED_CUSTOM_HEADER_NAMES = frozenset(
     {
         "x-databricks-use-coding-agent-mode",
         "user-agent",
-        *(name.lower() for name in MODEL_SERVICE_ROUTING_HEADER_NAMES),
+        MODEL_PROVIDER_SERVICE_HEADER,
+        MODEL_SERVICE_PARENT_SCHEMA_HEADER,
     }
 )
 CLAUDE_TRACING_STOP_HOOK_SUFFIX = " autolog claude stop-hook"
