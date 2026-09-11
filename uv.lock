@@ -3229,6 +3229,7 @@ wheels = [
 name = "ucode"
 source = { editable = "." }
 dependencies = [
+    { name = "databricks-sdk" },
     { name = "httpx" },
     { name = "mcp" },
     { name = "questionary" },
@@ -3238,16 +3239,12 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
-custom-oauth = [
-    { name = "databricks-sdk" },
-]
 tracing = [
     { name = "mlflow", extra = ["databricks"] },
 ]
 
 [package.dev-dependencies]
 dev = [
-    { name = "databricks-sdk" },
     { name = "pytest" },
     { name = "ruff" },
     { name = "ty" },
@@ -3255,7 +3252,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "databricks-sdk", marker = "extra == 'custom-oauth'", specifier = ">=0.135.0" },
+    { name = "databricks-sdk", specifier = ">=0.135.0" },
     { name = "httpx", specifier = ">=0.27.1" },
     { name = "mcp", specifier = ">=1.28.0" },
     { name = "mlflow", extras = ["databricks"], marker = "extra == 'tracing'", specifier = ">=3.4" },
@@ -3264,11 +3261,10 @@ requires-dist = [
     { name = "typer", specifier = ">=0.26.0" },
     { name = "websockets", specifier = ">=13" },
 ]
-provides-extras = ["custom-oauth", "tracing"]
+provides-extras = ["tracing"]
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "databricks-sdk", specifier = ">=0.135.0" },
     { name = "pytest", specifier = ">=9.0.3" },
     { name = "ruff", specifier = ">=0.15.12" },
     { name = "ty" },
