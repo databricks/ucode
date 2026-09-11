@@ -539,11 +539,13 @@ class TestStartProxyPortFallback:
             occupied.close()
 
 
-def _hybrid_handler(client, cache, wfile, *, headers, body, hybrid) -> gateway_proxy._ProxyHandler:
+def _relayed_oss_handler(
+    client, cache, wfile, *, headers, body, enabled
+) -> gateway_proxy._ProxyHandler:
     h = object.__new__(gateway_proxy._ProxyHandler)
     h.client = client
     h.cache = cache
-    h.hybrid_oss_routing = hybrid
+    h.relayed_oss_routing = enabled
     hdrs = dict(headers)
     hdrs["Content-Length"] = str(len(body))
     h.headers = hdrs
@@ -557,23 +559,23 @@ def _hybrid_handler(client, cache, wfile, *, headers, body, hybrid) -> gateway_p
     return h
 
 
-class TestHybridOssRouting:
+class TestRelayedOssRouting:
     _CLIENT_HEADERS = {
         "Authorization": "Bearer anthropic-oauth",
         "Databricks-Model-Provider-Service": "cat.s.relayed_mps",
     }
 
     def test_databricks_model_routes_to_gateway_auth(self):
-        # A Databricks-hosted model in a hybrid relayed session: the gateway token
+        # A Databricks-hosted model with relayed OSS-routing on: the gateway token
         # replaces the OAuth in Authorization, and the swap + MPS headers are dropped.
         client = _FakeClient([_FakeResp(200, b"ok")])
-        _hybrid_handler(
+        _relayed_oss_handler(
             client,
             _FakeCache(),
             _Collect(),
             headers=self._CLIENT_HEADERS,
             body=b'{"model": "system.ai.gpt-oss-120b"}',
-            hybrid=True,
+            enabled=True,
         )._handle()
         sent = client.sent_headers[0]
         assert sent["Authorization"] == "Bearer tok1"
@@ -584,13 +586,13 @@ class TestHybridOssRouting:
         # A subscription model still relays: the OAuth is untouched, the swap header
         # carries the Databricks token, and the MPS header is preserved.
         client = _FakeClient([_FakeResp(200, b"ok")])
-        _hybrid_handler(
+        _relayed_oss_handler(
             client,
             _FakeCache(),
             _Collect(),
             headers=self._CLIENT_HEADERS,
             body=b'{"model": "claude-opus-4-1"}',
-            hybrid=True,
+            enabled=True,
         )._handle()
         sent = client.sent_headers[0]
         assert sent["Authorization"] == "Bearer anthropic-oauth"
@@ -598,16 +600,16 @@ class TestHybridOssRouting:
         assert sent["Databricks-Model-Provider-Service"] == "cat.s.relayed_mps"
 
     def test_routing_off_relays_even_a_databricks_model(self):
-        # With hybrid routing disabled (a pure-relay session) nothing is re-routed,
+        # With relayed OSS-routing off (a pure-relay session) nothing is re-routed,
         # so behavior is identical to before this feature.
         client = _FakeClient([_FakeResp(200, b"ok")])
-        _hybrid_handler(
+        _relayed_oss_handler(
             client,
             _FakeCache(),
             _Collect(),
             headers=self._CLIENT_HEADERS,
             body=b'{"model": "system.ai.gpt-oss-120b"}',
-            hybrid=False,
+            enabled=False,
         )._handle()
         sent = client.sent_headers[0]
         assert sent["Authorization"] == "Bearer anthropic-oauth"

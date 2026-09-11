@@ -1095,7 +1095,7 @@ class TestClaudeLaunch:
                 return 0
 
         def start_proxy(
-            workspace, profile, port, token_header, force_refresh_near_expiry, hybrid_oss_routing
+            workspace, profile, port, token_header, force_refresh_near_expiry, relayed_oss_routing
         ):
             calls.append(
                 (
@@ -1105,7 +1105,7 @@ class TestClaudeLaunch:
                     port,
                     token_header,
                     force_refresh_near_expiry,
-                    hybrid_oss_routing,
+                    relayed_oss_routing,
                 )
             )
             return Server(), Cache(), Client()
@@ -1135,7 +1135,7 @@ class TestClaudeLaunch:
             12345,
             claude.gateway_proxy.AI_GATEWAY_TOKEN_HEADER,
             False,
-            True,  # hybrid_oss_routing — relayed sessions also reach Databricks-hosted models
+            True,  # relayed_oss_routing — relayed sessions also reach Databricks-hosted models
         )
         assert calls[-3:] == [("stop",), ("shutdown",), ("close",)]
 

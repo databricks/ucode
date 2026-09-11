@@ -7,7 +7,7 @@ header. Native gateway discovery instead carries the Databricks credential in
 `Authorization`. The proxy refreshes the applicable header and streams responses
 back verbatim.
 
-In a hybrid relayed session the proxy picks per request by the requested model:
+With relayed OSS-routing on, the proxy picks per request by the requested model:
 Databricks-hosted ids (system.ai / OSS) take the gateway-auth path while relayed
 subscription models keep the OAuth passthrough, so one Claude Code session can use
 both.
@@ -244,7 +244,7 @@ class _ProxyHandler(BaseHTTPRequestHandler):
     # When True, requests for a Databricks-hosted model are re-routed to gateway auth
     # (Databricks token in `Authorization`) so a relayed session can also reach OSS /
     # system.ai models; relayed subscription models keep the OAuth-passthrough path.
-    hybrid_oss_routing = False
+    relayed_oss_routing = False
 
     def log_message(self, format: str, *args: object) -> None:
         return
@@ -263,9 +263,9 @@ class _ProxyHandler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0) or 0)
         body = self.rfile.read(length) if length else None
         url = self.path.lstrip("/")
-        # Databricks-hosted models (in a hybrid relayed session) authenticate with the
+        # Databricks-hosted models (when relayed OSS-routing is on) authenticate with the
         # gateway token in `Authorization`; everything else keeps the relay path.
-        route_databricks = self.hybrid_oss_routing and is_databricks_routed_model(
+        route_databricks = self.relayed_oss_routing and is_databricks_routed_model(
             _request_model(body)
         )
         log_proxy_diagnostic(
@@ -436,7 +436,7 @@ def start_proxy(
     port: int,
     token_header: str,
     force_refresh_near_expiry: bool,
-    hybrid_oss_routing: bool = False,
+    relayed_oss_routing: bool = False,
 ) -> tuple[ThreadingHTTPServer, TokenCache, httpx.Client]:
     """Start the loopback refresh proxy + its background token refresher.
 
@@ -466,7 +466,7 @@ def start_proxy(
             "cache": cache,
             "client": client,
             "token_header": token_header,
-            "hybrid_oss_routing": hybrid_oss_routing,
+            "relayed_oss_routing": relayed_oss_routing,
         },
     )
     try:
