@@ -3,12 +3,25 @@
 import pytest
 from terminal import AgentTerminal
 
-pytestmark = [pytest.mark.live, pytest.mark.tui]
+pytestmark = [pytest.mark.live, pytest.mark.tui, pytest.mark.regression]
 
 
 @pytest.mark.parametrize("launch", ["routing-off", "routing-on", "explicit-model"])
-def test_tui_boot_reopen_and_exit(configured, agent, launch):
-    session = configured
+@pytest.mark.parametrize(
+    "agent",
+    [
+        pytest.param("claude", marks=pytest.mark.claude),
+        pytest.param("codex", marks=pytest.mark.codex),
+    ],
+)
+def test_ug_tui_launch_mode_supports_boot_reopen_and_exit(live_session, workspace, agent, launch):
+    """Scenario: boot and reopen a configured agent in each routing launch mode.
+
+    Expected: onboarding, keyboard editing, and normal exit work; wrappers start
+    only when requested. This regression makes no inference-completion claim.
+    """
+    session = live_session
+    session.configure(agent, workspace)
     session.env["ENABLE_SMART_ROUTING_V2"] = "0" if launch == "routing-off" else "1"
     args = []
     if launch == "explicit-model":

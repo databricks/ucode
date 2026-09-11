@@ -1,69 +1,72 @@
-# Test suites and coverage
+# Test suites and user journeys
 
-The categories prove different things. A passing unit test or existing e2e test
-does not imply that the installed CLI's complete workflow was exercised.
+The integration suite runs a freshly installed ug wheel/release, exact real
+Claude/Codex versions, and the existing real e2e workspace. It has no application
+imports, mocks, monkeypatching, fake binaries/services, or fabricated ug state.
 
-| Category | Location | What is real? | What can be substituted? | Run |
-| --- | --- | --- | --- | --- |
-| Unit / component | `test_*.py`, excluding the suites below | Function or component under test | Dependencies, subprocesses, network and state paths | `uv run pytest` |
-| Existing e2e | `test_e2e.py`, `test_e2e_uc.py`, `test_e2e_tracing.py` | Databricks workspace; some tests launch agents | Several tests patch state/configuration or invoke application helpers directly | `UCODE_TEST_WORKSPACE=… uv run pytest tests/test_e2e.py -v` |
-| Existing proxy / wire tests | `test_gateway_proxy_integration.py`, `test_e2e_user_agent.py` | Local HTTP sockets; real agents in User-Agent tests | Local upstream responses, token minting, config/state paths | `uv run pytest tests/test_gateway_proxy_integration.py -v` |
-| **Integration** | **`integration/`** | **Installed ug wheel/release, selected real agents, real e2e workspace, real files/processes** | **No application or service behavior: no mocks, monkeypatching, fake servers, or fabricated ug state** | **`python3 scripts/run_integration.py …`** |
+| Category | Location | What it proves |
+| --- | --- | --- |
+| Unit/component | Existing `test_*.py` files | Individual behavior; dependencies may be mocked |
+| Existing e2e | `test_e2e*.py` | Real workspace behavior with some patched setup/internal calls |
+| Main integration CUJs | `integration/test_ug_configure_*.py`, `integration/test_smart_routing_*.py` | Complete configure → real TUI → task → exit journeys |
+| Installation | `integration/test_installation.py` | Fresh installed package without credentials |
+| Focused integration regressions | `integration/regressions/` | Public command, argument, protocol, and lifecycle contracts |
 
-Integration has its own pytest configuration and does not inherit the unit
-suite's state-patching fixture. Its runner installs ug and pytest into different
-environments and does not consume the checkout's `uv.lock`.
+## Main CUJ matrix
 
-## New integration coverage matrix
+These are **implemented assertions**, not a claim that every agent/version
+combination passes. Consult the run's JUnit report and artifacts for results.
+Each function states its **Scenario** and **Expected** outcome and shows its
+configure and launch commands. No fixture silently configures the application.
 
-**Covered** means an automated assertion exists, not that every version
-combination has passed. Consult a run's `junit.xml` and `versions.json` for actual
-results. **Not covered** is a gap, not a promise made by a neighboring test.
+| Test | Setup and user action | Expected evidence |
+| --- | --- | --- |
+| `test_ug_configure_claude_databricks` | Configure Claude with Databricks Hosted; open TUI and read a file | Assistant returns an unpredictable file value, exits normally, and reopens with working keyboard input |
+| `test_ug_configure_claude_anthropic_mps` | Select the existing Anthropic MPS in the real configure picker; launch without a provider override | Saved provider appears in status; real Claude completes the file task and exits |
+| `test_ug_configure_codex_databricks` | Configure Codex with Databricks Hosted; open TUI and read a file | Completed assistant answer contains the file value, normal exit and reopen |
+| `test_ug_configure_codex_openai_mps` | Select the existing OpenAI MPS in the real configure picker; launch without a provider override | Saved provider appears in status; real Codex completes the file task and exits |
+| `test_smart_routing_claude_first_prompt` | Configure, enable routing, type the first TUI prompt | Real routing decision and prompt replay plus completed task; no routing before submission |
+| `test_smart_routing_codex_first_prompt` | Configure, enable routing, type the first TUI prompt | Real routing decision plus completed task; no fallback or routing before submission |
+| `test_smart_routing_claude_subagent` | Ask Claude to delegate a file-reading task | Actual child transcript with the answer, correlated routing decision/child start, parent answer |
+| `test_smart_routing_codex_subagent` | Ask Codex to delegate a file-reading task | Actual child session with the answer, correlated routing decision/child start, parent answer |
 
-| Behavior / concern | Claude Code | Codex | Test / limitation |
-| --- | --- | --- | --- |
-| Build/install checkout wheel | Covered | Covered | Runner + `test_installation.py`; imports resolve inside installed runtime |
-| User's exact ug and agent versions | Covered | Covered | Release/wheel and exact agent versions; verified before/after execution |
-| Consumer dependencies differ from `uv.lock` (#496) | Covered | Covered | Fresh resolution; constraints; CI matrix includes tomlkit 0.14.0 and 0.15.1 |
-| Clean-home help, version, status, auth guidance | Covered | Covered | `test_installation.py`; no workspace needed for these checks |
-| Configure against real e2e workspace | Covered | Covered | `test_lifecycle.py`; state is produced only by CLI commands |
-| Repeat setup; preserve unrelated user settings | Covered | Covered | `test_lifecycle.py` |
-| Revert and repeat revert | Covered | Covered | `test_lifecycle.py` |
-| Invalid credentials rejected by real service | Covered | Covered | `test_lifecycle.py`; nonzero exit, no successful saved setup |
-| Utility dispatch, routing off/on (#502) | `auth`, `mcp` | `app`, `app-server`, `exec`, `mcp` | `test_passthrough.py`; real subcommand help, compared with direct agent invocation |
-| Direct `codex app` argument forwarding | Not applicable | Covered | An invalid option must produce the real agent's error and exit status, without opening a desktop app |
-| App-server initialization protocol | Not applicable | Covered | Real JSON-RPC on stdout, separate stderr; direct/launcher `--` forms, routing off/on; rejects non-JSON protocol output |
-| Agent reads file through real gateway | Covered | Covered | `test_tasks.py`; unpredictable fixture value in structured final answer |
-| Explicit model bypasses global routing | Covered | Covered | `--model VALUE`, `--model=VALUE`, and `-m VALUE`; no routing wrapper diagnostics |
-| Stdin prompts and nested `--` separators | Covered | Covered | Real file-reading task with prompt piped on stdin or supplied after the agent's own separator |
-| Launcher options after `--` | Covered | Covered | Task and app-server cases |
-| Caller settings, path with spaces, preserved hook | Covered | Not covered | Claude caller hook executes while gateway authentication still works |
-| Interactive TUI boot and reopen after `ug configure` | Covered | Covered | `test_tui.py`; real PTY, first agent startup and persisted-home reopen; routing on/off and explicit-model bypass |
-| First ug launch with automatic configuration/upgrades | **Not covered** | **Not covered** | Boot tests explicitly configure ug first; automatic upgrades need a separate version-change scenario |
-| TUI prompt keyboard input and normal exit | Covered | Covered | Type and clear an unsubmitted prompt, execute `/exit`, require exit 0; terminal transcripts and rendered screens |
-| TUI first-prompt inference / initial prompt after `--` | **Not covered** | **Not covered** | Boot cases submit no model prompt; needs completed interactive tasks and successful first-prompt routing |
-| Interactive follow-up prompts and conversation state | **Not covered** | **Not covered** | Headless single-turn tasks do not exercise the TUI's next turn |
-| TUI onboarding and project trust | Covered | Covered | Recognized visible dialogs are handled through keystrokes; no seeded onboarding state; unknown screens fail |
-| TUI tool permission dialogs | **Not covered** | **Not covered** | Boot cases do not invoke tools or exercise allow/deny decisions |
-| Smart routing selects a model | **Not covered** | **Not covered** | Current tests establish when routing must be bypassed |
-| Desktop application startup | Not applicable | **Not covered** | `app --help` checks dispatch/serialization, not desktop startup |
-| Agent updater execution | **Not covered** | **Not covered** | Needs a separate scenario that intentionally changes versions |
-| Isaac starts and completes a session | **Not covered** | **Not covered** | Launcher-style boundaries are tested; Isaac executable is not |
-| Native macOS/Windows UI, OS-managed settings, signals/resize | **Not covered** | **Not covered** | Linux container checks do not establish native-platform behavior |
-| Workspace switching, token expiry, MCP, skills, tracing | **Not covered here** | **Not covered here** | Existing tests cover some components; no complete new integration journey |
-| Gemini, OpenCode, Copilot, Pi, Cursor | **Not covered here** | **Not covered here** | Initial integration scope is Claude and Codex |
+The main configuration tests include ug's normal validation. Routing tests use
+`--skip-validate` during setup because their own TUI task is the validation.
+All keep the requested agent versions with `--skip-upgrade` and disable optional
+Databricks AI Tools to keep these basic journeys focused.
 
-See [integration/README.md](integration/README.md) for version selection,
-dependency replay, Colima/Docker, CI, and report contents.
+## Retained regression coverage
 
-## Maintaining tests
+The original focused checks moved into `integration/regressions/`; they were not
+deleted when the main suite was narrowed. Select them with `-- -m regression`.
 
-Read [AGENTS.md](AGENTS.md) before adding, changing, or removing tests. Keep this
-matrix aligned with actual assertions, including gaps. A regression should name
-the broken user command and version combination and exercise the real installed
-program. Never replace a broken integration path with an internal function call
-or a successful canned response.
+| Concern | Coverage |
+| --- | --- |
+| Fresh consumer resolution differs from `uv.lock` (#496) | Fresh wheel install; dependency constraints/replay; CI tests unconstrained, tomlkit 0.14.0 and 0.15.1 |
+| Reconfigure, preserve user settings, revert | CLI-created state and real files; known generated-file cleanup failure remains an assertion |
+| Rejected credentials | Real workspace rejection and no successful saved setup |
+| Subcommand forwarding (#502) | Real Claude auth/mcp and Codex app/app-server/exec/mcp help, routing off/on |
+| Codex app argument error | Real parser error and exit status; excludes unrelated per-launch warnings |
+| Codex app-server | Real JSON-RPC initialize, direct/separator forms; non-JSON stdout still fails |
+| Headless prompt/model arguments | Real file task, stdin/separators and caller settings/hook; Claude's unsupported `-m` must retain its real error |
+| TUI boot modes | Routing off/on/explicit-model, first boot/reopen, input/clear/exit; no inference claim |
 
-The ordinary suite includes `test_integration_contract.py`, which rejects
-application imports and common mocking/patching constructs in `integration/`.
-It is a guardrail, not a substitute for reviewing what a test actually proves.
+## Gaps and deferred scope
+
+| Scenario | Status / requirement |
+| --- | --- |
+| MCP and skills CUJs | Deferred at the user's request |
+| Broad configure flags, tracing, multiple workspaces, OAuth/PAT flows | Deferred while focusing on basic main CUJs |
+| Provider switching, relayed/subscription MPS | Not covered by the four basic provider journeys |
+| Initial prompt supplied on the launch command line | Not yet covered by main routing CUJs |
+| Follow-up turns and conversation resume | Not covered; reopen proves startup, not conversation resume |
+| Exact child model identity | Verified only when the real agent reports it; missing model fields remain unknown in artifacts |
+| Full allow/deny tool-permission matrix | Not covered; real onboarding/trust choices are handled through the TUI |
+| Desktop Codex app, Isaac itself, auto-upgrades | Not covered by command forwarding or pinned-version tests |
+| Native macOS/Windows managed settings, resize/signals | Separate platform coverage needed |
+| Other agents | Current main scope is Claude Code and Codex |
+
+See [integration/README.md](integration/README.md) for commands, CI, artifacts,
+and reproduction. Follow [AGENTS.md](AGENTS.md) and [CLAUDE.md](CLAUDE.md) when
+adding, modifying, or removing tests. The ordinary suite enforces both the
+no-mocking boundary and the Scenario/Expected docstring format.

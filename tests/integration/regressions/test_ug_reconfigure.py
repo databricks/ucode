@@ -5,10 +5,22 @@ import tomllib
 
 import pytest
 
-pytestmark = pytest.mark.live
+pytestmark = [pytest.mark.live, pytest.mark.regression]
 
 
-def test_configure_repeat_and_revert_preserves_user_settings(live_session, workspace, agent):
+@pytest.mark.parametrize(
+    "agent",
+    [
+        pytest.param("claude", marks=pytest.mark.claude),
+        pytest.param("codex", marks=pytest.mark.codex),
+    ],
+)
+def test_ug_reconfigure_and_revert_preserve_user_settings(live_session, workspace, agent):
+    """Scenario: configure twice over existing user settings, then revert twice.
+
+    Expected: unrelated settings survive and ug's generated config is removed.
+    This is a lifecycle check; the main CUJs separately prove task completion.
+    """
     session = live_session
     if agent == "claude":
         user_path = session.home / ".claude/settings.json"
@@ -48,7 +60,18 @@ def test_configure_repeat_and_revert_preserves_user_settings(live_session, works
     session.run("revert")  # Reverting an already reverted setup is safe.
 
 
-def test_rejected_credentials_do_not_report_success(live_session, workspace, agent):
+@pytest.mark.parametrize(
+    "agent",
+    [
+        pytest.param("claude", marks=pytest.mark.claude),
+        pytest.param("codex", marks=pytest.mark.codex),
+    ],
+)
+def test_ug_configure_rejects_invalid_workspace_credentials(live_session, workspace, agent):
+    """Scenario: configure against the real workspace with an invalid bearer.
+
+    Expected: the service rejects authentication and ug saves no successful setup.
+    """
     live_session.env["DATABRICKS_BEARER"] = "ug-integration-intentionally-invalid"
     result = live_session.configure(agent, workspace, ok=False)
     assert result.returncode != 0

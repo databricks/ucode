@@ -11,8 +11,8 @@ on:
       suite:
         description: Which integration checks to run
         type: choice
-        options: [all, tui, installation]
-        default: all
+        options: [main, all, tui, regression, installation]
+        default: main
       ug_version:
         description: Exact ucode release, or checkout
         default: checkout
@@ -53,7 +53,7 @@ env:
 jobs:
   installation:
     name: Installation
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
@@ -108,9 +108,9 @@ jobs:
           PY
 
   live:
-    name: Live (${{ matrix.dependency }})
+    name: CUJs (${{ matrix.dependency }})
     needs: workspace
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 45
     strategy:
       fail-fast: false
@@ -120,7 +120,7 @@ jobs:
       UCODE_TEST_WORKSPACE: ${{ secrets.UCODE_TEST_WORKSPACE }}
       DATABRICKS_BEARER: ${{ secrets.DATABRICKS_BEARER }}
       DEPENDENCY: ${{ matrix.dependency }}
-      TEST_MARKER: ${{ inputs.suite == 'tui' && 'tui' || 'live' }}
+      TEST_MARKER: ${{ inputs.suite == 'all' && 'live' || inputs.suite || 'main' }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:

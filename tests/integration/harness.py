@@ -159,6 +159,18 @@ class UserSession:
     def state(self) -> dict:
         return json.loads((self.home / ".ucode/state.json").read_text())
 
+    def workspace_state(self) -> dict:
+        state = self.state()
+        return state["workspaces"][state["current_workspace"]]
+
+    def routing_log(self, agent: str) -> str:
+        name = "claude-v2-pty.log" if agent == "claude" else "codex-v2-interposer.log"
+        path = self.home / ".ucode" / name
+        assert path.is_file(), f"No routing log was written: {name}"
+        value = path.read_text()
+        self.record(name + ".json", {"log": value})
+        return value
+
     def model_for_explicit_case(self, agent: str) -> str:
         """Use a real discovered model only when testing an explicit model option."""
         model = os.environ.get(f"UG_INTEGRATION_{agent.upper()}_MODEL", "").strip()

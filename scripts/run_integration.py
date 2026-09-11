@@ -68,6 +68,16 @@ def arguments():
     parser.add_argument("--codex-version", type=exact_npm_version)
     parser.add_argument("--claude-model", default=os.environ.get("UG_INTEGRATION_CLAUDE_MODEL"))
     parser.add_argument("--codex-model", default=os.environ.get("UG_INTEGRATION_CODEX_MODEL"))
+    parser.add_argument(
+        "--claude-provider",
+        default="main.ucode.ci_e2e_anthropic_nonrelay_mps",
+        help="Existing Anthropic MPS selected in the configure CUJ.",
+    )
+    parser.add_argument(
+        "--codex-provider",
+        default="main.ucode.ci_openai_mps",
+        help="Existing OpenAI MPS selected in the configure CUJ.",
+    )
     parser.add_argument("--python", default=sys.executable, help="Python 3.12+ path or uv version.")
     parser.add_argument("--dependency", action="append", default=[], metavar="PACKAGE==VERSION")
     parser.add_argument("--constraints", type=Path, help="Replay a previous dependencies.txt.")
@@ -95,7 +105,7 @@ def arguments():
     filters.add_argument("--maxfail", type=int)
     extra = args.pytest_args[1:] if args.pytest_args[:1] == ["--"] else args.pytest_args
     selected = filters.parse_args(extra)
-    marker = selected.m
+    marker = selected.m or ("installation" if args.installation_only else "main")
     if args.installation_only:
         marker = f"installation and ({marker})" if marker else "installation"
     args.pytest_args = []
@@ -226,6 +236,8 @@ def main() -> int:
             "codex": args.codex_version,
             "claude_model": args.claude_model,
             "codex_model": args.codex_model,
+            "claude_provider": args.claude_provider,
+            "codex_provider": args.codex_provider,
             "dependencies": args.dependency,
             "workspace": args.workspace,
         },
@@ -447,6 +459,8 @@ def main() -> int:
                 "UG_INTEGRATION_BIN": str(binary),
                 "UG_INTEGRATION_RUN_DIR": str(output),
                 "UG_INTEGRATION_AGENTS": ",".join(agents),
+                "UG_INTEGRATION_CLAUDE_PROVIDER": args.claude_provider,
+                "UG_INTEGRATION_CODEX_PROVIDER": args.codex_provider,
                 "UCODE_TEST_WORKSPACE": args.workspace or "",
                 "DATABRICKS_BEARER": bearer,
             }
@@ -457,7 +471,7 @@ def main() -> int:
             )
         suite = ROOT / "tests/integration"
         suite_hash = hashlib.sha256()
-        for path in [Path(__file__), *sorted(suite.glob("*.py")), suite / "pytest.ini"]:
+        for path in [Path(__file__), *sorted(suite.rglob("*.py")), suite / "pytest.ini"]:
             suite_hash.update(str(path.relative_to(ROOT)).encode() + b"\0" + path.read_bytes())
         report["suite_sha256"] = suite_hash.hexdigest()
         extra = args.pytest_args

@@ -5,9 +5,16 @@ import uuid
 
 import pytest
 
-pytestmark = pytest.mark.live
+pytestmark = [pytest.mark.live, pytest.mark.regression]
 
 
+@pytest.mark.parametrize(
+    "agent",
+    [
+        pytest.param("claude", marks=pytest.mark.claude),
+        pytest.param("codex", marks=pytest.mark.codex),
+    ],
+)
 @pytest.mark.parametrize(
     "model_form,prompt_form",
     [
@@ -18,8 +25,16 @@ pytestmark = pytest.mark.live
         pytest.param("separate", "separator", id="nested-separator"),
     ],
 )
-def test_agent_reads_file_through_gateway(configured, agent, model_form, prompt_form):
-    session = configured
+def test_ug_headless_task_accepts_model_and_prompt_arguments(
+    live_session, workspace, agent, model_form, prompt_form
+):
+    """Scenario: forward explicit model flags and argument/stdin prompts through ug.
+
+    Expected: a real headless agent returns an unknown file value; Claude also
+    runs the caller's hook. Unsupported options preserve the real agent error.
+    """
+    session = live_session
+    session.configure(agent, workspace)
     model = session.model_for_explicit_case(agent)
     nonce = uuid.uuid4().hex
     (session.cwd / "input.txt").write_text(nonce + "\n")
@@ -78,6 +93,16 @@ def test_agent_reads_file_through_gateway(configured, agent, model_form, prompt_
             *model_args,
             *(prompt_args if input_text is None else ["-"]),
         ]
+    if agent == "claude" and model_form == "short":
+        # Claude 2.1.268 has no -m option. Verify forwarding against the actual
+        # binary instead of inventing support that the upstream CLI lacks.
+        expected = session.run(*args, binary=agent, ok=False, input_text=input_text)
+        actual = session.run(agent, "--", *args, ok=False, input_text=input_text)
+        assert expected.returncode != 0 and "unknown option '-m'" in expected.stderr
+        assert actual.returncode == expected.returncode
+        assert "unknown option '-m'" in actual.stderr
+        session.assert_not_routed()
+        return
     result = session.run(agent, "--", *args, timeout=180, input_text=input_text)
     # Look in the agent's structured final output, never in the echoed prompt,
     # a tool request, or a banner. The nonce was not given to the model.

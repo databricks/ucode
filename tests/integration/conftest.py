@@ -12,21 +12,6 @@ import pytest
 from harness import UserSession
 
 
-def pytest_generate_tests(metafunc):
-    explicit = any(
-        "agent"
-        in (
-            mark.args[0].replace(" ", "").split(",")
-            if isinstance(mark.args[0], str)
-            else mark.args[0]
-        )
-        for mark in metafunc.definition.iter_markers("parametrize")
-    )
-    if "agent" in metafunc.fixturenames and not explicit:
-        agents = os.environ.get("UG_INTEGRATION_AGENTS", "claude,codex").split(",")
-        metafunc.parametrize("agent", agents)
-
-
 def pytest_collection_modifyitems(config, items):
     agents = os.environ.get("UG_INTEGRATION_AGENTS", "claude,codex").split(",")
     selected, deselected = [], []
@@ -70,9 +55,16 @@ def session(request, installed_binary):
     ):
         # Agents walk parent directories for project settings. Keeping cwd out
         # of the checkout prevents its .claude/AGENTS.md from influencing a run.
-        yield UserSession(
+        user = UserSession(
             Path(temporary), Path(project), installed_binary, root / "artifacts" / case
         )
+        try:
+            yield user
+        finally:
+            # Restore machine-level settings through the same public CLI that
+            # created them. A later fresh-home test must not inherit this setup.
+            if (user.home / ".ucode/state.json").is_file():
+                user.run("revert")
 
 
 @pytest.fixture
@@ -84,7 +76,11 @@ def live_session(session, workspace):
     return session
 
 
-@pytest.fixture
-def configured(live_session, workspace, agent):
-    live_session.configure(agent, workspace)
-    return live_session
+@pytest.fixture(scope="session")
+def claude_provider():
+    return os.environ["UG_INTEGRATION_CLAUDE_PROVIDER"]
+
+
+@pytest.fixture(scope="session")
+def codex_provider():
+    return os.environ["UG_INTEGRATION_CODEX_PROVIDER"]
