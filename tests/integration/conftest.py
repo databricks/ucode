@@ -9,7 +9,8 @@ import tempfile
 from pathlib import Path
 
 import pytest
-from harness import UserSession
+from utils.harness import UserSession
+from utils.terminal import TerminalProcess
 
 
 def pytest_collection_modifyitems(config, items):
@@ -63,8 +64,14 @@ def session(request, installed_binary):
         finally:
             # Restore machine-level settings through the same public CLI that
             # created them. A later fresh-home test must not inherit this setup.
-            if (user.home / ".ucode/state.json").is_file():
-                user.run("revert")
+            if any(
+                (user.home / ".ucode" / name).is_file()
+                for name in ("state.json", "managed-backups/manifest.json")
+            ):
+                with TerminalProcess(
+                    user, "ug", [str(user.binary), "revert"], "cleanup-revert"
+                ) as terminal:
+                    terminal.finish()
 
 
 @pytest.fixture

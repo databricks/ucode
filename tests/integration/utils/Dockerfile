@@ -1,4 +1,4 @@
-# Build from the repository root. Only the runner and its tests enter the image;
+# Build using the documented minimal archive. Only the runner and tests enter the image;
 # pass a release version or mount a prebuilt wheel at runtime.
 FROM ghcr.io/astral-sh/uv:0.9.8 AS uv
 FROM node:22.19.0-bookworm-slim AS node

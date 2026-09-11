@@ -1,10 +1,10 @@
-"""Main CUJs: real first-prompt and child-task routing in Claude's TUI."""
+"""CUJs: real first-prompt and child-task routing in Claude's TUI."""
 
 import pytest
-from evidence import FileTask, assert_subagent_routed
-from terminal import AgentTerminal
+from utils.evidence import FileTask, assert_subagent_routed
+from utils.terminal import AgentTerminal
 
-pytestmark = [pytest.mark.live, pytest.mark.main, pytest.mark.tui, pytest.mark.claude]
+pytestmark = [pytest.mark.live, pytest.mark.tui, pytest.mark.claude]
 
 
 def test_smart_routing_claude_first_prompt(live_session, workspace):
@@ -37,6 +37,9 @@ def test_smart_routing_claude_first_prompt(live_session, workspace):
         assert "[REPLAY] first prompt submitted" in log, log
         tui.exit_normally()
     task.assert_completed(session, "claude")
+    with AgentTerminal(session, "claude", command, "reopen") as tui:
+        tui.boot()
+        tui.check_input_and_exit()
 
 
 def test_smart_routing_claude_subagent(live_session, workspace):
@@ -65,6 +68,39 @@ def test_smart_routing_claude_subagent(live_session, workspace):
         tui.submit(task.delegate_prompt)
         tui.wait_for_task(task, timeout=240)
         task.assert_completed(session, "claude", child=True)
-        assert_subagent_routed(session, "claude")
+        assert_subagent_routed(session, "claude", task)
         tui.exit_normally()
     task.assert_completed(session, "claude")
+
+
+def test_smart_routing_claude_explicit_model_bypasses_routing(live_session, workspace):
+    """Scenario: request an explicit model while launching an interactive routing session.
+
+    Expected: claude completes the real task with the caller's model choice,
+    starts no routing wrapper, exits normally, and reopens with usable input.
+    """
+    session = live_session
+    task = FileTask(session)
+    session.run(
+        "configure",
+        "--agents",
+        "claude",
+        "--workspaces",
+        workspace,
+        "--skip-validate",
+        "--skip-upgrade",
+        "--disable-databricks-ai-tools",
+    )
+    model = session.model_for_explicit_case("claude")
+    command = [str(session.binary), "claude", "--enable-smart-routing", "--model", model]
+    with AgentTerminal(session, "claude", command, "explicit-model") as tui:
+        tui.boot()
+        tui.submit(task.prompt)
+        tui.wait_for_task(task)
+        tui.exit_normally()
+    task.assert_completed(session, "claude")
+    session.assert_not_routed()
+    with AgentTerminal(session, "claude", command, "reopen") as tui:
+        tui.boot()
+        tui.check_input_and_exit()
+    session.assert_not_routed()

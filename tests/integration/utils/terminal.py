@@ -15,7 +15,8 @@ import uuid
 
 import pexpect
 import pyte
-from evidence import agent_sessions
+
+from .evidence import agent_sessions
 
 
 class TerminalScreen(pyte.Screen):

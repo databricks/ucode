@@ -1,10 +1,10 @@
-"""Main CUJs: configure Claude through ug, then use its real interactive session."""
+"""CUJs: configure Claude through ug, then use its real interactive session."""
 
 import pytest
-from evidence import FileTask
-from terminal import AgentTerminal, ConfigureTerminal
+from utils.evidence import FileTask
+from utils.terminal import AgentTerminal, ConfigureTerminal
 
-pytestmark = [pytest.mark.live, pytest.mark.main, pytest.mark.tui, pytest.mark.claude]
+pytestmark = [pytest.mark.live, pytest.mark.tui, pytest.mark.claude]
 
 
 def test_ug_configure_claude_databricks(live_session, workspace):

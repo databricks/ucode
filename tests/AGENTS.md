@@ -63,23 +63,26 @@ behavior a test claims to exercise.
 
 ### Required integration test format
 
-- Organize the main suite around complete user journeys, with explicit names
+- Organize the suite around complete user journeys, with explicit names
   such as `test_ug_configure_claude_databricks` or
   `test_smart_routing_codex_first_prompt`. Do not hide the agent/provider behind
-  generic parametrization in these main tests.
+  generic parametrization in these tests.
 - Every test has a docstring with **Scenario:** and **Expected:**. State what the
   user does and the observable evidence required for success, including limits.
 - Keep the configure command, launch, task, and assertions visible in the test.
   Fixtures provide fresh environments and credentials, never a preconfigured app.
 - Helpers may handle processes, terminal keys, transcript parsing, cleanup, and
   artifact collection. Do not bury an entire CUJ inside an opaque helper.
-- Main configuration journeys must complete a real TUI task. A startup banner,
+- Provider configuration journeys must complete a real TUI task. A startup banner,
   config file, echoed prompt, or tool output alone does not prove completion.
-- Keep existing focused argument/lifecycle checks in `integration/regressions/`.
-  They remain runnable, with honest failures, separately from `-m main`.
-- Current scope is the eight Claude/Codex provider and smart-routing CUJs.
-  Do not add MCP, skills, tracing, or the broad configure-option matrix without
-  a new scope request.
+- Keep all CUJs as descriptive top-level `integration/test_*.py` files. Do not
+  create a separate regressions category. Shared process/terminal/evidence helpers
+  and Docker build files belong in `integration/utils/`; keep pytest entry points
+  and run documentation at the suite root.
+- Current scope is basic Claude/Codex configuration, routing, script usage,
+  command forwarding, and configure/revert CUJs. Do not add MCP/skills functionality,
+  tracing, or the broad configure-option matrix without a new scope request.
+  Existing `mcp --help` checks cover dispatch only.
 
 - **Add:** state the user scenario and affected versions, choose the category,
   add a focused test and coverage row. Demonstrate regression failure on the

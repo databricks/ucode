@@ -143,19 +143,6 @@ class UserSession:
     def record(self, name: str, value: object) -> None:
         (self.artifacts / name).write_text(self.redact(json.dumps(value, indent=2)))
 
-    def configure(self, agent: str, workspace: str, *, ok: bool = True):
-        return self.run(
-            "configure",
-            "--agents",
-            agent,
-            "--workspaces",
-            workspace,
-            "--skip-validate",
-            "--skip-upgrade",
-            "--disable-databricks-ai-tools",
-            ok=ok,
-        )
-
     def state(self) -> dict:
         return json.loads((self.home / ".ucode/state.json").read_text())
 

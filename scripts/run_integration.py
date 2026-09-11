@@ -105,9 +105,9 @@ def arguments():
     filters.add_argument("--maxfail", type=int)
     extra = args.pytest_args[1:] if args.pytest_args[:1] == ["--"] else args.pytest_args
     selected = filters.parse_args(extra)
-    marker = selected.m or ("installation" if args.installation_only else "main")
+    marker = selected.m or "live"
     if args.installation_only:
-        marker = f"installation and ({marker})" if marker else "installation"
+        marker = f"installation and ({selected.m})" if selected.m else "installation"
     args.pytest_args = []
     for flag, value in (("-k", selected.k), ("-m", marker), ("--maxfail", selected.maxfail)):
         if value is not None:

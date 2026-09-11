@@ -1,10 +1,10 @@
-"""Main CUJs: configure Codex through ug, then use its real interactive session."""
+"""CUJs: configure Codex through ug, then use its real interactive session."""
 
 import pytest
-from evidence import FileTask
-from terminal import AgentTerminal, ConfigureTerminal
+from utils.evidence import FileTask
+from utils.terminal import AgentTerminal, ConfigureTerminal
 
-pytestmark = [pytest.mark.live, pytest.mark.main, pytest.mark.tui, pytest.mark.codex]
+pytestmark = [pytest.mark.live, pytest.mark.tui, pytest.mark.codex]
 
 
 def test_ug_configure_codex_databricks(live_session, workspace):

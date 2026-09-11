@@ -11,8 +11,8 @@ on:
       suite:
         description: Which integration checks to run
         type: choice
-        options: [main, all, tui, regression, installation]
-        default: main
+        options: [live, tui, installation]
+        default: live
       ug_version:
         description: Exact ucode release, or checkout
         default: checkout
@@ -30,6 +30,10 @@ on:
         description: Exact Codex version
         default: 0.154.0
         required: true
+      dependency:
+        description: Optional exact dependency for reproduction (e.g. tomlkit==0.14.0)
+        default: ''
+        required: false
       index_url:
         description: Python package index containing the requested ug version
         default: https://pypi.org/simple
@@ -108,19 +112,15 @@ jobs:
           PY
 
   live:
-    name: CUJs (${{ matrix.dependency }})
+    name: CUJs
     needs: workspace
     runs-on: ubuntu-22.04
     timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      matrix:
-        dependency: [unconstrained, tomlkit==0.14.0, tomlkit==0.15.1]
     env:
       UCODE_TEST_WORKSPACE: ${{ secrets.UCODE_TEST_WORKSPACE }}
       DATABRICKS_BEARER: ${{ secrets.DATABRICKS_BEARER }}
-      DEPENDENCY: ${{ matrix.dependency }}
-      TEST_MARKER: ${{ inputs.suite == 'all' && 'live' || inputs.suite || 'main' }}
+      DEPENDENCY: ${{ inputs.dependency }}
+      TEST_MARKER: ${{ inputs.suite || 'live' }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
@@ -136,7 +136,7 @@ jobs:
         shell: bash
         run: |
           args=()
-          if [[ "$DEPENDENCY" != unconstrained ]]; then
+          if [[ -n "$DEPENDENCY" ]]; then
             args+=(--dependency "$DEPENDENCY")
           fi
           uv run --no-project --python 3.12 python scripts/run_integration.py \
@@ -148,7 +148,7 @@ jobs:
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
-          name: integration-live-${{ strategy.job-index }}
+          name: integration-cujs
           include-hidden-files: true
           path: |
             ${{ runner.temp }}/ug-integration/*.json

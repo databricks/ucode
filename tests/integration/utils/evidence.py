@@ -90,8 +90,32 @@ class FileTask:
             "echoed prompts and tool results do not count as completed answers."
         )
 
+    def assert_headless_answer(self, agent: str, result) -> None:
+        """Read the real CLI's structured final answer, never its echoed input."""
+        payloads = []
+        for line in result.stdout.splitlines():
+            try:
+                value = json.loads(line)
+            except json.JSONDecodeError:
+                continue  # ug may print human-readable launch status before agent JSON.
+            if isinstance(value, dict):
+                payloads.append(value)
+        if agent == "claude":
+            final = [row for row in payloads if row.get("type") == "result"]
+            assert final and not final[-1].get("is_error"), result.stdout
+            assert self.value in final[-1].get("result", ""), result.stdout
+        else:
+            assert any(row.get("type") == "turn.completed" for row in payloads), result.stdout
+            answers = [
+                row.get("item", {}).get("text", "")
+                for row in payloads
+                if row.get("type") == "item.completed"
+                and row.get("item", {}).get("type") == "agent_message"
+            ]
+            assert any(self.value in answer for answer in answers), result.stdout
 
-def assert_subagent_routed(session, agent: str) -> None:
+
+def assert_subagent_routed(session, agent: str, task: FileTask) -> None:
     """Require a real gateway decision correlated with an actual child start."""
     root = session.home / ".ucode"
     decisions = read_jsonl(root / f"{agent}-smart-routing-decisions.jsonl")
@@ -100,6 +124,70 @@ def assert_subagent_routed(session, agent: str) -> None:
     assert decisions, "No real subagent routing decision was recorded"
     for decision in decisions:
         assert decision.get("requested_model") and decision.get("router_model"), decision
+    if agent == "codex":
+        # Codex exposes parent linkage and the child's actual turn model in its
+        # native rollouts. Its ug SubagentStart audit can be empty even when the
+        # child ran. Match native evidence, including the completed file task.
+        sessions = agent_sessions(session, agent)
+        linked = []
+        for path, records in sessions.items():
+            metadata = next(
+                (row["payload"] for row in records if row.get("type") == "session_meta"), {}
+            )
+            source = metadata.get("source")
+            if not isinstance(source, dict):
+                continue
+            parent_id = source.get("subagent", {}).get("thread_spawn", {}).get("parent_thread_id")
+            if not parent_id:
+                continue
+            # A child rollout starts with inherited parent history. Exclude
+            # those turn IDs so a parent's answer/model cannot satisfy this check.
+            parent_turn_ids = set()
+            for other in sessions.values():
+                first_meta = next(
+                    (row["payload"] for row in other if row.get("type") == "session_meta"), {}
+                )
+                if first_meta.get("id") == parent_id:
+                    parent_turn_ids.update(
+                        row["payload"]["turn_id"]
+                        for row in other
+                        if row.get("type") == "turn_context" and row["payload"].get("turn_id")
+                    )
+            assert parent_turn_ids, f"No native parent turns found for {parent_id}"
+            for decision in decisions:
+                if decision.get("session_id") != parent_id:
+                    continue
+                routed_turn_ids = {
+                    row["payload"]["turn_id"]
+                    for row in records
+                    if row.get("type") == "turn_context"
+                    and row["payload"].get("model") == decision["requested_model"]
+                    and row["payload"].get("turn_id")
+                } - parent_turn_ids
+                for row in records:
+                    payload = row.get("payload", {})
+                    if (
+                        row.get("type") == "event_msg"
+                        and payload.get("type") == "task_complete"
+                        and payload.get("turn_id") in routed_turn_ids
+                        and task.value in (payload.get("last_agent_message") or "")
+                    ):
+                        linked.append(
+                            {
+                                "decision_id": decision["decision_id"],
+                                "parent_id": parent_id,
+                                "child_id": metadata["id"],
+                                "path": path,
+                                "turn_id": payload["turn_id"],
+                                "model": decision["requested_model"],
+                            }
+                        )
+        session.record("subagent-routing.json", {"decisions": decisions, "native_children": linked})
+        assert linked, "No routed native child turn completed the delegated file task"
+        assert {row["decision_id"] for row in linked} == {
+            row["decision_id"] for row in decisions
+        }, "A routing decision had no matching completed child turn"
+        return
     decision_ids = {decision["decision_id"] for decision in decisions}
     routed_starts = [row for row in audit if row.get("decision_id") in decision_ids]
     assert routed_starts and all(row.get("agent_id") for row in routed_starts), audit
