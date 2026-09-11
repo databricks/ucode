@@ -1845,6 +1845,38 @@ class TestDoctorCommand:
 
 
 class TestAutoConfigureOnFirstRun:
+    @pytest.mark.parametrize("tool", list(cli_mod.TOOL_SPECS))
+    @pytest.mark.parametrize("has_workspace", [False, True])
+    def test_launch_autoconfigures_without_test_prompt(self, tool, has_workspace):
+        initial_state = {**MINIMAL_STATE, "available_tools": []} if has_workspace else {}
+        configured_state = {**MINIMAL_STATE, "available_tools": [tool]}
+        with (
+            patch("ucode.cli.ensure_bootstrap_dependencies"),
+            patch("ucode.cli.load_state", return_value=initial_state),
+            patch(
+                "ucode.cli._prompt_for_configuration",
+                return_value=(MINIMAL_STATE["workspace"], None),
+            ),
+            patch("ucode.cli.configure_shared_state", return_value=configured_state),
+            patch(
+                "ucode.cli.configure_single_tool", return_value=configured_state
+            ) as mock_configure,
+            patch("ucode.cli.ensure_provider_state", return_value=configured_state),
+            patch("ucode.cli._fetch_managed_config", return_value=(None, False)),
+            patch("ucode.cli.configure_tool", return_value=configured_state),
+            patch("ucode.cli.validate_tool", return_value=(False, "timed out")) as mock_validate,
+            patch("ucode.cli.restore_file") as mock_restore,
+            patch("ucode.cli.launch_agent") as mock_launch,
+        ):
+            result = runner.invoke(app, [tool])
+
+        assert result.exit_code == 0, result.output
+        mock_configure.assert_called_once_with(tool, configured_state)
+        mock_validate.assert_not_called()
+        mock_restore.assert_not_called()
+        mock_launch.assert_called_once()
+        assert mock_launch.call_args.args[:2] == (tool, configured_state)
+
     def test_triggers_when_no_workspace(self):
         """Auto-configure runs when state has no workspace."""
         empty_state = {}
@@ -3205,7 +3237,9 @@ class TestConfigureSkipValidate:
         assert result == 0
         assert validated == []
 
-    def test_skip_validate_skips_single_tool_validation(self, monkeypatch):
+    @pytest.mark.parametrize("skip_validate", [False, True])
+    @pytest.mark.parametrize("tool", list(cli_mod.TOOL_SPECS))
+    def test_single_tool_validation_is_optional(self, monkeypatch, skip_validate, tool):
         import ucode.cli as cli_mod
 
         state = {**MINIMAL_STATE, "workspace": "https://first.com"}
@@ -3221,16 +3255,16 @@ class TestConfigureSkipValidate:
         monkeypatch.setattr(cli_mod, "validate_tool", lambda t: validated.append(t) or (True, ""))
 
         result = cli_mod.configure_workspace_command(
-            "claude",
+            tool,
             workspaces=[("https://first.com", None)],
-            skip_validate=True,
+            skip_validate=skip_validate,
         )
 
         assert result == 0
-        assert validated == []
+        assert validated == ([] if skip_validate else [tool])
         # `ucode configure` (single-agent) still installs AI Tools — it's the
         # configure path, unlike launch which auto-configures without installing.
-        assert installed == [["claude"]]
+        assert installed == [[tool]]
 
 
 class TestConfigureSharedStateMcpCleanup:
