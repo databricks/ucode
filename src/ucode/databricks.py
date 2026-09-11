@@ -2446,7 +2446,7 @@ def resolve_provider_launch_model(model: str | None, provider_models: dict[str, 
 
 _UC_LIST_PAGE_SIZE = 200
 _UC_LIST_MAX_PAGES = 50
-_UC_FUNCTION_PROBE_WORKERS = 16
+_SCHEMA_PROBE_WORKERS = 16
 _UC_LIST_HTTP_TIMEOUT = 10
 # Most MCP services live outside `system.ai`, so this workspace-wide walk needs
 # enough time to enumerate them; a slow workspace still degrades to partial
@@ -2528,6 +2528,7 @@ def walk_catalog_schemas[T](
     probe: Callable[[str, str], T],
     collect: Callable[[T, int, int], None],
     skip_catalogs: frozenset[str] = _UC_FUNCTIONS_SKIP_CATALOGS,
+    max_workers: int = _SCHEMA_PROBE_WORKERS,
 ) -> str | None:
     """Discover every user `<catalog>.<schema>` in the workspace and probe each one in parallel.
 
@@ -2564,7 +2565,7 @@ def walk_catalog_schemas[T](
         return "deadline exceeded while listing UC catalogs"
 
     schema_refs: list[tuple[str, str]] = []
-    schema_workers = max(1, min(_UC_FUNCTION_PROBE_WORKERS, len(catalog_names)))
+    schema_workers = max(1, min(max_workers, len(catalog_names)))
     with ThreadPoolExecutor(max_workers=schema_workers) as pool:
         schema_futures = {
             pool.submit(
@@ -2599,7 +2600,7 @@ def walk_catalog_schemas[T](
 
     schemas_total = len(schema_refs)
     schemas_done = 0
-    probe_workers = max(1, min(_UC_FUNCTION_PROBE_WORKERS, schemas_total))
+    probe_workers = max(1, min(max_workers, schemas_total))
     with ThreadPoolExecutor(max_workers=probe_workers) as pool:
         probe_futures = {
             pool.submit(probe, catalog, schema): (catalog, schema)
