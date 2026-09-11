@@ -581,7 +581,7 @@ class TestCodexValidateCmd:
 
 
 class TestCodexLaunch:
-    """Normal launches layer the ucode profile as universal config overrides."""
+    """Launches use the configuration layout supported by the installed Codex."""
 
     @staticmethod
     def _patch(tmp_path, monkeypatch):
@@ -596,6 +596,7 @@ class TestCodexLaunch:
         )
         launches: list[list[str]] = []
         monkeypatch.setattr(codex, "CODEX_CONFIG_PATH", profile_path)
+        monkeypatch.setattr(codex, "agent_version", lambda binary: "0.134.0")
         monkeypatch.setattr(codex, "exec_or_spawn", lambda argv: launches.append(argv))
         monkeypatch.setattr(codex, "get_databricks_token", lambda workspace, profile=None: "tok")
         monkeypatch.setattr(codex, "clear_model_preferences", lambda state: False)
@@ -621,8 +622,12 @@ class TestCodexLaunch:
             ["app", "--new-window"],
         ],
     )
-    def test_layers_profile_as_config_overrides(self, tmp_path, monkeypatch, tool_args):
+    @pytest.mark.parametrize("version", ["0.134.0", "unknown"])
+    def test_layers_profile_as_config_overrides(
+        self, tmp_path, monkeypatch, capsys, tool_args, version
+    ):
         launches = self._patch(tmp_path, monkeypatch)
+        monkeypatch.setattr(codex, "agent_version", lambda binary: version)
 
         codex.launch({"workspace": WS}, tool_args, options=LaunchOptions())
 
@@ -634,9 +639,50 @@ class TestCodexLaunch:
             arg for arg in launches[0] if arg.startswith("model_providers.ucode-databricks=")
         )
         assert 'base_url = "https://example.databricks.com/ai-gateway/codex/v1"' in provider_arg
+        assert "Upgrade Codex" not in capsys.readouterr().err
+
+    @pytest.mark.parametrize("tool_args", [[], ["exec", "hi"]])
+    @pytest.mark.parametrize("stale_profile", [False, True])
+    @pytest.mark.parametrize("version", ["0.129.0", "0.133.0"])
+    def test_launches_legacy_config_after_configure(
+        self, tmp_path, monkeypatch, capsys, tool_args, stale_profile, version
+    ):
+        profile_path = tmp_path / "ucode.config.toml"
+        legacy_path = tmp_path / "config.toml"
+        monkeypatch.setattr(codex, "CODEX_CONFIG_PATH", profile_path)
+        monkeypatch.setattr(codex, "LEGACY_CODEX_CONFIG_PATH", legacy_path)
+        monkeypatch.setattr(codex, "CODEX_BACKUP_PATH", tmp_path / "profile-backup.toml")
+        monkeypatch.setattr(codex, "LEGACY_CODEX_BACKUP_PATH", tmp_path / "legacy-backup.toml")
+        monkeypatch.setattr(codex, "agent_version", lambda binary: version)
+        monkeypatch.setattr(codex, "save_state", lambda state: None)
+        monkeypatch.setattr(codex, "get_databricks_token", lambda *_args: "tok")
+        monkeypatch.delenv("OAUTH_TOKEN", raising=False)
+        launches: list[list[str]] = []
+        monkeypatch.setattr(codex, "exec_or_spawn", lambda argv: launches.append(argv))
+        if stale_profile:
+            profile_path.write_text('model_provider = "stale-provider"\n', encoding="utf-8")
+
+        state = codex.write_tool_config({"workspace": WS, "profile": "test-workspace"})
+
+        assert profile_path.exists() is stale_profile
+        config = read_toml_safe(legacy_path)
+        assert config["profiles"]["ucode"]["model_provider"] == "ucode-databricks"
+        assert config["model_providers"]["ucode-databricks"]["base_url"] == (
+            f"{WS}/ai-gateway/codex/v1"
+        )
+
+        codex.launch(state, tool_args, options=LaunchOptions())
+
+        assert launches == [["codex", "--profile", "ucode", *tool_args]]
+        assert launches[0][:3] == codex.validate_cmd("codex")[:3]
+        warning = " ".join(capsys.readouterr().err.split())
+        assert f"Codex {version} is outdated" in warning
+        assert "Upgrade Codex to 0.134.0 or newer" in warning
+        assert "codex --version" in warning
 
     def test_requires_populated_ucode_profile(self, tmp_path, monkeypatch):
         monkeypatch.setattr(codex, "CODEX_CONFIG_PATH", tmp_path / "missing.config.toml")
+        monkeypatch.setattr(codex, "agent_version", lambda binary: "0.134.0")
         launches = []
         monkeypatch.setattr(codex, "exec_or_spawn", lambda argv: launches.append(argv))
         monkeypatch.setattr(codex, "get_databricks_token", lambda *_args: "tok")
@@ -672,7 +718,7 @@ class TestCodexManagedConfig:
         return config_path, managed_path
 
     def test_writes_managed_config_by_default(self, tmp_path, monkeypatch):
-        _, managed_path = self._patch(tmp_path, monkeypatch)
+        config_path, managed_path = self._patch(tmp_path, monkeypatch)
         state = {"workspace": WS, "codex_models": ["gpt-5"]}
         codex.write_tool_config(state)
 
@@ -680,6 +726,7 @@ class TestCodexManagedConfig:
         assert doc["model_provider"] == "ucode-databricks"
         assert "model" not in doc
         assert "ucode-databricks" in doc["model_providers"]
+        assert read_toml_safe(config_path)["model_provider"] == "ucode-databricks"
 
     def test_managed_config_preserves_other_keys(self, tmp_path, monkeypatch):
         _, managed_path = self._patch(tmp_path, monkeypatch)

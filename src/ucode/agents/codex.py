@@ -523,6 +523,14 @@ def launch(
     workspace = state.get("workspace")
     if workspace:
         os.environ["OAUTH_TOKEN"] = get_databricks_token(workspace, state.get("profile"))
+    if _use_legacy_layout():
+        print_warning_err(
+            f"Codex {agent_version(binary)} is outdated. Upgrade Codex to "
+            f"{MINIMUM_CODEX_VERSION_TEXT} or newer, then run `codex --version` to verify "
+            "the active installation."
+        )
+        exec_or_spawn([binary, "--profile", CODEX_PROFILE_NAME, *tool_args])
+        return
     # Layer ucode's named profile as ordinary config overrides. Unlike
     # `--profile`, `--config` is accepted by runtime, utility, and server
     # commands, so every invocation keeps the same Databricks settings without
