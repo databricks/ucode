@@ -1,0 +1,8 @@
+**
+!scripts/
+!scripts/run_integration.py
+!tests/
+!tests/integration/
+!tests/integration/**
+tests/integration/__pycache__/
+tests/integration/.pytest_cache/

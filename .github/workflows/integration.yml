@@ -1,0 +1,159 @@
+name: Integration
+
+on:
+  pull_request:
+    paths: ['src/**', 'tests/**', 'scripts/run_integration.py', 'pyproject.toml', 'uv.lock', '.github/workflows/integration.yml']
+  push:
+    branches: [main]
+    paths: ['src/**', 'tests/**', 'scripts/run_integration.py', 'pyproject.toml', 'uv.lock', '.github/workflows/integration.yml']
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: Which integration checks to run
+        type: choice
+        options: [live, tui, installation]
+        default: live
+      ug_version:
+        description: Exact ucode release, or checkout
+        default: checkout
+        required: true
+      entry_point:
+        description: Console command (older releases may only have ucode)
+        type: choice
+        options: [ug, ucode]
+        default: ug
+      claude_version:
+        description: Exact Claude Code version
+        default: 2.1.268
+        required: true
+      codex_version:
+        description: Exact Codex version
+        default: 0.154.0
+        required: true
+      dependency:
+        description: Optional exact dependency for reproduction (e.g. tomlkit==0.14.0)
+        default: ''
+        required: false
+      index_url:
+        description: Python package index containing the requested ug version
+        default: https://pypi.org/simple
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: integration-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name }}
+  cancel-in-progress: true
+
+env:
+  EXPECTED_WORKSPACE: https://eng-ml-inference-team-us-east-1.cloud.databricks.com
+  UG_VERSION: ${{ inputs.ug_version || 'checkout' }}
+  ENTRY_POINT: ${{ inputs.entry_point || 'ug' }}
+  CLAUDE_VERSION: ${{ inputs.claude_version || '2.1.268' }}
+  CODEX_VERSION: ${{ inputs.codex_version || '0.154.0' }}
+  PACKAGE_INDEX: ${{ inputs.index_url || 'https://pypi.org/simple' }}
+
+jobs:
+  installation:
+    name: Installation
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4
+        with:
+          node-version: 22.19.0
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
+        with:
+          version: 0.9.8
+      - name: Test a fresh installed package without credentials
+        run: |
+          uv run --no-project --python 3.12 python scripts/run_integration.py \
+            --python 3.12 --ug-version "$UG_VERSION" --entry-point "$ENTRY_POINT" \
+            --claude-version "$CLAUDE_VERSION" --codex-version "$CODEX_VERSION" \
+            --index-url "$PACKAGE_INDEX" --installation-only --output "$RUNNER_TEMP/ug-integration"
+      - name: Upload installation evidence
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: integration-installation
+          include-hidden-files: true
+          path: |
+            ${{ runner.temp }}/ug-integration/*.json
+            ${{ runner.temp }}/ug-integration/*.txt
+            ${{ runner.temp }}/ug-integration/*.xml
+            ${{ runner.temp }}/ug-integration/*.log
+            ${{ runner.temp }}/ug-integration/artifacts/
+            ${{ runner.temp }}/ug-integration/wheels/
+
+  workspace:
+    name: Workspace
+    if: ${{ inputs.suite != 'installation' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Verify the existing e2e workspace and credential are configured
+        env:
+          UCODE_TEST_WORKSPACE: ${{ secrets.UCODE_TEST_WORKSPACE }}
+          DATABRICKS_BEARER: ${{ secrets.DATABRICKS_BEARER }}
+        run: |
+          python3 - <<'PY'
+          import os
+          expected = os.environ["EXPECTED_WORKSPACE"].rstrip("/")
+          actual = os.environ["UCODE_TEST_WORKSPACE"].strip().rstrip("/")
+          if actual != expected:
+              raise SystemExit("UCODE_TEST_WORKSPACE does not match the expected CI workspace.")
+          if not os.environ["DATABRICKS_BEARER"].strip():
+              raise SystemExit("The existing e2e DATABRICKS_BEARER secret is missing.")
+          print("CI workspace matches; the existing e2e credential is present.")
+          PY
+
+  live:
+    name: CUJs
+    needs: workspace
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    env:
+      UCODE_TEST_WORKSPACE: ${{ secrets.UCODE_TEST_WORKSPACE }}
+      DATABRICKS_BEARER: ${{ secrets.DATABRICKS_BEARER }}
+      DEPENDENCY: ${{ inputs.dependency }}
+      TEST_MARKER: ${{ inputs.suite || 'live' }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4
+        with:
+          node-version: 22.19.0
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
+        with:
+          version: 0.9.8
+      - uses: databricks/setup-cli@bdb89f81c11a5bd647fd55b585b7c396ec68a25a  # v1.0.0
+      - name: Run the selected live cases against the e2e workspace
+        shell: bash
+        run: |
+          args=()
+          if [[ -n "$DEPENDENCY" ]]; then
+            args+=(--dependency "$DEPENDENCY")
+          fi
+          uv run --no-project --python 3.12 python scripts/run_integration.py \
+            --python 3.12 --ug-version "$UG_VERSION" --entry-point "$ENTRY_POINT" \
+            --claude-version "$CLAUDE_VERSION" --codex-version "$CODEX_VERSION" \
+            --index-url "$PACKAGE_INDEX" --output "$RUNNER_TEMP/ug-integration" \
+            "${args[@]}" -- -m "$TEST_MARKER"
+      - name: Upload live test evidence
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: integration-cujs
+          include-hidden-files: true
+          path: |
+            ${{ runner.temp }}/ug-integration/*.json
+            ${{ runner.temp }}/ug-integration/*.txt
+            ${{ runner.temp }}/ug-integration/*.xml
+            ${{ runner.temp }}/ug-integration/*.log
+            ${{ runner.temp }}/ug-integration/artifacts/
+            ${{ runner.temp }}/ug-integration/wheels/
