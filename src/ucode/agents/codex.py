@@ -73,19 +73,6 @@ _MODEL_SERVICE_ROUTING_KEY_PATHS = [
         "http_headers",
         MODEL_SERVICE_PARENT_SCHEMA_HEADER,
     ],
-    # Remove keys written before routing headers were normalized.
-    [
-        "model_providers",
-        CODEX_MODEL_PROVIDER_NAME,
-        "http_headers",
-        "Databricks-Model-Provider-Service",
-    ],
-    [
-        "model_providers",
-        CODEX_MODEL_PROVIDER_NAME,
-        "http_headers",
-        "Databricks-Model-Service-Parent-Schema",
-    ],
 ]
 MINIMUM_CODEX_VERSION = (0, 134, 0)
 MINIMUM_CODEX_VERSION_TEXT = "0.134.0"
