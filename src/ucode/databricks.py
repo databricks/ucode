@@ -2520,6 +2520,94 @@ def _paginated_json_items(
     return items, last_reason
 
 
+def walk_catalog_schemas[T](
+    workspace: str,
+    token: str,
+    *,
+    deadline: float,
+    probe: Callable[[str, str], T],
+    collect: Callable[[T, int, int], None],
+    skip_catalogs: frozenset[str] = _UC_FUNCTIONS_SKIP_CATALOGS,
+) -> str | None:
+    """Walk every user `<catalog>.<schema>` in the workspace, probing each in parallel.
+
+    Phase 1 lists catalogs (minus `skip_catalogs`) and their schemas in parallel, dropping
+    `information_schema`. Phase 2 runs `probe(catalog, schema)` on each surviving pair in parallel,
+    draining under `deadline` (an absolute `time.monotonic()` value) so a slow workspace degrades to
+    partial results. Each completed probe's value is handed to `collect(result, done, total)`, which
+    owns accumulation, progress, and any streaming. Returns a short reason when phase 1 finds
+    nothing, else None."""
+    hostname = workspace_hostname(workspace)
+
+    catalogs, catalogs_reason = _paginated_json_items(
+        f"https://{hostname}/api/2.1/unity-catalog/catalogs",
+        token,
+        items_key="catalogs",
+        timeout=_UC_LIST_HTTP_TIMEOUT,
+    )
+    if not catalogs:
+        return catalogs_reason or "no UC catalogs found"
+
+    catalog_names = [
+        c["name"]
+        for c in catalogs
+        if isinstance(c.get("name"), str) and c["name"] and c["name"] not in skip_catalogs
+    ]
+    if not catalog_names:
+        return "no user UC catalogs found"
+    if time.monotonic() > deadline:
+        return "deadline exceeded while listing UC catalogs"
+
+    schema_refs: list[tuple[str, str]] = []
+    schema_workers = max(1, min(_UC_FUNCTION_PROBE_WORKERS, len(catalog_names)))
+    with ThreadPoolExecutor(max_workers=schema_workers) as pool:
+        schema_futures = {
+            pool.submit(
+                _paginated_json_items,
+                f"https://{hostname}/api/2.1/unity-catalog/schemas",
+                token,
+                items_key="schemas",
+                extra_params={"catalog_name": cat},
+                timeout=_UC_LIST_HTTP_TIMEOUT,
+            ): cat
+            for cat in catalog_names
+        }
+
+        def collect_schemas(result, catalog):
+            schemas, _ = result
+            for schema in schemas:
+                name = schema.get("name")
+                if isinstance(name, str) and name and name != "information_schema":
+                    schema_refs.append((catalog, name))
+
+        _drain_with_deadline(schema_futures, deadline, collect_schemas)
+        pool.shutdown(wait=False, cancel_futures=True)
+
+    if not schema_refs:
+        if time.monotonic() > deadline:
+            return "deadline exceeded while listing UC schemas"
+        return "no UC schemas found"
+
+    schemas_total = len(schema_refs)
+    schemas_done = 0
+    probe_workers = max(1, min(_UC_FUNCTION_PROBE_WORKERS, schemas_total))
+    with ThreadPoolExecutor(max_workers=probe_workers) as pool:
+        probe_futures = {
+            pool.submit(probe, catalog, schema): (catalog, schema)
+            for catalog, schema in schema_refs
+        }
+
+        def collect_probe(result, _ref):
+            nonlocal schemas_done
+            schemas_done += 1
+            collect(result, schemas_done, schemas_total)
+
+        _drain_with_deadline(probe_futures, deadline, collect_probe)
+        pool.shutdown(wait=False, cancel_futures=True)
+
+    return None
+
+
 def list_all_mcp_services(
     workspace: str,
     token: str,
@@ -2542,89 +2630,24 @@ def list_all_mcp_services(
 
     This walk is the slow, workspace-wide counterpart to `list_mcp_services`
     (single schema)."""
-    hostname = workspace_hostname(workspace)
     deadline = time.monotonic() + deadline_seconds
-
-    catalogs, catalogs_reason = _paginated_json_items(
-        f"https://{hostname}/api/2.1/unity-catalog/catalogs",
-        token,
-        items_key="catalogs",
-        timeout=_UC_LIST_HTTP_TIMEOUT,
-    )
-    if not catalogs:
-        return [], catalogs_reason or "no UC catalogs found"
-
-    catalog_names = [
-        c["name"]
-        for c in catalogs
-        if isinstance(c.get("name"), str)
-        and c["name"]
-        and c["name"] not in _UC_FUNCTIONS_SKIP_CATALOGS
-    ]
-    if not catalog_names:
-        return [], "no user UC catalogs found"
-    if time.monotonic() > deadline:
-        return [], "deadline exceeded while listing UC catalogs"
-
-    # Parallel per-catalog schema listing.
-    schema_refs: list[str] = []
-    schema_workers = max(1, min(_UC_FUNCTION_PROBE_WORKERS, len(catalog_names)))
-    with ThreadPoolExecutor(max_workers=schema_workers) as pool:
-        schema_futures = {
-            pool.submit(
-                _paginated_json_items,
-                f"https://{hostname}/api/2.1/unity-catalog/schemas",
-                token,
-                items_key="schemas",
-                extra_params={"catalog_name": cat},
-                timeout=_UC_LIST_HTTP_TIMEOUT,
-            ): cat
-            for cat in catalog_names
-        }
-
-        def collect_schemas(result, catalog):
-            schemas, _ = result
-            for schema in schemas:
-                schema_name = schema.get("name")
-                if (
-                    isinstance(schema_name, str)
-                    and schema_name
-                    and schema_name != "information_schema"
-                ):
-                    schema_refs.append(f"{catalog}.{schema_name}")
-
-        _drain_with_deadline(schema_futures, deadline, collect_schemas)
-        pool.shutdown(wait=False, cancel_futures=True)
-
-    if not schema_refs:
-        if time.monotonic() > deadline:
-            return [], "deadline exceeded while listing UC schemas"
-        return [], "no UC schemas found"
-
-    # Parallel per-schema mcp-services listing.
     names: set[str] = set()
-    schemas_total = len(schema_refs)
-    schemas_done = 0
-    probe_workers = max(1, min(_UC_FUNCTION_PROBE_WORKERS, schemas_total))
-    with ThreadPoolExecutor(max_workers=probe_workers) as pool:
-        service_futures = {
-            pool.submit(list_mcp_services, workspace, token, ref): ref for ref in schema_refs
-        }
 
-        def collect_services(result, _ref):
-            nonlocal schemas_done
-            found, _ = result
-            new = [n for n in found if n not in names]
-            names.update(found)
-            schemas_done += 1
-            if on_progress is not None:
-                on_progress(schemas_done, schemas_total, len(names))
-            if on_services is not None and new:
-                on_services(sorted(new))
+    def probe(catalog, schema):
+        return list_mcp_services(workspace, token, f"{catalog}.{schema}")
 
-        _drain_with_deadline(service_futures, deadline, collect_services)
-        pool.shutdown(wait=False, cancel_futures=True)
+    def collect(result, schemas_done, schemas_total):
+        found, _ = result
+        new = [n for n in found if n not in names]
+        names.update(found)
+        if on_progress is not None:
+            on_progress(schemas_done, schemas_total, len(names))
+        if on_services is not None and new:
+            on_services(sorted(new))
 
+    reason = walk_catalog_schemas(workspace, token, deadline=deadline, probe=probe, collect=collect)
+    if reason is not None:
+        return [], reason
     if not names:
         if time.monotonic() > deadline:
             return [], "deadline exceeded while listing MCP services"

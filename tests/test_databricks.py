@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import time
 from decimal import Decimal
 from urllib.parse import parse_qs
 
@@ -1097,6 +1098,71 @@ class TestListMcpServices:
 
         assert names == []
         assert reason and reason.startswith("HTTP 404")
+
+
+class TestWalkCatalogSchemas:
+    """The generic catalogs -> schemas -> per-schema probe scaffold, independent of any probe."""
+
+    def _fake_catalog_http(self, catalogs, schemas_by_catalog):
+        def fake_get(url, token, timeout=30):
+            if "unity-catalog/catalogs" in url:
+                return {"catalogs": [{"name": c} for c in catalogs]}, None
+            if "unity-catalog/schemas" in url:
+                cat = url.split("catalog_name=")[1].split("&")[0]
+                return {"schemas": [{"name": s} for s in schemas_by_catalog.get(cat, [])]}, None
+            return None, "unexpected url"
+
+        return fake_get
+
+    def test_probes_each_user_schema_and_reports_progress(self, monkeypatch):
+        monkeypatch.setattr(
+            db_mod,
+            "_http_get_json",
+            self._fake_catalog_http(
+                catalogs=["mycat", "system"],
+                schemas_by_catalog={"mycat": ["a", "b", "information_schema"]},
+            ),
+        )
+        probed: list[tuple[str, str]] = []
+        collected: list[tuple[str, int, int]] = []
+
+        def probe(catalog, schema):
+            probed.append((catalog, schema))
+            return f"{catalog}.{schema}"
+
+        def collect(result, done, total):
+            collected.append((result, done, total))
+
+        reason = db_mod.walk_catalog_schemas(
+            WS, "token", deadline=time.monotonic() + 30, probe=probe, collect=collect
+        )
+
+        assert reason is None
+        # system is skipped and information_schema is dropped; only user schemas are probed.
+        assert sorted(probed) == [("mycat", "a"), ("mycat", "b")]
+        assert sorted(r for r, _, _ in collected) == ["mycat.a", "mycat.b"]
+        # One collect per probed schema; total is fixed and done climbs to it.
+        assert [total for _, _, total in collected] == [2, 2]
+        assert sorted(done for _, done, _ in collected) == [1, 2]
+
+    def test_returns_reason_when_all_catalogs_skipped(self, monkeypatch):
+        monkeypatch.setattr(
+            db_mod,
+            "_http_get_json",
+            self._fake_catalog_http(catalogs=["system", "samples"], schemas_by_catalog={}),
+        )
+        probed: list[tuple[str, str]] = []
+
+        reason = db_mod.walk_catalog_schemas(
+            WS,
+            "token",
+            deadline=time.monotonic() + 30,
+            probe=lambda catalog, schema: probed.append((catalog, schema)),
+            collect=lambda *args: None,
+        )
+
+        assert reason == "no user UC catalogs found"
+        assert probed == []
 
 
 class TestListAllMcpServices:
