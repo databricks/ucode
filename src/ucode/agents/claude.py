@@ -24,7 +24,12 @@ from ucode.config_io import (
     read_json_safe,
     write_json_file,
 )
-from ucode.constants import LOOPBACK_HOST, MODEL_SERVICE_ROUTING_HEADER_NAMES
+from ucode.constants import (
+    LOOPBACK_HOST,
+    MODEL_PROVIDER_SERVICE_HEADER,
+    MODEL_SERVICE_PARENT_SCHEMA_HEADER,
+    MODEL_SERVICE_ROUTING_HEADER_NAMES,
+)
 from ucode.custom_oauth import CustomOAuthConfig, build_custom_auth_shell_command
 from ucode.databricks import (
     build_auth_shell_command,
@@ -44,7 +49,6 @@ from ucode.managed_files import (
     reconcile_managed_file,
     revert_managed_file,
 )
-from ucode.model_service_headers import model_service_routing_headers
 from ucode.smart_routing import v2 as smart_routing_v2
 from ucode.smart_routing.claude_hooks import (
     remove_smart_routing_hooks,
@@ -358,10 +362,11 @@ def render_overlay(
         "x-databricks-use-coding-agent-mode: true",
         f"User-Agent: ucode/{ucode_version()} claude/{agent_version('claude')}",
     ]
-    header_lines.extend(
-        f"{name}: {value}"
-        for name, value in model_service_routing_headers(provider, parent_schema).items()
-    )
+    # A provider selects one MPS; a parent discovers Model Services, so they are exclusive.
+    if provider:
+        header_lines.append(f"{MODEL_PROVIDER_SERVICE_HEADER}: {provider}")
+    elif parent_schema:
+        header_lines.append(f"{MODEL_SERVICE_PARENT_SCHEMA_HEADER}: {parent_schema}")
     # Relayed: the X-Databricks-AI-Gateway-Token swap header is added per request
     # by the refresh proxy, not here — a static value would go stale mid-session.
     custom_headers = "\n".join(header_lines)
