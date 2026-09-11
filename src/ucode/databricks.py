@@ -1460,6 +1460,29 @@ _MODEL_SERVICE_REQUIRED_PREFIX = "system.ai."
 # is the only server-side narrowing that works.
 _MODEL_SERVICE_PARENT_SCHEMA = "schemas/system.ai"
 
+# Some workspaces host their coding-agent model services in a custom UC catalog
+# rather than `system.ai` (e.g. `model_service_catalog.default`). Those are invisible
+# to the `system.ai`-scoped walk above, so discovery reports no models even when
+# several exist. This env var opts a workspace into searching additional
+# `catalog.schema` locations: a comma-separated list, each walked with its own
+# `parent=schemas/{catalog}.{schema}` scope (one fast page, like system.ai). It's
+# empty by default so the common case never scoops up unrelated user schemas.
+_MODEL_SERVICE_EXTRA_SCHEMAS_ENV = "UCODE_MODEL_SERVICE_SCHEMAS"
+
+
+def _extra_model_service_schemas() -> list[str]:
+    """Additional `catalog.schema` locations to search, from the env var.
+
+    De-duplicated, order-preserving; empty when the var is unset or blank."""
+    raw = os.environ.get(_MODEL_SERVICE_EXTRA_SCHEMAS_ENV, "")
+    schemas: list[str] = []
+    for part in raw.split(","):
+        part = part.strip()
+        if part and part not in schemas:
+            schemas.append(part)
+    return schemas
+
+
 # Supported OSS chat families, matched by name substring. Add an entry to
 # support a new family.
 _OSS_MODEL_FAMILIES = ("kimi-", "glm-", "deepseek-")
@@ -1517,18 +1540,24 @@ def model_token_limits(model_id: str) -> dict[str, int] | None:
     return None
 
 
-def _model_service_id(service: dict) -> str | None:
-    """Extract the `system.ai.<model-name>` id from one model-service entry.
+def _model_service_id(
+    service: dict, *, required_prefix: str = _MODEL_SERVICE_REQUIRED_PREFIX
+) -> str | None:
+    """Extract the `<catalog>.<schema>.<model-name>` id from one model-service entry.
 
-    Returns None for services in any other schema, so user/internal model
-    services don't leak into the family buckets."""
+    ``required_prefix`` defaults to ``system.ai.`` so services in any other
+    schema are dropped and user/internal model services don't leak into the
+    family buckets. Pass ``required_prefix=""`` to accept every id after the
+    ``model-services/`` prefix — used for the schema-scoped extra walks
+    (see :func:`_extra_model_service_schemas`), where the ``parent`` query has
+    already narrowed the listing to a single trusted schema."""
     name = service.get("name")
     if not isinstance(name, str):
         return None
     name = name.strip()
     if name.startswith(_MODEL_SERVICE_NAME_PREFIX):
         name = name[len(_MODEL_SERVICE_NAME_PREFIX) :]
-    if not name.startswith(_MODEL_SERVICE_REQUIRED_PREFIX):
+    if required_prefix and not name.startswith(required_prefix):
         return None
     return name or None
 
@@ -1595,6 +1624,50 @@ def has_cached_model_provider_services(workspace: str, parent: str | None = None
     return (workspace, parent or "") in _MODEL_PROVIDER_SERVICES_CACHE
 
 
+def _walk_model_services(
+    hostname: str,
+    token: str,
+    parent: str,
+    *,
+    required_prefix: str,
+    page_size: int,
+    max_pages: int,
+) -> tuple[list[str], str | None]:
+    """Page one ``parent``-scoped model-services listing to its end.
+
+    Returns (ids, reason) where ``reason`` is the last page's failure reason
+    (None on a clean walk, even when the schema is legitimately empty). ``ids``
+    holds every entry that survives ``required_prefix`` filtering; a
+    mid-pagination blip still returns whatever was collected so far."""
+    ids: list[str] = []
+    page_token: str | None = None
+    seen_tokens: set[str] = set()
+    last_reason: str | None = None
+    for _ in range(max_pages):
+        params: dict[str, str] = {"parent": parent, "page_size": str(page_size)}
+        if page_token:
+            params["page_token"] = page_token
+        url = f"https://{hostname}/api/2.1/unity-catalog/model-services?{urlencode(params)}"
+        payload, reason = _get_model_services_page(url, token)
+        if payload is None:
+            last_reason = reason
+            break
+        data = cast(dict, payload) if isinstance(payload, dict) else {}
+        for service in data.get("model_services", []):
+            if isinstance(service, dict):
+                model_id = _model_service_id(service, required_prefix=required_prefix)
+                if model_id:
+                    ids.append(model_id)
+        page_token = data.get("next_page_token") or None
+        if not page_token:
+            last_reason = None
+            break
+        if page_token in seen_tokens:
+            break
+        seen_tokens.add(page_token)
+    return ids, last_reason
+
+
 def list_model_services(
     workspace: str,
     token: str,
@@ -1603,16 +1676,21 @@ def list_model_services(
     max_pages: int = 100,
     use_cache: bool = True,
 ) -> tuple[list[str], str | None]:
-    """List all `system.ai.*` model ids via the UC model-services API.
+    """List `system.ai.*` (plus any opt-in extra-schema) model ids via the UC API.
 
     Pages through ``/api/2.1/unity-catalog/model-services`` scoped to the
     ``system.ai`` schema (``parent=schemas/system.ai``) with a bounded
     ``page_size`` (the endpoint 499s without one) and returns the de-duplicated,
-    sorted list of ``system.ai.<model-name>`` ids. Returns (ids, reason); reason
-    is None on success, otherwise it describes why the list is empty (HTTP/network
-    error or no services). Scoping matters: the unscoped metastore listing walks
-    every schema across dozens of ~2s pages (~50s on a busy workspace) only to
-    keep the same ``system.ai.*`` subset — see ``_MODEL_SERVICE_PARENT_SCHEMA``.
+    sorted list of ``<catalog>.<schema>.<model-name>`` ids. Returns (ids, reason);
+    reason is None on success, otherwise it describes why the list is empty
+    (HTTP/network error or no services). Scoping matters: the unscoped metastore
+    listing walks every schema across dozens of ~2s pages (~50s on a busy
+    workspace) only to keep the same ``system.ai.*`` subset — see
+    ``_MODEL_SERVICE_PARENT_SCHEMA``.
+
+    Workspaces whose model services live outside ``system.ai`` can name those
+    schemas in ``UCODE_MODEL_SERVICE_SCHEMAS``; each is walked with its own scope
+    and merged in (see ``_extra_model_service_schemas``).
 
     A successful result is memoized per workspace for the life of the process; pass
     ``use_cache=False`` to force a fresh walk.
@@ -1623,37 +1701,32 @@ def list_model_services(
             return list(cached), None
 
     hostname = workspace_hostname(workspace)
-    ids: list[str] = []
-    page_token: str | None = None
-    seen_tokens: set[str] = set()
-    last_reason: str | None = None
-    for _ in range(max_pages):
-        params: dict[str, str] = {
-            "parent": _MODEL_SERVICE_PARENT_SCHEMA,
-            "page_size": str(page_size),
-        }
-        if page_token:
-            params["page_token"] = page_token
-        url = f"https://{hostname}/api/2.1/unity-catalog/model-services?{urlencode(params)}"
-        payload, reason = _get_model_services_page(url, token)
-        if payload is None:
-            # Surface the failure only if we have nothing yet; a mid-pagination
-            # blip still returns whatever we collected.
-            last_reason = reason
-            break
-        data = cast(dict, payload) if isinstance(payload, dict) else {}
-        for service in data.get("model_services", []):
-            if isinstance(service, dict):
-                model_id = _model_service_id(service)
-                if model_id:
-                    ids.append(model_id)
-        page_token = data.get("next_page_token") or None
-        if not page_token:
+    # Primary: the `system.ai` schema (one fast scoped page on most workspaces).
+    ids, last_reason = _walk_model_services(
+        hostname,
+        token,
+        _MODEL_SERVICE_PARENT_SCHEMA,
+        required_prefix=_MODEL_SERVICE_REQUIRED_PREFIX,
+        page_size=page_size,
+        max_pages=max_pages,
+    )
+    # Opt-in: additional catalog.schema locations for workspaces whose model
+    # services live outside system.ai. Each is scoped to its own schema, so the
+    # `parent` query already trusts every returned id (required_prefix="").
+    for schema in _extra_model_service_schemas():
+        extra_ids, extra_reason = _walk_model_services(
+            hostname,
+            token,
+            f"schemas/{schema}",
+            required_prefix="",
+            page_size=page_size,
+            max_pages=max_pages,
+        )
+        ids.extend(extra_ids)
+        # A clean extra walk clears an earlier `system.ai` failure only when it
+        # actually contributed models; otherwise keep the original reason.
+        if extra_ids and extra_reason is None:
             last_reason = None
-            break
-        if page_token in seen_tokens:
-            break
-        seen_tokens.add(page_token)
 
     deduped = sorted(set(ids))
     if deduped:
@@ -1732,7 +1805,7 @@ def model_service_exists(
 
 
 def discover_claude_models_unbucketed(workspace: str, token: str) -> tuple[list[str], str | None]:
-    """Every `system.ai.claude-*` id on the workspace, unbucketed.
+    """Every Claude model-service id on the workspace, unbucketed.
 
     `discover_model_services` keeps only the newest id per family because the launch path pins one
     model per Claude family alias. An admin authoring a managed config needs the alternatives too

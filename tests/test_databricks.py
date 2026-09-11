@@ -452,6 +452,132 @@ class TestDiscoverModelServices:
         assert calls["n"] == 3  # two failures, third succeeds
 
 
+class TestExtraModelServiceSchemas:
+    """UCODE_MODEL_SERVICE_SCHEMAS opts a workspace into searching model-service
+    schemas outside system.ai (e.g. a workspace whose Claude models live in
+    `model_service_catalog.default`)."""
+
+    def test_env_parsing_dedupes_and_trims(self, monkeypatch):
+        monkeypatch.setenv(
+            "UCODE_MODEL_SERVICE_SCHEMAS",
+            " model_service_catalog.default , main.foo ,, model_service_catalog.default ",
+        )
+        assert db_mod._extra_model_service_schemas() == [
+            "model_service_catalog.default",
+            "main.foo",
+        ]
+
+    def test_env_unset_is_empty(self, monkeypatch):
+        monkeypatch.delenv("UCODE_MODEL_SERVICE_SCHEMAS", raising=False)
+        assert db_mod._extra_model_service_schemas() == []
+
+    @staticmethod
+    def _payload_by_parent(services_by_parent: dict[str, list[str]]):
+        """Fake `_http_get_json` that serves a schema's services keyed by its
+        `parent=schemas/...` scope, so each scoped walk gets its own listing."""
+
+        def fake_get(url, token, timeout=10):
+            # urlencode leaves dots/underscores unencoded, so the parent scope
+            # appears verbatim after `schemas%2F`.
+            for parent, model_ids in services_by_parent.items():
+                if f"parent=schemas%2F{parent}" in url:
+                    return {"model_services": [_model_service(m) for m in model_ids]}, None
+            return {"model_services": []}, None
+
+        return fake_get
+
+    def test_discovers_claude_models_in_extra_schema(self, monkeypatch):
+        # system.ai is empty; the three Claude models live in a custom catalog.
+        monkeypatch.setenv("UCODE_MODEL_SERVICE_SCHEMAS", "model_service_catalog.default")
+        monkeypatch.setattr(
+            db_mod,
+            "_http_get_json",
+            self._payload_by_parent(
+                {
+                    "system.ai": [],
+                    "model_service_catalog.default": [
+                        "model_service_catalog.default.claude-opus-5",
+                        "model_service_catalog.default.claude-sonnet-5",
+                        "model_service_catalog.default.claude-haiku-4-5",
+                    ],
+                }
+            ),
+        )
+
+        claude, codex, gemini, oss, reason = db_mod.discover_model_services(WS, "token")
+
+        assert reason is None
+        assert claude == {
+            "opus": "model_service_catalog.default.claude-opus-5",
+            "sonnet": "model_service_catalog.default.claude-sonnet-5",
+            "haiku": "model_service_catalog.default.claude-haiku-4-5",
+        }
+        assert (codex, gemini, oss) == ([], [], [])
+
+    def test_extra_walk_is_scoped_to_its_own_schema(self, monkeypatch):
+        monkeypatch.setenv("UCODE_MODEL_SERVICE_SCHEMAS", "model_service_catalog.default")
+        urls: list[str] = []
+
+        def fake_get(url, token, timeout=10):
+            urls.append(url)
+            if "parent=schemas%2Fmodel_service_catalog.default" in url:
+                return {
+                    "model_services": [
+                        _model_service("model_service_catalog.default.claude-opus-5")
+                    ]
+                }, None
+            return {"model_services": []}, None
+
+        monkeypatch.setattr(db_mod, "_http_get_json", fake_get)
+
+        ids, reason = db_mod.list_model_services(WS, "token")
+
+        assert reason is None
+        assert ids == ["model_service_catalog.default.claude-opus-5"]
+        # Both the system.ai scope and the extra schema's own scope were queried.
+        assert any("parent=schemas%2Fsystem.ai" in u for u in urls)
+        assert any("parent=schemas%2Fmodel_service_catalog.default" in u for u in urls)
+
+    def test_extra_schema_ids_join_system_ai_ids(self, monkeypatch):
+        monkeypatch.setenv("UCODE_MODEL_SERVICE_SCHEMAS", "model_service_catalog.default")
+        monkeypatch.setattr(
+            db_mod,
+            "_http_get_json",
+            self._payload_by_parent(
+                {
+                    "system.ai": ["system.ai.gpt-5"],
+                    "model_service_catalog.default": [
+                        "model_service_catalog.default.claude-opus-5"
+                    ],
+                }
+            ),
+        )
+
+        claude, codex, gemini, oss, reason = db_mod.discover_model_services(WS, "token")
+
+        assert reason is None
+        assert codex == ["system.ai.gpt-5"]
+        assert claude == {"opus": "model_service_catalog.default.claude-opus-5"}
+
+    def test_env_unset_ignores_custom_catalog(self, monkeypatch):
+        # Without the opt-in, a custom-catalog service is never picked up even if
+        # the endpoint were to return it (the system.ai prefix filter drops it).
+        monkeypatch.delenv("UCODE_MODEL_SERVICE_SCHEMAS", raising=False)
+        payload = {
+            "model_services": [
+                _model_service("model_service_catalog.default.claude-opus-5"),
+            ]
+        }
+        monkeypatch.setattr(
+            db_mod, "_http_get_json", lambda url, token, timeout=10: (payload, None)
+        )
+
+        claude, codex, gemini, oss, reason = db_mod.discover_model_services(WS, "token")
+
+        assert claude == {}
+        assert reason is not None
+
+
 class TestModelServiceExists:
     def test_true_when_listed_in_its_schema(self, monkeypatch):
         urls: list[str] = []
