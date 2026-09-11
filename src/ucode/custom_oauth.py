@@ -9,32 +9,19 @@ from collections.abc import Sequence
 from typing import TypedDict
 from urllib.parse import urlparse
 
-try:
-    from databricks.sdk import oauth
-except ModuleNotFoundError:
-    oauth = None
+from databricks.sdk import oauth
 
 from ucode.constants import LOCALHOST, LOOPBACK_HOST
 from ucode.databricks import build_auth_token_argv
 from ucode.ui import err_console, normalize_workspace_url, print_warning_err
 
 DEFAULT_REDIRECT_URL = f"http://{LOCALHOST}:8020"
-_MISSING_SDK_ERROR = (
-    "Custom OAuth requires the optional Databricks SDK dependency. "
-    'Install it with `uv tool install "ucode[custom-oauth]"` and retry.'
-)
 
 
 class CustomOAuthConfig(TypedDict):
     client_id: str
     redirect_url: str
     scopes: list[str]
-
-
-def _require_oauth():
-    if oauth is None:
-        raise RuntimeError(_MISSING_SDK_ERROR)
-    return oauth
 
 
 def _normalize_scopes(scopes: Sequence[str]) -> list[str]:
@@ -112,11 +99,10 @@ def get_custom_client_token(
 ) -> str:
     """Reuse the SDK's PKCE flow and per-workspace/client token cache."""
     config = create_custom_oauth_config(client_id, scopes, redirect_url)
-    sdk_oauth = _require_oauth()
     workspace = normalize_workspace_url(workspace)
     try:
-        endpoints = sdk_oauth.get_workspace_endpoints(workspace)
-        cache = sdk_oauth.TokenCache(
+        endpoints = oauth.get_workspace_endpoints(workspace)
+        cache = oauth.TokenCache(
             host=workspace,
             oidc_endpoints=endpoints,
             client_id=config["client_id"],
@@ -127,7 +113,7 @@ def get_custom_client_token(
         if credentials is not None:
             try:
                 if force_refresh:
-                    credentials = sdk_oauth.SessionCredentials(
+                    credentials = oauth.SessionCredentials(
                         token=credentials.refresh(),
                         token_endpoint=endpoints.token_endpoint,
                         client_id=config["client_id"],
@@ -138,7 +124,7 @@ def get_custom_client_token(
                 print_warning_err("Cached OAuth token could not be refreshed. Sign in again.")
                 credentials = None
         if credentials is None:
-            client = sdk_oauth.OAuthClient(
+            client = oauth.OAuthClient(
                 oidc_endpoints=endpoints,
                 client_id=config["client_id"],
                 redirect_url=config["redirect_url"],
