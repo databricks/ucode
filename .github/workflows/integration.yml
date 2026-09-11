@@ -67,7 +67,7 @@ jobs:
           version: 0.9.8
       - name: Test a fresh installed package without credentials
         run: |
-          python3 scripts/run_integration.py \
+          uv run --no-project --python 3.12 python scripts/run_integration.py \
             --python 3.12 --ug-version "$UG_VERSION" --entry-point "$ENTRY_POINT" \
             --claude-version "$CLAUDE_VERSION" --codex-version "$CODEX_VERSION" \
             --index-url "$PACKAGE_INDEX" --installation-only --output "$RUNNER_TEMP/ug-integration"
@@ -139,7 +139,7 @@ jobs:
           if [[ "$DEPENDENCY" != unconstrained ]]; then
             args+=(--dependency "$DEPENDENCY")
           fi
-          python3 scripts/run_integration.py \
+          uv run --no-project --python 3.12 python scripts/run_integration.py \
             --python 3.12 --ug-version "$UG_VERSION" --entry-point "$ENTRY_POINT" \
             --claude-version "$CLAUDE_VERSION" --codex-version "$CODEX_VERSION" \
             --index-url "$PACKAGE_INDEX" --output "$RUNNER_TEMP/ug-integration" \
