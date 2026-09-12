@@ -2446,7 +2446,7 @@ def resolve_provider_launch_model(model: str | None, provider_models: dict[str, 
 
 _UC_LIST_PAGE_SIZE = 200
 _UC_LIST_MAX_PAGES = 50
-_UC_FUNCTION_PROBE_WORKERS = 16
+_SCHEMA_PROBE_WORKERS = 16
 _UC_LIST_HTTP_TIMEOUT = 10
 # Most MCP services live outside `system.ai`, so this workspace-wide walk needs
 # enough time to enumerate them; a slow workspace still degrades to partial
@@ -2520,30 +2520,30 @@ def _paginated_json_items(
     return items, last_reason
 
 
-def list_all_mcp_services(
+def walk_catalog_schemas[T](
     workspace: str,
     token: str,
     *,
-    deadline_seconds: float = _MCP_SERVICES_WALK_DEADLINE_SECONDS,
-    on_progress: Callable[[int, int, int], None] | None = None,
-    on_services: Callable[[list[str]], None] | None = None,
-) -> tuple[list[str], str | None]:
-    """Return sorted unique MCP-service full names across every `<catalog>.<schema>`
-    in the workspace. The mcp-services API is one-schema-per-call, so this walks
-    catalogs -> schemas -> mcp-services in parallel under a wall-clock budget,
-    returning partial results once `deadline_seconds` is exceeded.
+    deadline: float,
+    probe: Callable[[str, str], T],
+    collect: Callable[[T, int, int], None],
+    skip_catalogs: frozenset[str] = _UC_FUNCTIONS_SKIP_CATALOGS,
+    max_workers: int = _SCHEMA_PROBE_WORKERS,
+) -> str | None:
+    """Discover every user `<catalog>.<schema>` in the workspace and probe each one in parallel.
 
-    `on_progress`, if given, is called as each schema's listing completes with
-    `(schemas_done, schemas_total, services_found)` so callers can render a live
-    count. `on_services`, if given, is called with each schema's newly-found service
-    names (deduped against everything emitted so far) so callers can stream results
-    into a picker as the walk progresses instead of waiting for the full result. Both
-    are invoked serially from the draining thread (not the workers).
+    Catalogs and their schemas are listed (skipping `skip_catalogs` and `information_schema`), then
+    each schema is probed concurrently until `deadline` (an absolute `time.monotonic()` value)
+    passes, so a slow workspace returns partial results instead of hanging. The caller supplies two
+    callables and owns whatever they accumulate:
 
-    This walk is the slow, workspace-wide counterpart to `list_mcp_services`
-    (single schema)."""
+      - `probe(catalog, schema) -> result`: fetch one schema's data (e.g. its MCP services).
+      - `collect(result, done, total)`: handle each probe result as it lands — accumulating,
+        de-duping, streaming — where `done`/`total` are the completed and total schema counts.
+
+    Returns None once the probes run, or a short reason string if there are no catalogs or schemas
+    to probe."""
     hostname = workspace_hostname(workspace)
-    deadline = time.monotonic() + deadline_seconds
 
     catalogs, catalogs_reason = _paginated_json_items(
         f"https://{hostname}/api/2.1/unity-catalog/catalogs",
@@ -2552,23 +2552,20 @@ def list_all_mcp_services(
         timeout=_UC_LIST_HTTP_TIMEOUT,
     )
     if not catalogs:
-        return [], catalogs_reason or "no UC catalogs found"
+        return catalogs_reason or "no UC catalogs found"
 
     catalog_names = [
         c["name"]
         for c in catalogs
-        if isinstance(c.get("name"), str)
-        and c["name"]
-        and c["name"] not in _UC_FUNCTIONS_SKIP_CATALOGS
+        if isinstance(c.get("name"), str) and c["name"] and c["name"] not in skip_catalogs
     ]
     if not catalog_names:
-        return [], "no user UC catalogs found"
+        return "no user UC catalogs found"
     if time.monotonic() > deadline:
-        return [], "deadline exceeded while listing UC catalogs"
+        return "deadline exceeded while listing UC catalogs"
 
-    # Parallel per-catalog schema listing.
-    schema_refs: list[str] = []
-    schema_workers = max(1, min(_UC_FUNCTION_PROBE_WORKERS, len(catalog_names)))
+    schema_refs: list[tuple[str, str]] = []
+    schema_workers = max(1, min(max_workers, len(catalog_names)))
     with ThreadPoolExecutor(max_workers=schema_workers) as pool:
         schema_futures = {
             pool.submit(
@@ -2591,40 +2588,76 @@ def list_all_mcp_services(
                     and schema_name
                     and schema_name != "information_schema"
                 ):
-                    schema_refs.append(f"{catalog}.{schema_name}")
+                    schema_refs.append((catalog, schema_name))
 
         _drain_with_deadline(schema_futures, deadline, collect_schemas)
         pool.shutdown(wait=False, cancel_futures=True)
 
     if not schema_refs:
         if time.monotonic() > deadline:
-            return [], "deadline exceeded while listing UC schemas"
-        return [], "no UC schemas found"
+            return "deadline exceeded while listing UC schemas"
+        return "no UC schemas found"
 
-    # Parallel per-schema mcp-services listing.
-    names: set[str] = set()
     schemas_total = len(schema_refs)
     schemas_done = 0
-    probe_workers = max(1, min(_UC_FUNCTION_PROBE_WORKERS, schemas_total))
+    probe_workers = max(1, min(max_workers, schemas_total))
     with ThreadPoolExecutor(max_workers=probe_workers) as pool:
-        service_futures = {
-            pool.submit(list_mcp_services, workspace, token, ref): ref for ref in schema_refs
+        probe_futures = {
+            pool.submit(probe, catalog, schema): (catalog, schema)
+            for catalog, schema in schema_refs
         }
 
-        def collect_services(result, _ref):
+        def collect_probe(result, _ref):
             nonlocal schemas_done
-            found, _ = result
-            new = [n for n in found if n not in names]
-            names.update(found)
             schemas_done += 1
-            if on_progress is not None:
-                on_progress(schemas_done, schemas_total, len(names))
-            if on_services is not None and new:
-                on_services(sorted(new))
+            collect(result, schemas_done, schemas_total)
 
-        _drain_with_deadline(service_futures, deadline, collect_services)
+        _drain_with_deadline(probe_futures, deadline, collect_probe)
         pool.shutdown(wait=False, cancel_futures=True)
 
+    return None
+
+
+def list_all_mcp_services(
+    workspace: str,
+    token: str,
+    *,
+    deadline_seconds: float = _MCP_SERVICES_WALK_DEADLINE_SECONDS,
+    on_progress: Callable[[int, int, int], None] | None = None,
+    on_services: Callable[[list[str]], None] | None = None,
+) -> tuple[list[str], str | None]:
+    """Return sorted unique MCP-service full names across every `<catalog>.<schema>`
+    in the workspace. The mcp-services API is one-schema-per-call, so this walks
+    catalogs -> schemas -> mcp-services in parallel under a wall-clock budget,
+    returning partial results once `deadline_seconds` is exceeded.
+
+    `on_progress`, if given, is called as each schema's listing completes with
+    `(schemas_done, schemas_total, services_found)` so callers can render a live
+    count. `on_services`, if given, is called with each schema's newly-found service
+    names (deduped against everything emitted so far) so callers can stream results
+    into a picker as the walk progresses instead of waiting for the full result. Both
+    are invoked serially from the draining thread (not the workers).
+
+    This walk is the slow, workspace-wide counterpart to `list_mcp_services`
+    (single schema)."""
+    deadline = time.monotonic() + deadline_seconds
+    names: set[str] = set()
+
+    def probe(catalog, schema):
+        return list_mcp_services(workspace, token, f"{catalog}.{schema}")
+
+    def collect(result, schemas_done, schemas_total):
+        found, _ = result
+        new = [n for n in found if n not in names]
+        names.update(found)
+        if on_progress is not None:
+            on_progress(schemas_done, schemas_total, len(names))
+        if on_services is not None and new:
+            on_services(sorted(new))
+
+    reason = walk_catalog_schemas(workspace, token, deadline=deadline, probe=probe, collect=collect)
+    if reason is not None:
+        return [], reason
     if not names:
         if time.monotonic() > deadline:
             return [], "deadline exceeded while listing MCP services"
