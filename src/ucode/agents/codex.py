@@ -577,6 +577,7 @@ def _launch_smart_routing(state: dict, tool_args: list[str]) -> None:
         )
 
     configured_model = _smart_routing_config_model(state)
+    # Prefer the custom catalog if it exists.
     models = custom_catalog_models() or routing_models(state)
     start_model = (
         configured_model
