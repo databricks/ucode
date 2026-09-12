@@ -38,18 +38,25 @@ _MAX_FETCH_WORKERS = 8
 
 @dataclass(frozen=True)
 class SkillRef:
-    """A downloadable skill's two names, which are not interchangeable.
+    """A downloadable skill's UC location plus its two non-interchangeable names.
 
-    ``securable_name`` is the UC leaf of ``skills/<cat>.<sch>.<leaf>`` and is the
-    only name the Files API resolves, so it addresses the bytes and identifies the
-    skill. ``bundle_name`` is the ``name:`` an agent reads from the bundle's
-    SKILL.md frontmatter, so it names the on-disk directory. Finalize does not
-    require the two to match, so a skill created under a securable that differs
-    from its frontmatter carries both.
+    ``catalog``/``schema``/``securable_name`` are the parts of ``skills/<cat>.<sch>.<leaf>``:
+    ``securable_name`` is the leaf, the only name the Files API resolves, and the
+    three together fully qualify the skill (``fqn``). ``bundle_name`` is the
+    ``name:`` an agent reads from the bundle's SKILL.md frontmatter, so it names
+    the on-disk directory. Finalize does not require the securable and bundle name
+    to match, so a skill created under a securable that differs from its
+    frontmatter carries both.
     """
 
+    catalog: str
+    schema: str
     securable_name: str
     bundle_name: str
+
+    @property
+    def fqn(self) -> str:
+        return f"{self.catalog}.{self.schema}.{self.securable_name}"
 
 
 def _non_empty_str(value: object) -> str | None:
@@ -86,7 +93,14 @@ def _skill_ref(skill: dict) -> SkillRef | None:
         )
         return None
 
-    return SkillRef(securable_name=name.rsplit(".", 1)[-1], bundle_name=bundle_name)
+    parts = name.split("/", 1)[-1].split(".")
+    if len(parts) != 3:
+        print_warning(f"Skipping `{name}`: expected a `catalog.schema.name` skill name.")
+        return None
+    catalog, schema, securable_name = parts
+    return SkillRef(
+        catalog=catalog, schema=schema, securable_name=securable_name, bundle_name=bundle_name
+    )
 
 
 def list_schema_skills(
@@ -241,20 +255,18 @@ def existing_skill_on_disk(roots: list[Path], bundle_name: str) -> bool:
     return any((root / bundle_name).exists() for root in roots)
 
 
-def should_download_skill(roots: list[Path], ref: SkillRef, *, location: str) -> bool:
+def should_download_skill(roots: list[Path], ref: SkillRef) -> bool:
     """Whether ``ref`` should be fetched and written into ``roots``.
 
     Applies the disk-only check that needs no bundle bytes: prompts before
-    overwriting a skill already on disk (``location`` is the source
-    ``<catalog>.<schema>`` shown in that prompt), so a declined skill is never
-    fetched. Dedup keys on the bundle name, since that is the directory an agent
-    would load. Name validity is the server's job -- FinalizeSkill enforces the
-    Agent Skills naming rules on ``bundle_name`` before we ever see it -- so
-    ucode does not re-check it here.
+    overwriting a skill already on disk (naming the source by ``ref.fqn``), so a
+    declined skill is never fetched. Dedup keys on the bundle name, since that is
+    the directory an agent would load. Name validity is the server's job --
+    FinalizeSkill enforces the Agent Skills naming rules on ``bundle_name`` before
+    we ever see it -- so ucode does not re-check it here.
     """
     if existing_skill_on_disk(roots, ref.bundle_name) and not prompt_yes_no(
-        f"A skill named `{ref.bundle_name}` already exists. "
-        f"Overwrite it with `{location}.{ref.securable_name}`?"
+        f"A skill named `{ref.bundle_name}` already exists. Overwrite it with `{ref.fqn}`?"
     ):
         print_note(f"Kept existing `{ref.bundle_name}`.")
         return False
@@ -276,23 +288,25 @@ def write_skill(roots: list[Path], ref: SkillRef, files: dict[str, bytes]) -> No
 
 
 def _fetch_bundles(
-    workspace: str, token: str, catalog: str, schema: str, refs: list[SkillRef]
+    workspace: str, token: str, refs: list[SkillRef], *, label: str
 ) -> dict[str, tuple[dict[str, bytes] | None, str | None]]:
-    """Fetch every skill's bundle concurrently, keyed by securable leaf.
+    """Fetch every skill's bundle concurrently, keyed by FQN.
 
-    Renders a ``k/n`` progress bar that advances as each fetch completes.
+    Renders a ``k/n`` progress bar labeled ``label`` that advances as each fetch
+    completes. Keying on the FQN keeps a cross-schema batch's securables apart,
+    since a securable name is unique only within its own schema.
     """
     if not refs:
         return {}
     results: dict[str, tuple[dict[str, bytes] | None, str | None]] = {}
     with (
-        progress_bar(f"Fetching skills from {catalog}.{schema}", len(refs)) as advance,
+        progress_bar(label, len(refs)) as advance,
         ThreadPoolExecutor(max_workers=min(_MAX_FETCH_WORKERS, len(refs))) as pool,
     ):
         futures = {
             pool.submit(
-                fetch_skill_bundle, workspace, token, catalog, schema, ref.securable_name
-            ): ref.securable_name
+                fetch_skill_bundle, workspace, token, ref.catalog, ref.schema, ref.securable_name
+            ): ref.fqn
             for ref in refs
         }
         for future in as_completed(futures):
@@ -301,32 +315,58 @@ def _fetch_bundles(
     return results
 
 
-def _reject_bundle_name_collisions(refs: list[SkillRef], *, location: str) -> list[SkillRef]:
+def _reject_bundle_name_collisions(refs: list[SkillRef]) -> list[SkillRef]:
     """``refs`` with any later skill that repeats an earlier one's bundle name dropped.
 
     Only the securable name is unique within a schema; ``bundle_name`` comes from
     each bundle's SKILL.md frontmatter and is never checked against its siblings,
-    so one schema can hold two skills claiming the same directory. Writing both
-    would land them on top of each other, leaving whichever finished last with no
-    sign the other was lost, so keep the first and warn about the rest.
+    so two skills can claim the same directory. Writing both would land them on top
+    of each other, leaving whichever finished last with no sign the other was lost,
+    so keep the first and warn about the rest by FQN.
     """
     kept: list[SkillRef] = []
-    claimed: dict[str, str] = {}
+    claimed: dict[str, SkillRef] = {}
     for ref in refs:
         winner = claimed.get(ref.bundle_name)
         if winner is not None:
             print_warning(
-                f"Skipping `{location}.{ref.securable_name}`: its bundle name "
-                f"`{ref.bundle_name}` is already claimed by `{location}.{winner}`. "
-                "Rename one skill's SKILL.md `name:` to download both."
+                f"Skipping `{ref.fqn}`: its bundle name `{ref.bundle_name}` is already "
+                f"claimed by `{winner.fqn}`. Rename one skill's SKILL.md `name:` to download both."
             )
             continue
-        claimed[ref.bundle_name] = ref.securable_name
+        claimed[ref.bundle_name] = ref
         kept.append(ref)
     return kept
 
 
-def download_skills(
+def _download_refs(
+    workspace: str, token: str, refs: list[SkillRef], roots: list[Path], *, label: str
+) -> tuple[int, int]:
+    """Fetch and write ``refs`` into ``roots``, returning ``(written, total)``.
+
+    The shared download core: drop siblings claiming one directory
+    (``_reject_bundle_name_collisions``), prompt before overwriting a skill already
+    on disk (``should_download_skill``, so a declined skill is never fetched), then
+    fetch the survivors' bundles concurrently and write them. ``total`` is the
+    count that could reach disk (dropped siblings excluded), so a caller's summary
+    denominator is right. A per-skill fetch failure warns and skips only that skill.
+    """
+    refs = _reject_bundle_name_collisions(refs)
+    to_download = [ref for ref in refs if should_download_skill(roots, ref)]
+    bundles = _fetch_bundles(workspace, token, to_download, label=label)
+    written = 0
+    for ref in to_download:
+        files, reason = bundles[ref.fqn]
+        if reason or files is None:
+            print_warning(f"Skipping `{ref.fqn}`: {reason}.")
+            continue
+        write_skill(roots, ref, files)
+        written += 1
+    console.print()
+    return written, len(refs)
+
+
+def download_skills_from_schema_locations(
     workspace: str,
     token: str,
     locations: list[str],
@@ -335,22 +375,13 @@ def download_skills(
 ) -> None:
     """Download every skill in each ``<catalog>.<schema>`` location to disk.
 
-    Locations are processed one at a time, and each runs three stages:
-
-    1. **List** the schema's finalized skills. When ``skills`` is given, restrict
-       to those securable names (the name that identifies a skill in UC); names
-       absent from the schema warn and are skipped, and ``None`` keeps the whole
-       schema. Siblings claiming one directory are then reduced to the first (see
-       ``_reject_bundle_name_collisions``).
-    2. **Decide** which to download via ``should_download_skill`` (prompts before
-       overwriting a skill already on disk), so a declined skill is never fetched.
-    3. **Fetch** the survivors' bundles concurrently (with a progress bar) and
-       **write** them.
-
-    Finishing one location before starting the next means a skill written for an
-    earlier location is already on disk when a same-named skill in a later
-    location reaches its decide stage, so the overwrite prompt still fires. A
-    failure on one skill warns and skips it without aborting the batch.
+    Locations are processed one at a time. Each lists the schema's finalized
+    skills, applies the optional ``skills`` filter (securable names -- the name
+    that identifies a skill in UC; unknown ones warn, ``None`` keeps the whole
+    schema), then hands the refs to ``_download_refs`` and prints a per-location
+    summary. Finishing one location before the next means a skill written for an
+    earlier location is already on disk when a same-named skill in a later location
+    reaches the overwrite prompt, so the prompt still fires.
     """
     roots = skill_dir_roots(path)
     roots_display = " and ".join(str(root) for root in roots)
@@ -374,26 +405,48 @@ def download_skills(
         if not refs:
             print_note(f"No skills found in `{location}`.")
             continue
-        # Before the decide stage, so a dropped sibling is never fetched and the
-        # summary's denominator counts only skills that can reach disk.
-        refs = _reject_bundle_name_collisions(refs, location=location)
-
-        to_download = [ref for ref in refs if should_download_skill(roots, ref, location=location)]
-        bundles = _fetch_bundles(workspace, token, catalog, schema, to_download)
-        written = 0
-        for ref in to_download:
-            files, reason = bundles[ref.securable_name]
-            if reason or files is None:
-                print_warning(f"Skipping `{location}.{ref.securable_name}`: {reason}.")
-                continue
-            write_skill(roots, ref, files)
-            written += 1
-        console.print()
-        total = len(refs)
+        written, total = _download_refs(
+            workspace, token, refs, roots, label=f"Fetching skills from {location}"
+        )
         skipped = f"; {total - written} skipped" if written < total else ""
         print_success(
             f"Downloaded {written}/{total} skill(s){skipped} from `{location}` in {roots_display}."
         )
+
+
+def get_skill(workspace: str, token: str, fqn: str) -> SkillRef | None:
+    """The finalized skill named by ``fqn``, or None if it cannot be downloaded.
+
+    ``GetSkill`` returns the same shape as a ``ListSkills`` entry, so the response
+    runs through ``_skill_ref``; a missing, unfinalized, or malformed skill is None.
+    """
+    hostname = workspace_hostname(workspace)
+    payload, _ = _http_get_json(
+        f"https://{hostname}/api/2.1/unity-catalog/skills/{fqn}", token, timeout=30
+    )
+    return _skill_ref(payload) if isinstance(payload, dict) else None
+
+
+def download_selected_skills(workspace: str, token: str, fqns: list[str], path: str | None) -> None:
+    """Download the skills named by ``fqns`` (``<catalog>.<schema>.<name>``) to disk.
+
+    Resolves each FQN with ``GetSkill`` (a skill that cannot be downloaded warns and
+    is skipped), then hands the flat, possibly cross-schema set to ``_download_refs``
+    in one pass, so collisions are deduped across the whole selection under a single
+    summary.
+    """
+    roots = skill_dir_roots(path)
+    roots_display = " and ".join(str(root) for root in roots)
+    refs: list[SkillRef] = []
+    for fqn in fqns:
+        ref = get_skill(workspace, token, fqn)
+        if ref is None:
+            print_warning(f"Skipping `{fqn}`: not a downloadable skill.")
+            continue
+        refs.append(ref)
+    written, total = _download_refs(workspace, token, refs, roots, label="Fetching selected skills")
+    skipped = f"; {total - written} skipped" if written < total else ""
+    print_success(f"Downloaded {written}/{total} skill(s){skipped} in {roots_display}.")
 
 
 def download_managed_skills_on_launch(
@@ -418,15 +471,17 @@ def download_managed_skills_on_launch(
         if reason:
             print_warning(f"Could not list workspace skills in `{location}`: {reason}.")
             continue
-        refs = _reject_bundle_name_collisions(refs, location=location)
+        refs = _reject_bundle_name_collisions(refs)
         missing = [ref for ref in refs if not existing_skill_on_disk(roots, ref.bundle_name)]
         if not missing:
             continue
-        bundles = _fetch_bundles(workspace, token, catalog, schema, missing)
+        bundles = _fetch_bundles(
+            workspace, token, missing, label=f"Fetching skills from {location}"
+        )
         for ref in missing:
-            files, reason = bundles[ref.securable_name]
+            files, reason = bundles[ref.fqn]
             if reason or files is None:
-                print_warning(f"Skipping `{location}.{ref.securable_name}`: {reason}.")
+                print_warning(f"Skipping `{ref.fqn}`: {reason}.")
                 continue
             write_skill(roots, ref, files)
             written.append(ref.bundle_name)
@@ -441,12 +496,12 @@ def configure_skills_download_command(
     Downloads to ``path`` (or the home dir when None), then registers/keeps the
     schema-less MCP connection. ``skill_locations`` is never touched, so a prior
     ``--mcp`` set survives a download run. ``skills`` narrows the download (see
-    ``download_skills``)."""
+    ``download_skills_from_schema_locations``)."""
     state = load_state()
     workspace, profile, clients = setup_mcp_clients(state, "Skills")
     token = get_databricks_token(workspace, profile)
 
-    download_skills(workspace, token, locations, path, skills)
+    download_skills_from_schema_locations(workspace, token, locations, path, skills)
 
     register_schemaless_skills_connection(state, workspace, profile, clients)
     return 0
