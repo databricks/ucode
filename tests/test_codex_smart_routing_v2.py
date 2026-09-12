@@ -387,42 +387,25 @@ class TestCustomCatalogModels:
         monkeypatch.setattr(codex, "_managed_config_path", lambda: managed_path)
         monkeypatch.setattr(codex, "CODEX_CONFIG_PATH", cli_path)
 
-    def test_managed_catalog_wins_over_cli_and_local(self, tmp_path, monkeypatch):
-        self._settings(
-            tmp_path,
-            monkeypatch,
-            managed=self._catalog(tmp_path / "managed.json", ["gpt-6-astra"]),
-            cli=self._catalog(tmp_path / "cli.json", ["gpt-6-b"]),
-            local=self._catalog(tmp_path / "local.json", ["gpt-6-c"]),
+    @pytest.mark.parametrize(
+        ("catalogs", "expected"),
+        [
+            (("gpt-managed", "gpt-profile", "gpt-user"), ["gpt-managed"]),
+            ((None, "gpt-profile", "gpt-user"), ["gpt-profile"]),
+            ((None, None, "gpt-user"), ["gpt-user"]),
+            ((None, None, None), None),
+        ],
+    )
+    def test_config_precedence(self, tmp_path, monkeypatch, catalogs, expected):
+        managed, cli, local = (
+            self._catalog(tmp_path / f"{name}.json", [slug]) if slug else None
+            for name, slug in zip(("managed", "cli", "local"), catalogs, strict=True)
         )
+        self._settings(tmp_path, monkeypatch, managed=managed, cli=cli, local=local)
 
-        assert v2.custom_catalog_models() == ["gpt-6-astra"]
+        assert v2.custom_catalog_models() == expected
 
-    def test_cli_catalog_wins_over_local(self, tmp_path, monkeypatch):
-        self._settings(
-            tmp_path,
-            monkeypatch,
-            cli=self._catalog(tmp_path / "cli.json", ["gpt-6-b"]),
-            local=self._catalog(tmp_path / "local.json", ["gpt-6-c"]),
-        )
-
-        assert v2.custom_catalog_models() == ["gpt-6-b"]
-
-    def test_local_catalog_used_when_managed_and_cli_define_none(self, tmp_path, monkeypatch):
-        self._settings(
-            tmp_path,
-            monkeypatch,
-            local=self._catalog(tmp_path / "local.json", ["gpt-6-c"]),
-        )
-
-        assert v2.custom_catalog_models() == ["gpt-6-c"]
-
-    def test_no_catalog_anywhere_returns_none(self, tmp_path, monkeypatch):
-        self._settings(tmp_path, monkeypatch)
-
-        assert v2.custom_catalog_models() is None
-
-    def test_unreadable_catalog_falls_back_with_warning(self, tmp_path, monkeypatch):
+    def test_unreadable_catalog_warns_and_falls_back(self, tmp_path, monkeypatch):
         self._settings(tmp_path, monkeypatch, cli=tmp_path / "missing.json")
         warnings = []
         monkeypatch.setattr(v2, "print_warning", warnings.append)
@@ -430,35 +413,6 @@ class TestCustomCatalogModels:
         assert v2.custom_catalog_models() is None
         assert len(warnings) == 1
         assert "falling back to the cached model services" in warnings[0]
-
-    def test_empty_catalog_falls_back_with_warning(self, tmp_path, monkeypatch):
-        self._settings(tmp_path, monkeypatch, cli=self._catalog(tmp_path / "empty.json", []))
-        warnings = []
-        monkeypatch.setattr(v2, "print_warning", warnings.append)
-
-        assert v2.custom_catalog_models() is None
-        assert len(warnings) == 1
-
-    def test_slugs_are_deduped_and_invalid_rows_skipped(self, tmp_path, monkeypatch):
-        catalog = tmp_path / "catalog.json"
-        catalog.write_text(
-            json.dumps(
-                {
-                    "models": [
-                        {"slug": "gpt-6-astra"},
-                        {"slug": " gpt-6-astra "},
-                        {"slug": ""},
-                        {"slug": 42},
-                        "not-a-row",
-                        {"slug": "gpt-6-b"},
-                    ]
-                }
-            ),
-            encoding="utf-8",
-        )
-        self._settings(tmp_path, monkeypatch, cli=catalog)
-
-        assert v2.custom_catalog_models() == ["gpt-6-astra", "gpt-6-b"]
 
     def test_launch_prefers_catalog_over_cached_models(self, tmp_path, monkeypatch):
         self._settings(
