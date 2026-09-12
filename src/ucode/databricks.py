@@ -26,6 +26,7 @@ from concurrent.futures import (
 )
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
+from email.message import Message
 from pathlib import Path
 from typing import Literal, NamedTuple, NoReturn, cast, overload
 from urllib import error as urllib_error
@@ -246,6 +247,30 @@ def _http_get_retry_delay(retry_after: str | None, retry_index: int) -> float:
     return backoff + random.uniform(0, min(backoff * 0.25, 0.5))
 
 
+# Databricks stamps every authenticated API response with the caller's numeric workspace (org) id in
+# this header, so any call ucode already makes reveals it with no dedicated lookup. Captured by
+# hostname as responses go by; session-only, like the listing caches below.
+_ORG_ID_HEADER = "X-Databricks-Org-Id"
+_WORKSPACE_ORG_IDS: dict[str, str] = {}
+
+
+def _capture_org_id(url: str, headers: Message | None) -> None:
+    org_id = headers.get(_ORG_ID_HEADER) if headers is not None else None
+    hostname = urlparse(url).hostname
+    if org_id and hostname:
+        _WORKSPACE_ORG_IDS[hostname] = org_id
+
+
+def workspace_org_id(workspace: str) -> str | None:
+    """The numeric workspace (org) id for ``workspace``, or None if no response has revealed it yet."""
+    return _WORKSPACE_ORG_IDS.get(workspace_hostname(workspace))
+
+
+def clear_workspace_org_id_cache() -> None:
+    """Forget captured workspace org ids (used by tests, and after a workspace switch)."""
+    _WORKSPACE_ORG_IDS.clear()
+
+
 def _http_get_json(
     url: str,
     token: str,
@@ -272,6 +297,7 @@ def _http_get_json(
         try:
             with urllib_request.urlopen(request, timeout=timeout) as response:
                 body = response.read().decode("utf-8")
+                _capture_org_id(url, getattr(response, "headers", None))
             _debug(f"GET {url}", f"HTTP 200, {len(body)} bytes")
             if _debug_enabled():
                 _debug("body", body[:4000])
@@ -420,6 +446,7 @@ def _http_get_bytes(url: str, token: str, *, timeout: int = 10) -> tuple[bytes |
     try:
         with urllib_request.urlopen(request, timeout=timeout) as response:
             body = response.read()
+            _capture_org_id(url, getattr(response, "headers", None))
         _debug(f"GET {url}", f"HTTP 200, {len(body)} bytes")
         return body, None
     except urllib_error.HTTPError as exc:

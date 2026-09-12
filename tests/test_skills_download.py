@@ -740,6 +740,19 @@ class TestDownloadSelectedSkills:
         assert record["fqn"] == "main.default.triage"
         assert record["scope"] == "project"
         assert record["base"] == str(tmp_path)
+        assert "workspace_id" not in record
+
+    def test_records_workspace_id_when_known(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(sd, "get_skill", lambda ws, tok, fqn: ref(fqn.rsplit(".", 1)[-1]))
+        monkeypatch.setattr(
+            sd, "fetch_skill_bundle", lambda ws, tok, c, s, leaf: ({"SKILL.md": b"x"}, None)
+        )
+        monkeypatch.setattr(sd, "workspace_org_id", lambda ws: "org-42")
+
+        sd.download_selected_skills(WS, "token", ["main.default.triage"], str(tmp_path))
+
+        record = skills_state.attribution_for_dir(tmp_path / ".claude/skills/triage")
+        assert record["workspace_id"] == "org-42"
 
 
 class TestSkillRefMetadata:

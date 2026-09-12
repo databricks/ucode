@@ -38,6 +38,7 @@ class SkillInstall:
     base: str
     dirs: tuple[str, ...]
     metastore_id: str | None = None
+    workspace_id: str | None = None
     skill_id: str | None = None
     uc_update_time: str | None = None
 
@@ -111,6 +112,7 @@ def _to_record(install: SkillInstall) -> dict:
         "bundle_name": install.bundle_name,
         "metastore_id": install.metastore_id,
         "workspace": install.workspace,
+        "workspace_id": install.workspace_id,
         "scope": install.scope,
         "base": install.base,
         "dirs": list(install.dirs),
