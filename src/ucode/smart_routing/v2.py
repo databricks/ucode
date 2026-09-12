@@ -15,7 +15,12 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import NoReturn, TextIO
 
-from ucode.codex_config import codex_config_args
+from ucode.codex_config import (
+    DEFAULT_CODEX_CONFIG_PATH,
+    codex_config_args,
+    codex_config_precedence_paths,
+    codex_managed_config_path,
+)
 from ucode.config_io import APP_DIR, read_json_safe, read_toml_safe, write_json_file
 from ucode.constants import LOOPBACK_HOST
 from ucode.databricks import (
@@ -107,10 +112,11 @@ def custom_catalog_models() -> list[str] | None:
     administrator exposed, so there is no need to read the cached model services.
     """
     try:
-        from ucode.agents.codex import config_precedence_paths
-
-        paths = config_precedence_paths()
-    except (ImportError, OSError):
+        paths = codex_config_precedence_paths(
+            codex_managed_config_path(),
+            DEFAULT_CODEX_CONFIG_PATH,
+        )
+    except OSError:
         return None
     for path in paths:
         if path is None or not path.is_file():
@@ -522,9 +528,10 @@ def _cached_routing_models(state: dict) -> list[str]:
 
 
 def _codex_home_config_path() -> Path:
-    from ucode.agents.codex import config_precedence_paths
-
-    return config_precedence_paths()[-1]
+    codex_home = os.environ.get("CODEX_HOME")
+    if codex_home:
+        return Path(codex_home).expanduser() / "config.toml"
+    return Path.home() / ".codex" / "config.toml"
 
 
 def _v2_pre_tool_use_hooks(state: dict, available_models: list[str]) -> list[dict]:

@@ -11,7 +11,13 @@ from pathlib import Path
 import tomlkit
 from tomlkit.exceptions import ParseError
 
-from ucode.codex_config import codex_config_args
+from ucode.codex_config import (
+    CODEX_PROFILE_NAME,
+    DEFAULT_CODEX_CONFIG_PATH,
+    codex_config_args,
+    codex_config_precedence_paths,
+    codex_managed_config_path,
+)
 from ucode.config_io import (
     APP_DIR,
     ToolSpec,
@@ -28,9 +34,7 @@ from ucode.databricks import (
 )
 from ucode.launcher import exec_or_spawn
 from ucode.managed_files import (
-    OS,
     ManagedFileWriteUnavailable,
-    current_os,
     managed_file_conflicts,
     managed_file_is_verified,
     managed_file_status,
@@ -53,9 +57,8 @@ from ucode.ui import print_warning_err
 
 from .args import LaunchOptions
 
-CODEX_CONFIG_DIR = Path.home() / ".codex"
-CODEX_PROFILE_NAME = "ucode"
-CODEX_CONFIG_PATH = CODEX_CONFIG_DIR / f"{CODEX_PROFILE_NAME}.config.toml"
+CODEX_CONFIG_PATH = DEFAULT_CODEX_CONFIG_PATH
+CODEX_CONFIG_DIR = CODEX_CONFIG_PATH.parent
 CODEX_BACKUP_PATH = APP_DIR / "codex-ucode-config.backup.toml"
 LEGACY_CODEX_CONFIG_PATH = CODEX_CONFIG_DIR / "config.toml"
 LEGACY_CODEX_BACKUP_PATH = APP_DIR / "codex-config.backup.toml"
@@ -394,9 +397,7 @@ def _is_gpt_family(model: str) -> bool:
 
 def _managed_config_path() -> Path | None:
     """Return Codex's managed config path on platforms supported by ucode's sudo writer."""
-    if current_os() in (OS.LINUX, OS.MACOS):
-        return Path("/etc/codex/managed_config.toml")
-    return None
+    return codex_managed_config_path()
 
 
 def _parse_managed_config(text: str) -> dict:
@@ -510,16 +511,9 @@ def _smart_routing_config_model(state: dict) -> str | None:
 
 def config_precedence_paths() -> tuple[Path, ...]:
     """Return Codex config paths in managed, profile, then user precedence."""
-    config_home = os.environ.get("CODEX_HOME")
-    profile_path = (
-        Path(config_home).expanduser() / f"{CODEX_PROFILE_NAME}.config.toml"
-        if config_home
-        else CODEX_CONFIG_PATH
-    )
-    return tuple(
-        path
-        for path in (_managed_config_path(), profile_path, profile_path.parent / "config.toml")
-        if path is not None
+    return codex_config_precedence_paths(
+        _managed_config_path(),
+        CODEX_CONFIG_PATH,
     )
 
 
