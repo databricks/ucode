@@ -29,8 +29,8 @@ from questionary.styles import merge_styles_default
 
 PICKER_VISIBLE_ROWS = 10
 
-# Cap the highlighted-row description preview so a long one (skill descriptions run
-# to ~1024 chars) stays within the footer instead of dominating the screen.
+# Cap the highlighted-row description preview so a long description stays within the
+# footer instead of dominating the screen.
 _DESCRIPTION_PREVIEW_CHARS = 240
 # Left margin for the description footer, applied to wrapped lines too (see get_line_prefix).
 _DESCRIPTION_INDENT = "  "
