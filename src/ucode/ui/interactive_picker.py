@@ -32,7 +32,6 @@ PICKER_VISIBLE_ROWS = 10
 # Cap the highlighted-row description preview so a long one (skill descriptions run
 # to ~1024 chars) stays within the footer instead of dominating the screen.
 _DESCRIPTION_PREVIEW_CHARS = 240
-_DESCRIPTION_LABEL = "Skill description: "
 # Left margin for the description footer, applied to wrapped lines too (see get_line_prefix).
 _DESCRIPTION_INDENT = "  "
 
@@ -45,11 +44,15 @@ def _description_preview(description: str) -> str:
 
 
 def _description_footer_tokens(description: str) -> list[tuple[str, str]]:
-    """A bold ``Skill description:`` label followed by the truncated preview."""
-    return [
-        ("bold", _DESCRIPTION_LABEL),
-        ("class:instruction", _description_preview(description)),
-    ]
+    """Footer tokens for the highlighted row's description.
+
+    A caller emphasizes a leading label by formatting the description as ``"label: text"``:
+    the ``label:`` renders bold and the rest as the truncated preview. A description with no
+    ``": "`` renders entirely as the preview."""
+    label, sep, body = description.partition(": ")
+    if not sep:
+        return [("class:instruction", _description_preview(description))]
+    return [("bold", f"{label}{sep}"), ("class:instruction", _description_preview(body))]
 
 
 class _Back:

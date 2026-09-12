@@ -55,14 +55,17 @@ class TestDescriptionPreview:
 
 
 class TestDescriptionFooterTokens:
-    def test_bold_label_precedes_the_preview_body(self):
-        tokens = _description_footer_tokens("Routes tickets.")
-        assert tokens == [("bold", "Skill description: "), ("class:instruction", "Routes tickets.")]
+    def test_leading_label_is_bold_and_body_follows(self):
+        tokens = _description_footer_tokens("triage: Routes tickets.")
+        assert tokens == [("bold", "triage: "), ("class:instruction", "Routes tickets.")]
 
-    def test_body_is_the_truncated_preview(self):
-        long = "z" * (_DESCRIPTION_PREVIEW_CHARS + 10)
-        _label_style, label_text = _description_footer_tokens(long)[0]
-        body_style, body_text = _description_footer_tokens(long)[1]
-        assert label_text == "Skill description: "
-        assert body_style == "class:instruction"
-        assert body_text == _description_preview(long)
+    def test_without_a_label_the_whole_string_is_the_body(self):
+        assert _description_footer_tokens("Routes tickets.") == [
+            ("class:instruction", "Routes tickets.")
+        ]
+
+    def test_only_the_body_is_truncated(self):
+        long_body = "z" * (_DESCRIPTION_PREVIEW_CHARS + 10)
+        label_token, body_token = _description_footer_tokens(f"triage: {long_body}")
+        assert label_token == ("bold", "triage: ")
+        assert body_token == ("class:instruction", _description_preview(long_body))

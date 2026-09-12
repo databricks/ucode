@@ -575,12 +575,13 @@ def _skill_download_choice(ref: SkillRef, roots: list[Path]) -> questionary.Choi
     """Picker row for one skill: value is its FQN, title flags an on-disk bundle.
 
     On-disk skills stay selectable, since re-downloading is a legitimate update and
-    the existing overwrite prompt confirms it.
+    the existing overwrite prompt confirms it. The detail footer previews the
+    description behind a bold bundle-name label (the row itself shows the FQN, so the
+    bundle name is the one identifier not otherwise on screen).
     """
     on_disk = " (on disk)" if existing_skill_on_disk(roots, ref.bundle_name) else ""
-    return questionary.Choice(
-        title=f"{ref.fqn}{on_disk}", value=ref.fqn, description=ref.description
-    )
+    description = f"{ref.bundle_name}: {ref.description}" if ref.description else None
+    return questionary.Choice(title=f"{ref.fqn}{on_disk}", value=ref.fqn, description=description)
 
 
 def _skills_download_background_loader(

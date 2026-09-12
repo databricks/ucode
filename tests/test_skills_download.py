@@ -1024,12 +1024,25 @@ class TestSkillDownloadPicker:
         fresh = sd._skill_download_choice(ref("triage", description="Routes tickets."), roots)
         assert fresh.value == "main.default.triage"
         assert "(on disk)" not in fresh.title
-        assert fresh.description == "Routes tickets."
+        assert fresh.description == "triage: Routes tickets."
 
         write_skill(roots, ref("triage"), {"SKILL.md": b"x"})
         existing = sd._skill_download_choice(ref("triage"), roots)
         assert existing.value == "main.default.triage"
         assert "(on disk)" in existing.title
+
+    def test_choice_description_labels_by_bundle_name_not_securable(self, tmp_path):
+        roots = skill_dir_roots(str(tmp_path))
+        diverging = ref("task-prioritizer", "task-triage", description="Ranks work.")
+
+        choice = sd._skill_download_choice(diverging, roots)
+
+        assert choice.description == "task-triage: Ranks work."
+
+    def test_choice_without_description_has_no_footer_text(self, tmp_path):
+        roots = skill_dir_roots(str(tmp_path))
+
+        assert sd._skill_download_choice(ref("triage"), roots).description is None
 
     def test_background_loader_streams_the_walk_in_as_choices(self, tmp_path, monkeypatch):
         roots = skill_dir_roots(str(tmp_path))
