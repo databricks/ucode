@@ -7,6 +7,7 @@ import questionary
 from ucode.ui.interactive_picker import (
     _DESCRIPTION_PREVIEW_CHARS,
     StreamingInquirerControl,
+    _description_footer_tokens,
     _description_preview,
     merge_new_choices,
 )
@@ -51,3 +52,17 @@ class TestDescriptionPreview:
         preview = _description_preview("y" * (_DESCRIPTION_PREVIEW_CHARS + 50))
         assert len(preview) == _DESCRIPTION_PREVIEW_CHARS
         assert preview.endswith("…")
+
+
+class TestDescriptionFooterTokens:
+    def test_bold_label_precedes_the_preview_body(self):
+        tokens = _description_footer_tokens("Routes tickets.")
+        assert tokens == [("bold", "Skill description: "), ("class:instruction", "Routes tickets.")]
+
+    def test_body_is_the_truncated_preview(self):
+        long = "z" * (_DESCRIPTION_PREVIEW_CHARS + 10)
+        _label_style, label_text = _description_footer_tokens(long)[0]
+        body_style, body_text = _description_footer_tokens(long)[1]
+        assert label_text == "Skill description: "
+        assert body_style == "class:instruction"
+        assert body_text == _description_preview(long)

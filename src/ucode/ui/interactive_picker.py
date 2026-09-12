@@ -32,6 +32,9 @@ PICKER_VISIBLE_ROWS = 10
 # Cap the highlighted-row description preview so a long one (skill descriptions run
 # to ~1024 chars) stays within the footer instead of dominating the screen.
 _DESCRIPTION_PREVIEW_CHARS = 240
+_DESCRIPTION_LABEL = "Skill description: "
+# Left margin for the description footer, applied to wrapped lines too (see get_line_prefix).
+_DESCRIPTION_INDENT = "  "
 
 
 def _description_preview(description: str) -> str:
@@ -39,6 +42,14 @@ def _description_preview(description: str) -> str:
     if len(description) <= _DESCRIPTION_PREVIEW_CHARS:
         return description
     return description[: _DESCRIPTION_PREVIEW_CHARS - 1].rstrip() + "…"
+
+
+def _description_footer_tokens(description: str) -> list[tuple[str, str]]:
+    """A bold ``Skill description:`` label followed by the truncated preview."""
+    return [
+        ("bold", _DESCRIPTION_LABEL),
+        ("class:instruction", _description_preview(description)),
+    ]
 
 
 class _Back:
@@ -190,7 +201,7 @@ def scrolling_checkbox(
         description = pointed_description()
         if description is None:
             return []
-        return [("class:instruction", f"  {_description_preview(description)}")]
+        return _description_footer_tokens(description)
 
     @Condition
     def has_description() -> bool:
@@ -224,6 +235,7 @@ def scrolling_checkbox(
                         height=Dimension.exact(2),
                         content=FormattedTextControl(description_tokens),
                         wrap_lines=True,
+                        get_line_prefix=lambda line, wrap: _DESCRIPTION_INDENT,
                     ),
                     filter=has_description & ~IsDone(),
                 ),
