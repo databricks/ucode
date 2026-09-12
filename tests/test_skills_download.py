@@ -998,26 +998,6 @@ class TestListAllSkills:
         assert sd.list_all_skills(WS, "token") == ([], "no skills found")
 
 
-class TestDiscoverAllSkills:
-    def test_gets_token_then_lists_all(self, monkeypatch):
-        monkeypatch.setattr(sd, "get_databricks_token", lambda ws, profile: "tok")
-        captured = {}
-
-        def fake_list_all(ws, tok, *, on_services=None, **kwargs):
-            captured["token"] = tok
-            on_services([ref("triage")])
-            return [ref("triage")], None
-
-        monkeypatch.setattr(sd, "list_all_skills", fake_list_all)
-        streamed = []
-
-        result = sd.discover_all_skills(WS, "profile", on_services=streamed.append)
-
-        assert result == [ref("triage")]
-        assert captured["token"] == "tok"
-        assert streamed == [[ref("triage")]]
-
-
 class TestSkillDownloadPicker:
     def test_choice_value_is_fqn_and_flags_on_disk(self, tmp_path):
         roots = skill_dir_roots(str(tmp_path))
@@ -1031,19 +1011,21 @@ class TestSkillDownloadPicker:
         assert existing.value == "main.default.triage"
         assert "(on disk)" in existing.title
 
-    def test_background_loader_streams_discovered_skills_as_choices(self, tmp_path, monkeypatch):
+    def test_background_loader_streams_the_walk_in_as_choices(self, tmp_path, monkeypatch):
         roots = skill_dir_roots(str(tmp_path))
-        monkeypatch.setattr(
-            sd,
-            "discover_all_skills",
-            lambda ws, profile, on_services=None: on_services(
-                [ref("triage"), ref("scoring", catalog="ml", schema="prod")]
-            ),
-        )
+        captured = {}
+
+        def fake_list_all(ws, tok, *, on_services=None, **kwargs):
+            captured["token"] = tok
+            on_services([ref("triage"), ref("scoring", catalog="ml", schema="prod")])
+            return [], None
+
+        monkeypatch.setattr(sd, "list_all_skills", fake_list_all)
         appended = []
 
-        sd._skills_download_background_loader(WS, "profile", roots)(appended.extend)
+        sd._skills_download_background_loader(WS, "token", roots)(appended.extend)
 
+        assert captured["token"] == "token"
         assert [c.value for c in appended] == ["main.default.triage", "ml.prod.scoring"]
 
     def test_prompt_returns_selected_fqns(self, tmp_path, monkeypatch):
@@ -1080,7 +1062,7 @@ class TestConfigureSkillsDownloadPickerCommand:
         )
         monkeypatch.setattr(sd, "get_databricks_token", lambda ws, profile: "token")
         monkeypatch.setattr(
-            sd, "_skills_download_background_loader", lambda ws, profile, roots: "loader"
+            sd, "_skills_download_background_loader", lambda ws, token, roots: "loader"
         )
         monkeypatch.setattr(sd, "prompt_for_skill_download_choices", lambda roots, loader: fqns)
         monkeypatch.setattr(
