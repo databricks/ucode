@@ -6,6 +6,7 @@ from __future__ import annotations
 import pytest
 
 import ucode.skills_download as sd
+from ucode import skills_state
 from ucode.skills_download import (
     SkillRef,
     existing_skill_on_disk,
@@ -593,7 +594,7 @@ class TestDownloadRefs:
 
         written, total = sd._download_refs(WS, "token", refs, roots, label="picked")
 
-        assert (written, total) == (2, 2)
+        assert (len(written), total) == (2, 2)
         assert sorted(fetched) == [("main", "default", "triage"), ("ml", "prod", "pii")]
         assert (tmp_path / ".claude/skills/triage/SKILL.md").read_bytes() == b"triage"
         assert (tmp_path / ".agents/skills/pii/SKILL.md").read_bytes() == b"pii"
@@ -617,7 +618,7 @@ class TestDownloadRefs:
 
         written, total = sd._download_refs(WS, "token", refs, roots, label="picked")
 
-        assert (written, total) == (1, 1)
+        assert (len(written), total) == (1, 1)
         assert fetched == ["skill-a"]
         assert (tmp_path / ".claude/skills/shared/SKILL.md").read_bytes() == b"skill-a"
         assert len(warnings) == 1
@@ -636,7 +637,7 @@ class TestDownloadRefs:
 
         written, total = sd._download_refs(WS, "token", refs, roots, label="picked")
 
-        assert (written, total) == (1, 2)
+        assert (len(written), total) == (1, 2)
         assert (tmp_path / ".claude/skills/good/SKILL.md").read_bytes() == b"ok"
         assert not (tmp_path / ".claude/skills/bad").exists()
 
@@ -725,6 +726,44 @@ class TestDownloadSelectedSkills:
         out = capsys.readouterr().out
         assert "Downloaded 2/2 skill(s)" in out
         assert "skipped" not in out
+
+    def test_records_downloaded_skills(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(sd, "get_skill", lambda ws, tok, fqn: ref(fqn.rsplit(".", 1)[-1]))
+        monkeypatch.setattr(
+            sd, "fetch_skill_bundle", lambda ws, tok, c, s, leaf: ({"SKILL.md": b"x"}, None)
+        )
+
+        sd.download_selected_skills(WS, "token", ["main.default.triage"], str(tmp_path))
+
+        record = skills_state.attribution_for_dir(tmp_path / ".claude/skills/triage")
+        assert record is not None
+        assert record["fqn"] == "main.default.triage"
+        assert record["scope"] == "project"
+        assert record["base"] == str(tmp_path)
+
+
+class TestSkillRefMetadata:
+    def test_captures_uc_attribution_fields(self, monkeypatch):
+        payload = {
+            "skills": [
+                {
+                    "name": "skills/main.default.triage",
+                    "bundle_name": "triage",
+                    "finalize_time": "2026-06-26T05:58:25Z",
+                    "id": "skill-uuid",
+                    "metastore_id": "metastore-uuid",
+                    "update_time": "2026-06-26T05:58:25Z",
+                }
+            ]
+        }
+        monkeypatch.setattr(sd, "_http_get_json", lambda url, token, timeout=30: (payload, None))
+
+        (skill,), reason = sd.list_schema_skills(WS, "token", "main", "default")
+
+        assert reason is None
+        assert skill.metastore_id == "metastore-uuid"
+        assert skill.skill_id == "skill-uuid"
+        assert skill.uc_update_time == "2026-06-26T05:58:25Z"
 
 
 class TestDownloadManagedSkillsOnLaunch:

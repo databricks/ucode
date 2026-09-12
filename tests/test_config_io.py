@@ -194,6 +194,18 @@ class TestWriteHelpers:
         assert 'KEY="value"' in text
         assert 'OTHER="123"' in text
 
+    def test_atomic_write_json_round_trips_and_creates_parent(self, tmp_path):
+        p = tmp_path / "nested" / "out.json"
+        config_io.atomic_write_json(p, {"a": 1})
+        assert json.loads(p.read_text()) == {"a": 1}
+
+    def test_atomic_write_json_replaces_existing_and_leaves_no_temp(self, tmp_path):
+        p = tmp_path / "out.json"
+        config_io.atomic_write_json(p, {"a": 1})
+        config_io.atomic_write_json(p, {"a": 2})
+        assert json.loads(p.read_text()) == {"a": 2}
+        assert not list(tmp_path.glob(".out.json.*"))
+
 
 # ---------------------------------------------------------------------------
 # read_json_safe / read_toml_safe
