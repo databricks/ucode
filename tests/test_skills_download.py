@@ -491,27 +491,6 @@ class TestDownloadSkillsFromSchemaLocations:
             assert (tmp_path / base / "task-triage/SKILL.md").read_bytes() == b"name: task-triage"
             assert not (tmp_path / base / "task-prioritizer").exists()
 
-    def test_skill_filter_matches_securable_name_only(self, tmp_path, monkeypatch):
-        # `--skill` selects by the name that identifies the skill in UC, so the
-        # bundle name is not a selector even when it differs.
-        diverging = ref("task-prioritizer", "task-triage")
-        monkeypatch.setattr(sd, "list_schema_skills", lambda *a, **k: ([diverging], None))
-        monkeypatch.setattr(sd, "fetch_skill_bundle", lambda *a, **k: ({"SKILL.md": b"ok"}, None))
-
-        selected = tmp_path / "by-securable"
-        selected.mkdir()
-        sd.download_skills_from_schema_locations(
-            WS, "token", ["main.default"], str(selected), {"task-prioritizer"}
-        )
-        assert (selected / ".claude/skills/task-triage/SKILL.md").exists()
-
-        ignored = tmp_path / "by-bundle"
-        ignored.mkdir()
-        sd.download_skills_from_schema_locations(
-            WS, "token", ["main.default"], str(ignored), {"task-triage"}
-        )
-        assert not (ignored / ".claude/skills").exists()
-
     def test_list_failure_skips_location(self, tmp_path, monkeypatch):
         monkeypatch.setattr(sd, "list_schema_skills", lambda *a, **k: ([], "HTTP 404 Not Found"))
         called = []
@@ -591,65 +570,12 @@ class TestDownloadSkillsFromSchemaLocations:
             "Downloaded 1/2 skill(s); 1 skipped from `main.default` in" in capsys.readouterr().out
         )
 
-    def test_skill_filter_downloads_only_matching_leaves(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(
-            sd, "list_schema_skills", lambda *a, **k: ([ref("pii-handling"), ref("triage")], None)
-        )
-        monkeypatch.setattr(sd, "fetch_skill_bundle", lambda *a, **k: ({"SKILL.md": b"x"}, None))
-
-        sd.download_skills_from_schema_locations(
-            WS, "token", ["main.default"], str(tmp_path), {"triage"}
-        )
-
-        assert (tmp_path / ".claude/skills/triage/SKILL.md").read_bytes() == b"x"
-        assert not (tmp_path / ".claude/skills/pii-handling").exists()
-
-    def test_skill_filter_warns_on_unknown_and_downloads_rest(self, tmp_path, monkeypatch, capsys):
-        monkeypatch.setattr(sd, "list_schema_skills", lambda *a, **k: ([ref("triage")], None))
-        monkeypatch.setattr(sd, "fetch_skill_bundle", lambda *a, **k: ({"SKILL.md": b"x"}, None))
-
-        sd.download_skills_from_schema_locations(
-            WS, "token", ["main.default"], str(tmp_path), {"triage", "ghost"}
-        )
-
-        out = capsys.readouterr().out
-        assert "Skipping requested skill(s) not found in `main.default`: ghost" in out
-        assert (tmp_path / ".claude/skills/triage/SKILL.md").read_bytes() == b"x"
-
-    def test_empty_skill_filter_downloads_nothing(self, tmp_path, monkeypatch, capsys):
-        monkeypatch.setattr(sd, "list_schema_skills", lambda *a, **k: ([ref("triage")], None))
-        called = []
-        monkeypatch.setattr(
-            sd, "fetch_skill_bundle", lambda *a, **k: called.append(1) or ({"SKILL.md": b"x"}, None)
-        )
-
-        sd.download_skills_from_schema_locations(
-            WS, "token", ["main.default"], str(tmp_path), set()
-        )
-
-        assert called == []
-        assert not (tmp_path / ".claude/skills/triage").exists()
-        # The schema has skills; the filter selected none — distinct from the
-        # empty-schema note.
-        out = capsys.readouterr().out
-        assert "No requested skills to download from `main.default`." in out
-        assert "No skills found" not in out
-
     def test_empty_schema_reports_no_skills_found(self, tmp_path, monkeypatch, capsys):
         monkeypatch.setattr(sd, "list_schema_skills", lambda *a, **k: ([], None))
 
-        sd.download_skills_from_schema_locations(WS, "token", ["main.default"], str(tmp_path), None)
+        sd.download_skills_from_schema_locations(WS, "token", ["main.default"], str(tmp_path))
 
         assert "No skills found in `main.default`." in capsys.readouterr().out
-
-    def test_none_skill_filter_downloads_everything(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(sd, "list_schema_skills", lambda *a, **k: ([ref("a"), ref("b")], None))
-        monkeypatch.setattr(sd, "fetch_skill_bundle", lambda *a, **k: ({"SKILL.md": b"x"}, None))
-
-        sd.download_skills_from_schema_locations(WS, "token", ["main.default"], str(tmp_path), None)
-
-        assert (tmp_path / ".claude/skills/a/SKILL.md").exists()
-        assert (tmp_path / ".claude/skills/b/SKILL.md").exists()
 
 
 class TestDownloadRefs:
@@ -890,7 +816,7 @@ class TestDownloadManagedSkillsOnLaunch:
         )
 
 
-class TestConfigureSkillsDownloadCommand:
+class TestConfigureLocationSkillsDownloadCommand:
     def _stub(self, monkeypatch):
         calls: dict[str, object] = {}
         monkeypatch.setattr(sd, "load_state", lambda: {"state": True})
@@ -901,9 +827,7 @@ class TestConfigureSkillsDownloadCommand:
         monkeypatch.setattr(
             sd,
             "download_skills_from_schema_locations",
-            lambda ws, tok, locations, path, skills=None: calls.update(
-                download=(ws, tok, locations, path, skills)
-            ),
+            lambda ws, tok, locations, path: calls.update(download=(ws, tok, locations, path)),
         )
         monkeypatch.setattr(
             sd,
@@ -915,25 +839,55 @@ class TestConfigureSkillsDownloadCommand:
     def test_downloads_then_registers_connection(self, monkeypatch):
         calls = self._stub(monkeypatch)
 
-        assert sd.configure_skills_download_command(["a.b"], path="/tmp/skills") == 0
+        assert sd.configure_location_skills_download_command(["a.b"], path="/tmp/skills") == 0
 
-        assert calls["download"] == (WS, "token", ["a.b"], "/tmp/skills", None)
+        assert calls["download"] == (WS, "token", ["a.b"], "/tmp/skills")
         assert calls["register"] == (WS, "profile", ["claude"])
 
     def test_none_path_threads_through(self, monkeypatch):
         calls = self._stub(monkeypatch)
 
-        assert sd.configure_skills_download_command(["a.b"], path=None) == 0
+        assert sd.configure_location_skills_download_command(["a.b"], path=None) == 0
 
-        assert calls["download"] == (WS, "token", ["a.b"], None, None)
+        assert calls["download"] == (WS, "token", ["a.b"], None)
         assert calls["register"] == (WS, "profile", ["claude"])
 
-    def test_skills_filter_threads_through(self, monkeypatch):
+
+class TestConfigureSelectedSkillsDownloadCommand:
+    def _stub(self, monkeypatch):
+        calls: dict[str, object] = {}
+        monkeypatch.setattr(sd, "load_state", lambda: {"state": True})
+        monkeypatch.setattr(
+            sd, "setup_mcp_clients", lambda state, section: (WS, "profile", ["claude"])
+        )
+        monkeypatch.setattr(sd, "get_databricks_token", lambda ws, profile: "token")
+        monkeypatch.setattr(
+            sd,
+            "download_selected_skills",
+            lambda ws, tok, fqns, path: calls.update(download=(ws, tok, fqns, path)),
+        )
+        monkeypatch.setattr(
+            sd,
+            "register_schemaless_skills_connection",
+            lambda state, ws, profile, clients: calls.update(register=(ws, profile, clients)),
+        )
+        return calls
+
+    def test_downloads_selected_then_registers(self, monkeypatch):
         calls = self._stub(monkeypatch)
 
-        assert sd.configure_skills_download_command(["a.b"], path=None, skills={"triage"}) == 0
+        fqns = ["a.b.s1", "c.d.s2"]
+        assert sd.configure_selected_skills_download_command(fqns, "/tmp/skills") == 0
 
-        assert calls["download"] == (WS, "token", ["a.b"], None, {"triage"})
+        assert calls["download"] == (WS, "token", fqns, "/tmp/skills")
+        assert calls["register"] == (WS, "profile", ["claude"])
+
+    def test_none_path_threads_through(self, monkeypatch):
+        calls = self._stub(monkeypatch)
+
+        assert sd.configure_selected_skills_download_command(["a.b.s1"], None) == 0
+
+        assert calls["download"] == (WS, "token", ["a.b.s1"], None)
         assert calls["register"] == (WS, "profile", ["claude"])
 
 
