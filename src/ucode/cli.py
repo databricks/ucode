@@ -109,6 +109,7 @@ from ucode.mcp import (
     skill_locations_for_client,
 )
 from ucode.skills_download import (
+    configure_selected_skills_download_command,
     configure_skills_download_command,
     configure_skills_download_picker_command,
     download_managed_skills_on_launch,
@@ -348,6 +349,32 @@ def _parse_skill_locations(location: str | None) -> list[str]:
         if raw not in locations:
             locations.append(raw)
     return locations
+
+
+def _is_qualified_skill_name(name: str) -> bool:
+    """True if `name` is a 3-part `<catalog>.<schema>.<name>` FQN with non-blank parts."""
+    parts = name.split(".")
+    return len(parts) == 3 and all(part and part == part.strip() for part in parts)
+
+
+def _download_selected_skills_route(
+    requested_skills: set[str], location: str | None, path: str | None, *, flag: str
+) -> None:
+    """Download the fully-qualified `requested_skills` (cross-schema) and register.
+
+    The `--skills`/`--skill` download path: names must be fully qualified so a
+    selection can span schemas without a `--location`, so passing one is an error
+    and any bare/malformed name is rejected up front. `flag` names the option in
+    those errors. Empty selections download nothing."""
+    if location is not None:
+        raise RuntimeError(f"{flag} takes fully-qualified names; drop --location.")
+    invalid = sorted(name for name in requested_skills if not _is_qualified_skill_name(name))
+    if invalid:
+        raise RuntimeError(
+            f"{flag} entries must be fully-qualified `<catalog>.<schema>.<name>` names "
+            f"(invalid: {', '.join(invalid)})."
+        )
+    configure_selected_skills_download_command(sorted(requested_skills), path)
 
 
 def _parse_workspaces_option(workspaces: str) -> list[tuple[str, str | None]]:
@@ -1276,10 +1303,9 @@ def skills_add(
         str | None,
         typer.Option(
             "--skills",
-            help="(download) Download only this comma-separated subset of skills instead of "
-            "every skill in the schema. Bare securable names (e.g. `my-skill`) need a single "
-            "--location; fully-qualified `<catalog>.<schema>.<name>` names work on their own. "
-            "Not valid with --mcp.",
+            help="(download) Download exactly these comma-separated fully-qualified "
+            "`<catalog>.<schema>.<name>` skills, spanning any number of schemas. Not valid "
+            "with --mcp or --location.",
         ),
     ] = None,
     agents: Annotated[
@@ -1295,15 +1321,14 @@ def skills_add(
     """Add Databricks Skills to your coding tools, keeping any already configured.
 
     With ``--mcp``, adds the given schemas to the skills MCP connection's scope.
-    Otherwise downloads each schema's skills to project-level skill directories under
-    ``--path``, or to user-level skill directories when omitted, keeping
-    already-downloaded skills. ``--skills`` narrows a download to a subset of one
-    schema's skills, by bare name (with ``--location``) or fully-qualified
-    ``<catalog>.<schema>.<name>``. With none of ``--mcp``/``--location``/``--skills``
-    on an interactive terminal, opens a picker of the workspace's skills to download.
+    Otherwise downloads skills to project-level skill directories under ``--path``, or
+    to user-level skill directories when omitted, keeping already-downloaded skills.
+    ``--location`` downloads whole ``<catalog>.<schema>`` schemas; ``--skills``
+    downloads a named set of fully-qualified skills that may span schemas (and takes
+    no ``--location``). With none of ``--mcp``/``--location``/``--skills`` on an
+    interactive terminal, opens a picker of the workspace's skills to download.
     """
     try:
-        locations = _parse_skill_locations(location)
         requested_skills = (
             None if skills is None else {s.strip() for s in skills.split(",") if s.strip()}
         )
@@ -1316,68 +1341,25 @@ def skills_add(
             raise RuntimeError("--path is not supported when using --mcp")
         if mcp and requested_skills is not None:
             raise RuntimeError("--skills is not supported when using --mcp")
-        qualified_skill_parts: dict[str, list[str]] = {}
-        invalid_skills: list[str] = []
-        for skill in requested_skills or set():
-            if "." not in skill:
-                continue
-            parts = skill.split(".")
-            if len(parts) != 3 or any(not part or part != part.strip() for part in parts):
-                invalid_skills.append(skill)
-            else:
-                qualified_skill_parts[skill] = parts
-        if invalid_skills:
-            raise RuntimeError(
-                "--skills entries must be bare names or fully qualified "
-                "`<catalog>.<schema>.<name>` values "
-                f"(invalid: {', '.join(sorted(invalid_skills))})."
-            )
         # Downloaded skills use shared directory families, so only MCP scopes can be agent-scoped.
         if not mcp and agents is not None:
             raise RuntimeError("--agents is only supported when using --mcp")
-        if requested_skills is not None and not locations:
-            schemas = {".".join(parts[:2]) for parts in qualified_skill_parts.values()}
-            bare = sorted(skill for skill in requested_skills if skill not in qualified_skill_parts)
-            if bare:
-                raise RuntimeError(
-                    "--skills short names need --location (or pass full names like "
-                    f"`<catalog>.<schema>.<name>`): {', '.join(bare)}"
-                )
-            if len(schemas) != 1:
-                raise RuntimeError(
-                    "--skills without --location must all share one `<catalog>.<schema>` "
-                    f"(got: {', '.join(sorted(schemas)) or 'none'}); pass --location instead."
-                )
-            locations = list(schemas)
+        if requested_skills is not None:
+            _download_selected_skills_route(requested_skills, location, path, flag="--skills")
+            return
+        locations = _parse_skill_locations(location)
         if not locations:
-            if not mcp and requested_skills is None and _stdin_is_interactive():
+            if not mcp and _stdin_is_interactive():
                 configure_skills_download_picker_command(path=path)
                 return
             raise RuntimeError("--location is required for `ucode skill add`.")
-        if requested_skills is not None and len(locations) != 1:
-            raise RuntimeError(
-                f"--skills requires a single --location (got: {', '.join(locations)})."
-            )
-        mismatched_skills = sorted(
-            skill
-            for skill, parts in qualified_skill_parts.items()
-            if ".".join(parts[:2]) != locations[0]
-        )
-        if mismatched_skills:
-            raise RuntimeError(
-                f"--skills entries must match --location `{locations[0]}` "
-                f"(got: {', '.join(mismatched_skills)})."
-            )
-        selected_skills = (
-            None if requested_skills is None else {s.split(".")[-1] for s in requested_skills}
-        )
         if mcp:
             scope = (
                 _configure_agents_for_mcp(sorted(requested_agents)) if requested_agents else None
             )
             add_skills_command(locations, agents=scope)
         else:
-            configure_skills_download_command(locations, path=path, skills=selected_skills)
+            configure_skills_download_command(locations, path=path)
     except (RuntimeError, ValueError) as exc:
         print_err(str(exc))
         raise typer.Exit(1) from None
@@ -3185,9 +3167,9 @@ def configure_skills(
         str | None,
         typer.Option(
             "--skill",
-            help="(download) Download only this comma-separated subset of skills (by "
-            "securable name, e.g. `my-skill`) from the schema, instead of every skill. "
-            "Requires a single --location; not valid with --mcp.",
+            help="(download) Download exactly these comma-separated fully-qualified "
+            "`<catalog>.<schema>.<name>` skills, spanning any number of schemas. Not valid "
+            "with --mcp or --location.",
         ),
     ] = None,
 ) -> None:
@@ -3199,14 +3181,13 @@ def configure_skills(
     When ``--location`` is provided: with ``--mcp``, sets the connection's scope to
     exactly the listed schemas (no download); otherwise, downloads every skill in
     each schema to disk (under ``--path``, or your home dir when omitted) and
-    registers the MCP connection with utility tools only. ``--skill`` narrows a
-    download to a named subset of a single schema's skills (requires exactly one
-    ``--location``).
+    registers the MCP connection with utility tools only. ``--skill`` instead
+    downloads a named set of fully-qualified skills that may span schemas (and takes
+    no ``--location``).
     """
     try:
-        locations = _parse_skill_locations(location)
-        # `--skill` absent -> None (whole schema); present (even empty) -> the
-        # explicit subset, so `--skill ""` downloads nothing.
+        # `--skill` absent -> None (whole schemas via --location); present (even
+        # empty) -> the explicit FQN set, so `--skill ""` downloads nothing.
         selected_skills = (
             None if skill is None else {s.strip() for s in skill.split(",") if s.strip()}
         )
@@ -3214,18 +3195,16 @@ def configure_skills(
             raise RuntimeError("--path is not valid with --mcp.")
         if mcp and selected_skills is not None:
             raise RuntimeError("--skill is not valid with --mcp; it only applies when downloading.")
+        if selected_skills is not None:
+            _download_selected_skills_route(selected_skills, location, path, flag="--skill")
+            return
+        locations = _parse_skill_locations(location)
         if path is not None and not locations:
             raise RuntimeError("--path only applies when downloading with --location.")
-        if selected_skills is not None and not locations:
-            raise RuntimeError("--skill only applies when downloading with --location.")
-        if selected_skills is not None and len(locations) != 1:
-            raise RuntimeError(
-                f"--skill requires a single --location (got: {', '.join(locations)})."
-            )
         if mcp or not locations:
             configure_skills_mcp_command(locations)
         else:
-            configure_skills_download_command(locations, path=path, skills=selected_skills)
+            configure_skills_download_command(locations, path=path)
     except (RuntimeError, ValueError) as exc:
         print_err(str(exc))
         raise typer.Exit(1) from None

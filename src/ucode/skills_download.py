@@ -388,17 +388,16 @@ def download_skills_from_schema_locations(
     token: str,
     locations: list[str],
     path: str | None,
-    skills: set[str] | None = None,
 ) -> None:
     """Download every skill in each ``<catalog>.<schema>`` location to disk.
 
     Locations are processed one at a time. Each lists the schema's finalized
-    skills, applies the optional ``skills`` filter (securable names -- the name
-    that identifies a skill in UC; unknown ones warn, ``None`` keeps the whole
-    schema), then hands the refs to ``_download_refs`` and prints a per-location
+    skills, then hands the refs to ``_download_refs`` and prints a per-location
     summary. Finishing one location before the next means a skill written for an
     earlier location is already on disk when a same-named skill in a later location
-    reaches the overwrite prompt, so the prompt still fires.
+    reaches the overwrite prompt, so the prompt still fires. Downloading a named
+    subset instead of whole schemas is a separate path (``download_selected_skills``
+    over fully-qualified names).
     """
     roots = skill_dir_roots(path)
     roots_display = " and ".join(str(root) for root in roots)
@@ -408,17 +407,6 @@ def download_skills_from_schema_locations(
         if reason:
             print_warning(f"Skipping `{location}`: {reason}.")
             continue
-        if skills is not None:
-            unknown = skills - {ref.securable_name for ref in refs}
-            if unknown:
-                print_warning(
-                    f"Skipping requested skill(s) not found in `{location}`: "
-                    f"{', '.join(sorted(unknown))}."
-                )
-            refs = [ref for ref in refs if ref.securable_name in skills]
-            if not refs:
-                print_note(f"No requested skills to download from `{location}`.")
-                continue
         if not refs:
             print_note(f"No skills found in `{location}`.")
             continue
@@ -505,20 +493,34 @@ def download_managed_skills_on_launch(
     return written
 
 
-def configure_skills_download_command(
-    locations: list[str], *, path: str | None, skills: set[str] | None = None
-) -> int:
+def configure_skills_download_command(locations: list[str], *, path: str | None) -> int:
     """Download every skill in each schema to disk and register the skills connection.
 
     Downloads to ``path`` (or the home dir when None), then registers/keeps the
     schema-less MCP connection. ``skill_locations`` is never touched, so a prior
-    ``--mcp`` set survives a download run. ``skills`` narrows the download (see
-    ``download_skills_from_schema_locations``)."""
+    ``--mcp`` set survives a download run. Downloading a named subset instead of whole
+    schemas is a separate command (``configure_selected_skills_download_command``)."""
     state = load_state()
     workspace, profile, clients = setup_mcp_clients(state, "Skills")
     token = get_databricks_token(workspace, profile)
 
-    download_skills_from_schema_locations(workspace, token, locations, path, skills)
+    download_skills_from_schema_locations(workspace, token, locations, path)
+
+    register_schemaless_skills_connection(state, workspace, profile, clients)
+    return 0
+
+
+def configure_selected_skills_download_command(fqns: list[str], path: str | None) -> int:
+    """Download the fully-qualified, possibly cross-schema ``fqns`` and register the connection.
+
+    The non-interactive counterpart to the picker: downloads the named skills with
+    ``download_selected_skills`` (which alone does not register), then registers/keeps
+    the schema-less MCP connection, exactly as the whole-schema download does."""
+    state = load_state()
+    workspace, profile, clients = setup_mcp_clients(state, "Skills")
+    token = get_databricks_token(workspace, profile)
+
+    download_selected_skills(workspace, token, fqns, path)
 
     register_schemaless_skills_connection(state, workspace, profile, clients)
     return 0

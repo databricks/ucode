@@ -215,8 +215,8 @@ ug configure skills
 # Download mode: fetch every skill in the schema to disk (and register the connection).
 ug configure skills --location main.default --path /abs/project/dir
 
-# Download a named subset of the schema's skills instead of all of them.
-ug configure skills --location main.default --skill my-skill
+# Download a named set of skills by fully-qualified name (may span schemas).
+ug configure skills --skill main.default.my-skill,ml.prod.other-skill
 
 # MCP mode: expose the schema's skills as MCP tools instead of downloading.
 ug configure skills --location main.default,ml.prod --mcp
@@ -230,9 +230,10 @@ ug configure skills --location main.default,ml.prod --mcp
   absolute project directory) is optional; when omitted, skills are written to user-level skill
   directories. Any pre-existing skill dir prompts before it's overwritten. It then registers a
   schema-less skills MCP connection, leaving any prior `--mcp` scope untouched.
-  `--skill <name>[,<name>…]` narrows the download to the named skills (by leaf name) from the schema
-  instead of all of them; requested names not found in the schema warn and are skipped. `--skill`
-  requires a single `--location`, is download-only, and is rejected with `--mcp`.
+  `--skill <fqn>[,<fqn>…]` instead downloads a named set of fully-qualified
+  `<catalog>.<schema>.<name>` skills that may span schemas; it takes no `--location`, is
+  download-only, and is rejected with `--mcp`. A name that can't be resolved (unknown or
+  unfinalized) warns and is skipped.
 - **MCP mode** (`--location … --mcp`) sets the connection's location set to exactly `<list>`
   (override-only) and rebuilds its `?schema=` URL; no files are downloaded and `--path` is rejected.
 
@@ -242,8 +243,9 @@ you to run `ug <agent>` (existing agent sessions need a restart before the MCP t
 #### Add skill scopes without replacing existing ones
 
 `ug skill add` registers skills additively, keeping anything already configured. With `--mcp` it
-adds the schemas to the connection's scope, otherwise it downloads their skills to disk. `--skills`
-narrows a download to a subset of one schema's skills.
+adds the schemas to the connection's scope, otherwise it downloads their skills to disk. `--location`
+downloads whole schemas; `--skills` downloads a named set of fully-qualified skills that may span
+schemas.
 
 ```bash
 # Add schemas to the skills MCP scope, keeping any already configured.
@@ -255,9 +257,8 @@ ug skill add --location main.default --mcp --agents claude,codex
 # Download a schema's skills to disk, keeping existing downloads.
 ug skill add --location main.default
 
-# Download a named subset, by bare name (with --location) or fully-qualified name.
-ug skill add --location main.default --skills my-skill,other-skill
-ug skill add --skills main.default.my-skill,main.default.other-skill
+# Download a named set of skills by fully-qualified name (may span schemas).
+ug skill add --skills main.default.my-skill,ml.prod.other-skill
 
 # No --location (or --skills) launches an interactive picker of the workspace's
 # skills to download; it opens immediately and streams skills in as they're found.
@@ -341,12 +342,12 @@ The output looks like:
 | `ug mcp remove --agents codex` | Unregister selected servers from specific agents only |
 | `ug configure skills` | Register the skills MCP connection (utility tools only); no skills download |
 | `ug configure skills --location main.default [--path <dir>]` | Download a schema's skills to disk (under `<dir>`, or your home dir) and register a schema-less skills MCP connection |
-| `ug configure skills --location main.default --skill my-skill` | Download only the named skill(s) from a schema (comma-separated for several) |
+| `ug configure skills --skill main.default.my-skill` | Download named skills by fully-qualified name (comma-separated; may span schemas) |
 | `ug configure skills --location main.default --mcp` | Expose a schema's skills as MCP tools (override-only) instead of downloading |
 | `ug skill add --location main.default --mcp` | Add schemas to the skills MCP scope, keeping any already configured (additive; never replaces) |
 | `ug skill add --location main.default --mcp --agents claude,codex` | Add schemas to specific agents' skills MCP scope (sets up any not yet configured) |
 | `ug skill add --location main.default` | Download a schema's skills to disk without removing existing downloads |
-| `ug skill add --skills main.default.my-skill` | Download a named subset of skills (bare names need `--location`; fully-qualified names stand alone) |
+| `ug skill add --skills main.default.my-skill` | Download named skills by fully-qualified name (comma-separated; may span schemas) |
 | `ug skill remove --mcp` | Remove skill schemas from the skills MCP connection (every agent) |
 | `ug skill remove --mcp --agents claude` | Remove skill schemas from specific agents only, keeping them on the rest |
 
