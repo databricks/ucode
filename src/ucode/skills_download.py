@@ -493,7 +493,7 @@ def download_managed_skills_on_launch(
     return written
 
 
-def configure_skills_download_command(locations: list[str], *, path: str | None) -> int:
+def configure_location_skills_download_command(locations: list[str], *, path: str | None) -> int:
     """Download every skill in each schema to disk and register the skills connection.
 
     Downloads to ``path`` (or the home dir when None), then registers/keeps the

@@ -109,8 +109,8 @@ from ucode.mcp import (
     skill_locations_for_client,
 )
 from ucode.skills_download import (
+    configure_location_skills_download_command,
     configure_selected_skills_download_command,
-    configure_skills_download_command,
     configure_skills_download_picker_command,
     download_managed_skills_on_launch,
 )
@@ -355,26 +355,6 @@ def _is_qualified_skill_name(name: str) -> bool:
     """True if `name` is a 3-part `<catalog>.<schema>.<name>` FQN with non-blank parts."""
     parts = name.split(".")
     return len(parts) == 3 and all(part and part == part.strip() for part in parts)
-
-
-def _download_selected_skills_route(
-    requested_skills: set[str], location: str | None, path: str | None, *, flag: str
-) -> None:
-    """Download the fully-qualified `requested_skills` (cross-schema) and register.
-
-    The `--skills`/`--skill` download path: names must be fully qualified so a
-    selection can span schemas without a `--location`, so passing one is an error
-    and any bare/malformed name is rejected up front. `flag` names the option in
-    those errors. Empty selections download nothing."""
-    if location is not None:
-        raise RuntimeError(f"{flag} takes fully-qualified names; drop --location.")
-    invalid = sorted(name for name in requested_skills if not _is_qualified_skill_name(name))
-    if invalid:
-        raise RuntimeError(
-            f"{flag} entries must be fully-qualified `<catalog>.<schema>.<name>` names "
-            f"(invalid: {', '.join(invalid)})."
-        )
-    configure_selected_skills_download_command(sorted(requested_skills), path)
 
 
 def _parse_workspaces_option(workspaces: str) -> list[tuple[str, str | None]]:
@@ -1341,11 +1321,19 @@ def skills_add(
             raise RuntimeError("--path is not supported when using --mcp")
         if mcp and requested_skills is not None:
             raise RuntimeError("--skills is not supported when using --mcp")
+        if requested_skills is not None and location is not None:
+            raise RuntimeError("--skills takes fully-qualified names; drop --location.")
         # Downloaded skills use shared directory families, so only MCP scopes can be agent-scoped.
         if not mcp and agents is not None:
             raise RuntimeError("--agents is only supported when using --mcp")
         if requested_skills is not None:
-            _download_selected_skills_route(requested_skills, location, path, flag="--skills")
+            invalid = sorted(s for s in requested_skills if not _is_qualified_skill_name(s))
+            if invalid:
+                raise RuntimeError(
+                    "--skills entries must be fully-qualified `<catalog>.<schema>.<name>` names "
+                    f"(invalid: {', '.join(invalid)})."
+                )
+            configure_selected_skills_download_command(sorted(requested_skills), path)
             return
         locations = _parse_skill_locations(location)
         if not locations:
@@ -1359,7 +1347,7 @@ def skills_add(
             )
             add_skills_command(locations, agents=scope)
         else:
-            configure_skills_download_command(locations, path=path)
+            configure_location_skills_download_command(locations, path=path)
     except (RuntimeError, ValueError) as exc:
         print_err(str(exc))
         raise typer.Exit(1) from None
@@ -3195,8 +3183,16 @@ def configure_skills(
             raise RuntimeError("--path is not valid with --mcp.")
         if mcp and selected_skills is not None:
             raise RuntimeError("--skill is not valid with --mcp; it only applies when downloading.")
+        if selected_skills is not None and location is not None:
+            raise RuntimeError("--skill takes fully-qualified names; drop --location.")
         if selected_skills is not None:
-            _download_selected_skills_route(selected_skills, location, path, flag="--skill")
+            invalid = sorted(s for s in selected_skills if not _is_qualified_skill_name(s))
+            if invalid:
+                raise RuntimeError(
+                    "--skill entries must be fully-qualified `<catalog>.<schema>.<name>` names "
+                    f"(invalid: {', '.join(invalid)})."
+                )
+            configure_selected_skills_download_command(sorted(selected_skills), path)
             return
         locations = _parse_skill_locations(location)
         if path is not None and not locations:
@@ -3204,7 +3200,7 @@ def configure_skills(
         if mcp or not locations:
             configure_skills_mcp_command(locations)
         else:
-            configure_skills_download_command(locations, path=path)
+            configure_location_skills_download_command(locations, path=path)
     except (RuntimeError, ValueError) as exc:
         print_err(str(exc))
         raise typer.Exit(1) from None

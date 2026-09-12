@@ -816,7 +816,7 @@ class TestDownloadManagedSkillsOnLaunch:
         )
 
 
-class TestConfigureSkillsDownloadCommand:
+class TestConfigureLocationSkillsDownloadCommand:
     def _stub(self, monkeypatch):
         calls: dict[str, object] = {}
         monkeypatch.setattr(sd, "load_state", lambda: {"state": True})
@@ -839,7 +839,7 @@ class TestConfigureSkillsDownloadCommand:
     def test_downloads_then_registers_connection(self, monkeypatch):
         calls = self._stub(monkeypatch)
 
-        assert sd.configure_skills_download_command(["a.b"], path="/tmp/skills") == 0
+        assert sd.configure_location_skills_download_command(["a.b"], path="/tmp/skills") == 0
 
         assert calls["download"] == (WS, "token", ["a.b"], "/tmp/skills")
         assert calls["register"] == (WS, "profile", ["claude"])
@@ -847,7 +847,7 @@ class TestConfigureSkillsDownloadCommand:
     def test_none_path_threads_through(self, monkeypatch):
         calls = self._stub(monkeypatch)
 
-        assert sd.configure_skills_download_command(["a.b"], path=None) == 0
+        assert sd.configure_location_skills_download_command(["a.b"], path=None) == 0
 
         assert calls["download"] == (WS, "token", ["a.b"], None)
         assert calls["register"] == (WS, "profile", ["claude"])
