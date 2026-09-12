@@ -512,7 +512,7 @@ class TestCustomCatalogModels:
         calls = []
         monkeypatch.setenv(v2.ENV_VAR, "1")
         monkeypatch.setattr(codex, "clear_model_preferences", lambda state: False)
-        monkeypatch.setattr(codex, "default_model", lambda state: None)
+        monkeypatch.setattr(codex, "_smart_routing_config_model", lambda state: None)
         monkeypatch.setattr(v2, "custom_catalog_models", lambda: ["gpt-6-astra", "gpt-6-b"])
 
         def launch_v2(state, tool_args, **kwargs):

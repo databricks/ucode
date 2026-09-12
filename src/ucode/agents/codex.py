@@ -579,13 +579,8 @@ def _launch_smart_routing(state: dict, tool_args: list[str]) -> None:
             f"{MINIMUM_ROUTING_CODEX_VERSION_TEXT} or newer; found {version_text}."
         )
 
-<<<<<<< Updated upstream
     configured_model = _smart_routing_config_model(state)
-    models = routing_models(state)
-=======
-    managed_model = default_model(state)
     models = smart_routing_v2.custom_catalog_models() or routing_models(state)
->>>>>>> Stashed changes
     start_model = (
         configured_model
         or (codex_model_id(models[0]) if models else None)
