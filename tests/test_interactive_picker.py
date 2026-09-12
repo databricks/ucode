@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import questionary
 
-from ucode.ui.interactive_picker import StreamingInquirerControl, merge_new_choices
+from ucode.ui.interactive_picker import (
+    _DESCRIPTION_PREVIEW_CHARS,
+    StreamingInquirerControl,
+    _description_preview,
+    merge_new_choices,
+)
 
 
 def test_merge_new_choices_dedupes_by_value():
@@ -32,3 +37,17 @@ class TestStreamingInquirerControl:
         control = StreamingInquirerControl([disabled], pointer="›", show_description=False)
         assert control.is_selection_valid() is True
         control._get_choice_tokens()  # must not raise
+
+
+class TestDescriptionPreview:
+    def test_short_description_is_unchanged(self):
+        assert _description_preview("Routes tickets.") == "Routes tickets."
+
+    def test_at_the_limit_is_unchanged(self):
+        text = "x" * _DESCRIPTION_PREVIEW_CHARS
+        assert _description_preview(text) == text
+
+    def test_long_description_is_clipped_with_an_ellipsis(self):
+        preview = _description_preview("y" * (_DESCRIPTION_PREVIEW_CHARS + 50))
+        assert len(preview) == _DESCRIPTION_PREVIEW_CHARS
+        assert preview.endswith("…")

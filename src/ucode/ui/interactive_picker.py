@@ -29,6 +29,17 @@ from questionary.styles import merge_styles_default
 
 PICKER_VISIBLE_ROWS = 10
 
+# Cap the highlighted-row description preview so a long one (skill descriptions run
+# to ~1024 chars) stays within the footer instead of dominating the screen.
+_DESCRIPTION_PREVIEW_CHARS = 240
+
+
+def _description_preview(description: str) -> str:
+    """``description`` truncated to the footer budget, with an ellipsis when clipped."""
+    if len(description) <= _DESCRIPTION_PREVIEW_CHARS:
+        return description
+    return description[: _DESCRIPTION_PREVIEW_CHARS - 1].rstrip() + "…"
+
 
 class _Back:
     """Sentinel type: a wizard step returns the `_BACK` instance when the user
@@ -101,6 +112,7 @@ def scrolling_checkbox(
     allow_back: bool = False,
     background_loader: Callable[[Callable[[list[questionary.Choice]], None]], None] | None = None,
     loading_noun: str = "MCP services",
+    show_description: bool = False,
 ) -> Question:
     """Multi-select checkbox picker.
 
@@ -108,7 +120,11 @@ def scrolling_checkbox(
     on screen: it's run on a daemon thread and handed an ``append(choices)`` callback that
     adds rows (deduped by value) and repaints, so the picker opens instantly on whatever
     ``choices`` are ready and fills in the rest without blocking. A footer shows a live
-    "loading more {loading_noun}…" count while it runs."""
+    "loading more {loading_noun}…" count while it runs.
+
+    ``show_description`` adds a footer previewing the highlighted row's ``Choice.description``.
+    It's a separate window rather than questionary's inline ``show_description`` because the
+    choices window is sized to the row count, so an inline line would be clipped."""
     merged_style = merge_styles_default(
         [
             questionary.Style([("bottom-toolbar", "noreverse")]),
@@ -160,6 +176,26 @@ def scrolling_checkbox(
     def has_search_string() -> bool:
         return control.get_search_string_tokens() is not None
 
+    def pointed_description() -> str | None:
+        if not (show_description and control.filtered_choices):
+            return None
+        try:
+            pointed = control.get_pointed_at()
+        except IndexError:
+            return None
+        description = getattr(pointed, "description", None)
+        return description if isinstance(description, str) and description else None
+
+    def description_tokens() -> list[tuple[str, str]]:
+        description = pointed_description()
+        if description is None:
+            return []
+        return [("class:instruction", f"  {_description_preview(description)}")]
+
+    @Condition
+    def has_description() -> bool:
+        return pointed_description() is not None
+
     validation_prompt: PromptSession = PromptSession(bottom_toolbar=lambda: control.error_message)
     # Render the prompt as a fixed 1-row window rather than a PromptSession
     # container: the latter expands to fill the terminal height, which in a tall
@@ -182,6 +218,14 @@ def scrolling_checkbox(
                         ),
                     ),
                     filter=~IsDone(),
+                ),
+                ConditionalContainer(
+                    Window(
+                        height=Dimension.exact(2),
+                        content=FormattedTextControl(description_tokens),
+                        wrap_lines=True,
+                    ),
+                    filter=has_description & ~IsDone(),
                 ),
                 ConditionalContainer(
                     Window(
