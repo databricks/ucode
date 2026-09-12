@@ -146,7 +146,7 @@ class TestLaunchCodex:
         monkeypatch.setenv(v2.ENV_VAR, "1")
         monkeypatch.delenv("CODEX_HOME", raising=False)
         monkeypatch.setattr(codex, "CODEX_CONFIG_PATH", profile_path)
-        monkeypatch.setattr(codex, "_managed_config_path", lambda: managed_path)
+        monkeypatch.setattr(codex, "codex_managed_config_path", lambda: managed_path)
         monkeypatch.setattr(codex, "agent_version", lambda _: "0.145.0")
         if custom_home:
             monkeypatch.setenv("CODEX_HOME", str(config_home))

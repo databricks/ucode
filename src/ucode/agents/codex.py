@@ -395,11 +395,6 @@ def _is_gpt_family(model: str) -> bool:
     return tail.startswith("gpt-")
 
 
-def _managed_config_path() -> Path | None:
-    """Return Codex's managed config path on platforms supported by ucode's sudo writer."""
-    return codex_managed_config_path()
-
-
 def _parse_managed_config(text: str) -> dict:
     try:
         return tomlkit.parse(text)
@@ -408,7 +403,7 @@ def _parse_managed_config(text: str) -> dict:
 
 
 def managed_config_is_current(state: dict) -> bool:
-    path = _managed_config_path()
+    path = codex_managed_config_path()
     if path is None:
         return True
     required_scope = "managed" if managed_writes_allowed() else None
@@ -416,7 +411,7 @@ def managed_config_is_current(state: dict) -> bool:
 
 
 def managed_config_status(state: dict) -> tuple[Path | None, str, str]:
-    path = _managed_config_path()
+    path = codex_managed_config_path()
     status, backup = managed_file_status(state, "codex", path, parser=_parse_managed_config)
     return path, status, backup
 
@@ -432,7 +427,7 @@ def revert_managed_config() -> str:
 
 def _reconcile_managed_config(state: dict, compose: Callable[[dict], dict]) -> None:
     """Reconcile Codex's highest-precedence config while preserving unrelated policy."""
-    path = _managed_config_path()
+    path = codex_managed_config_path()
     if path is None:
         print_warning_err(
             "Machine-wide Codex settings aren't supported on this platform; skipped the managed "
@@ -512,7 +507,7 @@ def _smart_routing_config_model(state: dict) -> str | None:
 def config_precedence_paths() -> tuple[Path, ...]:
     """Return Codex config paths in managed, profile, then user precedence."""
     return codex_config_precedence_paths(
-        _managed_config_path(),
+        codex_managed_config_path(),
         CODEX_CONFIG_PATH,
     )
 

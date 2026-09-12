@@ -43,7 +43,7 @@ def _isolate_ucode_state(tmp_path, monkeypatch):
     monkeypatch.setattr(
         managed_files_mod, "MANAGED_BACKUP_MANIFEST_PATH", backup_dir / "manifest.json"
     )
-    monkeypatch.setattr(codex_mod, "_managed_config_path", lambda: None)
+    monkeypatch.setattr(codex_mod, "codex_managed_config_path", lambda: None)
 
     def reject_privileged_write(path, _desired_text):
         pytest.fail(
