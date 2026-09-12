@@ -723,7 +723,7 @@ class TestCodexManagedConfig:
         monkeypatch.setattr(codex, "managed_writes_allowed", lambda: True)
         # Deterministic managed path + a mocked sudo writer that writes straight to disk, so the test
         # can read the TOML back and NO real sudo/`/etc` write ever happens.
-        monkeypatch.setattr(codex, "_managed_config_path", lambda: managed_path)
+        monkeypatch.setattr(codex, "codex_managed_config_path", lambda: managed_path)
 
         def fake_write_managed(path, text, **kwargs):
             Path(path).parent.mkdir(parents=True, exist_ok=True)

@@ -11,7 +11,12 @@ from pathlib import Path
 import tomlkit
 from tomlkit.exceptions import ParseError
 
-from ucode.codex_config import codex_config_args
+from ucode.codex_config import (
+    codex_config_args,
+    codex_config_precedence_paths,
+    codex_managed_config_path,
+    custom_catalog_models,
+)
 from ucode.config_io import (
     APP_DIR,
     ToolSpec,
@@ -28,9 +33,7 @@ from ucode.databricks import (
 )
 from ucode.launcher import exec_or_spawn
 from ucode.managed_files import (
-    OS,
     ManagedFileWriteUnavailable,
-    current_os,
     managed_file_conflicts,
     managed_file_is_verified,
     managed_file_status,
@@ -392,13 +395,6 @@ def _is_gpt_family(model: str) -> bool:
     return tail.startswith("gpt-")
 
 
-def _managed_config_path() -> Path | None:
-    """Return Codex's managed config path on platforms supported by ucode's sudo writer."""
-    if current_os() in (OS.LINUX, OS.MACOS):
-        return Path("/etc/codex/managed_config.toml")
-    return None
-
-
 def _parse_managed_config(text: str) -> dict:
     try:
         return tomlkit.parse(text)
@@ -407,7 +403,7 @@ def _parse_managed_config(text: str) -> dict:
 
 
 def managed_config_is_current(state: dict) -> bool:
-    path = _managed_config_path()
+    path = codex_managed_config_path()
     if path is None:
         return True
     required_scope = "managed" if managed_writes_allowed() else None
@@ -415,7 +411,7 @@ def managed_config_is_current(state: dict) -> bool:
 
 
 def managed_config_status(state: dict) -> tuple[Path | None, str, str]:
-    path = _managed_config_path()
+    path = codex_managed_config_path()
     status, backup = managed_file_status(state, "codex", path, parser=_parse_managed_config)
     return path, status, backup
 
@@ -431,7 +427,7 @@ def revert_managed_config() -> str:
 
 def _reconcile_managed_config(state: dict, compose: Callable[[dict], dict]) -> None:
     """Reconcile Codex's highest-precedence config while preserving unrelated policy."""
-    path = _managed_config_path()
+    path = codex_managed_config_path()
     if path is None:
         print_warning_err(
             "Machine-wide Codex settings aren't supported on this platform; skipped the managed "
@@ -500,19 +496,20 @@ def _smart_routing_config_model(state: dict) -> str | None:
     model = state.get("codex_default_model")
     if isinstance(model, str) and model.strip():
         return model
-    config_home = os.environ.get("CODEX_HOME")
-    profile_path = (
-        Path(config_home).expanduser() / f"{CODEX_PROFILE_NAME}.config.toml"
-        if config_home
-        else CODEX_CONFIG_PATH
-    )
-    for path in (_managed_config_path(), profile_path, profile_path.parent / "config.toml"):
-        if path is None:
-            continue
+
+    for path in config_precedence_paths():
         model = read_toml_safe(path).get("model")
         if isinstance(model, str) and model.strip():
             return model
     return None
+
+
+def config_precedence_paths() -> tuple[Path, ...]:
+    """Return Codex config paths in managed, profile, then user precedence."""
+    return codex_config_precedence_paths(
+        codex_managed_config_path(),
+        CODEX_CONFIG_PATH,
+    )
 
 
 def clear_model_preferences(state: dict) -> bool:
@@ -580,7 +577,8 @@ def _launch_smart_routing(state: dict, tool_args: list[str]) -> None:
         )
 
     configured_model = _smart_routing_config_model(state)
-    models = routing_models(state)
+    # Prefer the custom catalog if it exists.
+    models = custom_catalog_models() or routing_models(state)
     start_model = (
         configured_model
         or (codex_model_id(models[0]) if models else None)
