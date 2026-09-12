@@ -232,15 +232,6 @@ def scrolling_checkbox(
                 ),
                 ConditionalContainer(
                     Window(
-                        height=Dimension.exact(2),
-                        content=FormattedTextControl(description_tokens),
-                        wrap_lines=True,
-                        get_line_prefix=lambda line, wrap: _DESCRIPTION_INDENT,
-                    ),
-                    filter=has_description & ~IsDone(),
-                ),
-                ConditionalContainer(
-                    Window(
                         height=Dimension.exact(1),
                         content=FormattedTextControl(
                             lambda: [("class:instruction", "  ↑/↓ scroll for more")]
@@ -265,6 +256,22 @@ def scrolling_checkbox(
                 ConditionalContainer(
                     validation_prompt.layout.container,
                     filter=Condition(lambda: control.error_message is not None),
+                ),
+                # Pinned at the bottom, one blank line below the other footers, so the
+                # highlighted row's description reads as a separate detail pane.
+                ConditionalContainer(
+                    HSplit(
+                        [
+                            Window(height=Dimension.exact(1)),
+                            Window(
+                                height=Dimension.exact(2),
+                                content=FormattedTextControl(description_tokens),
+                                wrap_lines=True,
+                                get_line_prefix=lambda line, wrap: _DESCRIPTION_INDENT,
+                            ),
+                        ]
+                    ),
+                    filter=has_description & ~IsDone(),
                 ),
             ]
         )
