@@ -16,10 +16,8 @@ from pathlib import Path
 from typing import NoReturn, TextIO
 
 from ucode.codex_config import (
-    DEFAULT_CODEX_CONFIG_PATH,
     codex_config_args,
-    codex_config_precedence_paths,
-    codex_managed_config_path,
+    custom_catalog_models,
 )
 from ucode.config_io import APP_DIR, read_json_safe, read_toml_safe, write_json_file
 from ucode.constants import LOOPBACK_HOST
@@ -37,7 +35,7 @@ from ucode.smart_routing.claude_hooks import (
     sync_smart_routing_hooks,
 )
 from ucode.smart_routing.codex_hooks import merge_pre_tool_use_hooks, routing_models
-from ucode.ui import print_note, print_warning
+from ucode.ui import print_note
 
 ENV_VAR = "ENABLE_SMART_ROUTING_V2"
 LEGACY_STATE_KEY = "smart_routing_enabled"
@@ -103,56 +101,6 @@ def _model_picker_catalog() -> AnthropicModelCatalog | None:
         if model_ids:
             return AnthropicModelCatalog(model_ids, {})
     return None
-
-
-def custom_catalog_models() -> list[str] | None:
-    """Read model slugs from a model_catalog_json custom catalog, when one is configured.
-
-    A custom catalog is authoritative for smart routing: its models are the ones the
-    administrator exposed, so there is no need to read the cached model services.
-    """
-    try:
-        paths = codex_config_precedence_paths(
-            codex_managed_config_path(),
-            DEFAULT_CODEX_CONFIG_PATH,
-        )
-    except OSError:
-        return None
-    for path in paths:
-        if path is None or not path.is_file():
-            continue
-        settings = read_toml_safe(path)
-        catalog_ref = settings.get("model_catalog_json")
-        if not isinstance(catalog_ref, str) or not catalog_ref.strip():
-            continue
-        slugs = _catalog_slugs(Path(catalog_ref).expanduser())
-        if slugs:
-            return slugs
-        print_warning(
-            f"Codex smart routing could not read models from the custom catalog {catalog_ref} "
-            f"referenced by {path}; falling back to the cached model services."
-        )
-        return None
-    return None
-
-
-def _catalog_slugs(path: Path) -> list[str]:
-    """Extract deduplicated model slugs from a Codex custom catalog JSON file."""
-    catalog = read_json_safe(path)
-    models = catalog.get("models")
-    if not isinstance(models, list):
-        return []
-    slugs: list[str] = []
-    seen: set[str] = set()
-    for row in models:
-        if not isinstance(row, dict) or not isinstance(row.get("slug"), str):
-            continue
-        slug = row["slug"].strip()
-        if not slug or slug in seen:
-            continue
-        seen.add(slug)
-        slugs.append(slug)
-    return slugs
 
 
 def enabled() -> bool:

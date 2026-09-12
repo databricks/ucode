@@ -12,11 +12,10 @@ import tomlkit
 from tomlkit.exceptions import ParseError
 
 from ucode.codex_config import (
-    CODEX_PROFILE_NAME,
-    DEFAULT_CODEX_CONFIG_PATH,
     codex_config_args,
     codex_config_precedence_paths,
     codex_managed_config_path,
+    custom_catalog_models,
 )
 from ucode.config_io import (
     APP_DIR,
@@ -57,8 +56,9 @@ from ucode.ui import print_warning_err
 
 from .args import LaunchOptions
 
-CODEX_CONFIG_PATH = DEFAULT_CODEX_CONFIG_PATH
-CODEX_CONFIG_DIR = CODEX_CONFIG_PATH.parent
+CODEX_CONFIG_DIR = Path.home() / ".codex"
+CODEX_PROFILE_NAME = "ucode"
+CODEX_CONFIG_PATH = CODEX_CONFIG_DIR / f"{CODEX_PROFILE_NAME}.config.toml"
 CODEX_BACKUP_PATH = APP_DIR / "codex-ucode-config.backup.toml"
 LEGACY_CODEX_CONFIG_PATH = CODEX_CONFIG_DIR / "config.toml"
 LEGACY_CODEX_BACKUP_PATH = APP_DIR / "codex-config.backup.toml"
@@ -582,7 +582,7 @@ def _launch_smart_routing(state: dict, tool_args: list[str]) -> None:
         )
 
     configured_model = _smart_routing_config_model(state)
-    models = smart_routing_v2.custom_catalog_models() or routing_models(state)
+    models = custom_catalog_models() or routing_models(state)
     start_model = (
         configured_model
         or (codex_model_id(models[0]) if models else None)

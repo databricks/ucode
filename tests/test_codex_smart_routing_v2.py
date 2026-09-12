@@ -4,6 +4,7 @@ import json
 
 import pytest
 
+from ucode import codex_config
 from ucode.agents import LaunchOptions, codex
 from ucode.smart_routing import codex_interposer, codex_routing, v2
 
@@ -384,8 +385,8 @@ class TestCustomCatalogModels:
             else:
                 text = 'model = "gpt-5"\n'
             path.write_text(text, encoding="utf-8")
-        monkeypatch.setattr(v2, "codex_managed_config_path", lambda: managed_path)
-        monkeypatch.setattr(v2, "DEFAULT_CODEX_CONFIG_PATH", cli_path)
+        monkeypatch.setattr(codex_config, "codex_managed_config_path", lambda: managed_path)
+        monkeypatch.setattr(codex_config, "DEFAULT_CODEX_CONFIG_PATH", cli_path)
 
     @pytest.mark.parametrize(
         ("managed_catalog", "cli_catalog", "default_catalog", "expected"),
@@ -415,14 +416,14 @@ class TestCustomCatalogModels:
         )
         self._settings(tmp_path, monkeypatch, managed=managed, cli=cli, default=default)
 
-        assert v2.custom_catalog_models() == expected
+        assert codex_config.custom_catalog_models() == expected
 
     def test_unreadable_catalog_warns_and_falls_back(self, tmp_path, monkeypatch):
         self._settings(tmp_path, monkeypatch, cli=tmp_path / "missing.json")
         warnings = []
-        monkeypatch.setattr(v2, "print_warning", warnings.append)
+        monkeypatch.setattr(codex_config, "print_warning", warnings.append)
 
-        assert v2.custom_catalog_models() is None
+        assert codex_config.custom_catalog_models() is None
         assert len(warnings) == 1
         assert "falling back to the cached model services" in warnings[0]
 
@@ -481,7 +482,7 @@ class TestCustomCatalogModels:
         monkeypatch.setenv(v2.ENV_VAR, "1")
         monkeypatch.setattr(codex, "clear_model_preferences", lambda state: False)
         monkeypatch.setattr(codex, "_smart_routing_config_model", lambda state: None)
-        monkeypatch.setattr(v2, "custom_catalog_models", lambda: ["gpt-6-astra", "gpt-6-b"])
+        monkeypatch.setattr(codex, "custom_catalog_models", lambda: ["gpt-6-astra", "gpt-6-b"])
 
         def launch_v2(state, tool_args, **kwargs):
             calls.append(kwargs)
