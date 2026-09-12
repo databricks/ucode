@@ -1511,16 +1511,48 @@ class TestSkillsAddCommand:
         assert "must all share one" in _strip_ansi(result.output)
         mock_download.assert_not_called()
 
-    def test_without_location_exit_1(self):
+    def test_without_location_non_interactive_exit_1(self):
         with (
+            patch("ucode.cli._stdin_is_interactive", return_value=False),
             patch("ucode.cli.add_skills_command") as mock_add,
             patch("ucode.cli.configure_skills_download_command") as mock_download,
+            patch("ucode.cli.configure_skills_download_picker_command") as mock_picker,
         ):
             result = runner.invoke(app, ["skill", "add"])
         assert result.exit_code == 1
         assert "--location is required" in _strip_ansi(result.output)
         mock_add.assert_not_called()
         mock_download.assert_not_called()
+        mock_picker.assert_not_called()
+
+    def test_no_args_interactive_opens_picker(self):
+        with (
+            patch("ucode.cli._stdin_is_interactive", return_value=True),
+            patch("ucode.cli.configure_skills_download_picker_command") as mock_picker,
+        ):
+            result = runner.invoke(app, ["skill", "add"])
+        assert result.exit_code == 0, result.output
+        mock_picker.assert_called_once_with(path=None)
+
+    def test_interactive_picker_passes_path(self):
+        with (
+            patch("ucode.cli._stdin_is_interactive", return_value=True),
+            patch("ucode.cli.configure_skills_download_picker_command") as mock_picker,
+        ):
+            result = runner.invoke(app, ["skill", "add", "--path", "/tmp/s"])
+        assert result.exit_code == 0, result.output
+        mock_picker.assert_called_once_with(path="/tmp/s")
+
+    def test_skills_without_location_stays_typed_path_when_interactive(self):
+        with (
+            patch("ucode.cli._stdin_is_interactive", return_value=True),
+            patch("ucode.cli.configure_skills_download_picker_command") as mock_picker,
+            patch("ucode.cli.configure_skills_download_command") as mock_download,
+        ):
+            result = runner.invoke(app, ["skill", "add", "--skills", "a.b.s1"])
+        assert result.exit_code == 0, result.output
+        mock_picker.assert_not_called()
+        mock_download.assert_called_once_with(["a.b"], path=None, skills={"s1"})
 
     def test_skill_with_mcp_exit_1(self):
         with (

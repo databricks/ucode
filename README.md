@@ -258,6 +258,10 @@ ug skill add --location main.default
 # Download a named subset, by bare name (with --location) or fully-qualified name.
 ug skill add --location main.default --skills my-skill,other-skill
 ug skill add --skills main.default.my-skill,main.default.other-skill
+
+# No --location (or --skills) launches an interactive picker of the workspace's
+# skills to download; it opens immediately and streams skills in as they're found.
+ug skill add
 ```
 
 With `--mcp`, `--agents` limits the change to the named agents; without it the schemas go to every
