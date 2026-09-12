@@ -63,6 +63,68 @@ class TestForwardedRequestHeaders:
         assert "Content-Length" not in out
         assert "Connection" not in out
 
+    def test_extra_strip_removes_named_headers(self):
+        handler = _FakeHandler({"Databricks-Model-Provider-Service": "cat.s.mps", "Keep": "me"})
+        out = gateway_proxy.forwarded_request_headers(
+            handler, "t", extra_strip=frozenset({"databricks-model-provider-service"})
+        )
+        assert "Databricks-Model-Provider-Service" not in out
+        assert out["Keep"] == "me"
+
+    def test_databricks_route_swaps_authorization_and_drops_relay_headers(self):
+        # OSS path: the Databricks token replaces the caller's OAuth in Authorization, and
+        # the swap + MPS headers are dropped so the gateway serves the model directly.
+        handler = _FakeHandler(
+            {
+                "Authorization": "Bearer anthropic-oauth",
+                "X-Databricks-AI-Gateway-Token": "Bearer stale-swap",
+                "Databricks-Model-Provider-Service": "cat.s.relayed_mps",
+            }
+        )
+        out = gateway_proxy.forwarded_request_headers(
+            handler,
+            "dbx-token",
+            gateway_proxy.AUTHORIZATION_HEADER,
+            extra_strip=gateway_proxy._DATABRICKS_ROUTE_STRIP,
+        )
+        assert out["Authorization"] == "Bearer dbx-token"
+        assert "X-Databricks-AI-Gateway-Token" not in out
+        assert "Databricks-Model-Provider-Service" not in out
+
+
+class TestIsDatabricksRoutedModel:
+    def test_namespace_qualified_ids_route_to_databricks(self):
+        for model in (
+            "system.ai.claude-opus-4-8",
+            "system.ai.gpt-oss-120b",
+            "my_catalog.my_schema.my_model",
+            "databricks-meta-llama-3-3-70b-instruct",
+        ):
+            assert gateway_proxy.is_databricks_routed_model(model), model
+
+    def test_bare_anthropic_ids_relay(self):
+        for model in ("claude-opus-4-1", "claude-sonnet-4-5", "claude-3-7-sonnet-20250219"):
+            assert not gateway_proxy.is_databricks_routed_model(model), model
+
+    def test_missing_model_relays(self):
+        assert not gateway_proxy.is_databricks_routed_model(None)
+        assert not gateway_proxy.is_databricks_routed_model("")
+
+
+class TestRequestModel:
+    def test_extracts_model_from_json_body(self):
+        assert gateway_proxy._request_model(b'{"model": "system.ai.x", "n": 1}') == "system.ai.x"
+
+    def test_none_for_missing_body(self):
+        assert gateway_proxy._request_model(None) is None
+
+    def test_none_for_invalid_json(self):
+        assert gateway_proxy._request_model(b"not json") is None
+
+    def test_none_for_non_object_or_non_string_model(self):
+        assert gateway_proxy._request_model(b"[1, 2]") is None
+        assert gateway_proxy._request_model(b'{"model": 5}') is None
+
 
 class _FakeResponse:
     """Stand-in for httpx.Response exposing only what `_relay_response` reads."""
@@ -328,9 +390,11 @@ class _FakeClient:
     def __init__(self, responses):
         self._responses = list(responses)
         self.sent_tokens: list[str | None] = []
+        self.sent_headers: list[dict] = []
 
     def stream(self, _method, _url, headers, content):
         self.sent_tokens.append(headers.get(gateway_proxy.AI_GATEWAY_TOKEN_HEADER))
+        self.sent_headers.append(headers)
         return self._responses.pop(0)
 
 
@@ -473,3 +537,80 @@ class TestStartProxyPortFallback:
                 client.close()
         finally:
             occupied.close()
+
+
+def _relayed_oss_handler(
+    client, cache, wfile, *, headers, body, enabled
+) -> gateway_proxy._ProxyHandler:
+    h = object.__new__(gateway_proxy._ProxyHandler)
+    h.client = client
+    h.cache = cache
+    h.relayed_oss_routing = enabled
+    hdrs = dict(headers)
+    hdrs["Content-Length"] = str(len(body))
+    h.headers = hdrs
+    h.rfile = io.BytesIO(body)
+    h.path = "/v1/messages"
+    h.command = "POST"
+    h.wfile = wfile
+    h.request_version = "HTTP/1.1"
+    h.requestline = "POST /v1/messages HTTP/1.1"
+    h._headers_buffer = []
+    return h
+
+
+class TestRelayedOssRouting:
+    _CLIENT_HEADERS = {
+        "Authorization": "Bearer anthropic-oauth",
+        "Databricks-Model-Provider-Service": "cat.s.relayed_mps",
+    }
+
+    def test_databricks_model_routes_to_gateway_auth(self):
+        # A Databricks-hosted model with relayed OSS-routing on: the gateway token
+        # replaces the OAuth in Authorization, and the swap + MPS headers are dropped.
+        client = _FakeClient([_FakeResp(200, b"ok")])
+        _relayed_oss_handler(
+            client,
+            _FakeCache(),
+            _Collect(),
+            headers=self._CLIENT_HEADERS,
+            body=b'{"model": "system.ai.gpt-oss-120b"}',
+            enabled=True,
+        )._handle()
+        sent = client.sent_headers[0]
+        assert sent["Authorization"] == "Bearer tok1"
+        assert gateway_proxy.AI_GATEWAY_TOKEN_HEADER not in sent
+        assert "Databricks-Model-Provider-Service" not in sent
+
+    def test_relayed_model_keeps_oauth_passthrough(self):
+        # A subscription model still relays: the OAuth is untouched, the swap header
+        # carries the Databricks token, and the MPS header is preserved.
+        client = _FakeClient([_FakeResp(200, b"ok")])
+        _relayed_oss_handler(
+            client,
+            _FakeCache(),
+            _Collect(),
+            headers=self._CLIENT_HEADERS,
+            body=b'{"model": "claude-opus-4-1"}',
+            enabled=True,
+        )._handle()
+        sent = client.sent_headers[0]
+        assert sent["Authorization"] == "Bearer anthropic-oauth"
+        assert sent[gateway_proxy.AI_GATEWAY_TOKEN_HEADER] == "Bearer tok1"
+        assert sent["Databricks-Model-Provider-Service"] == "cat.s.relayed_mps"
+
+    def test_routing_off_relays_even_a_databricks_model(self):
+        # With relayed OSS-routing off (a pure-relay session) nothing is re-routed,
+        # so behavior is identical to before this feature.
+        client = _FakeClient([_FakeResp(200, b"ok")])
+        _relayed_oss_handler(
+            client,
+            _FakeCache(),
+            _Collect(),
+            headers=self._CLIENT_HEADERS,
+            body=b'{"model": "system.ai.gpt-oss-120b"}',
+            enabled=False,
+        )._handle()
+        sent = client.sent_headers[0]
+        assert sent["Authorization"] == "Bearer anthropic-oauth"
+        assert sent[gateway_proxy.AI_GATEWAY_TOKEN_HEADER] == "Bearer tok1"

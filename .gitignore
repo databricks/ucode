@@ -6,3 +6,5 @@ dist/
 .venv/
 .DS_Store
 .isaac/
+# mlflow `autolog claude` Stop-hook runtime log (personal session ids/paths, not source).
+.claude/mlflow/

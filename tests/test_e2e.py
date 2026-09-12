@@ -588,6 +588,33 @@ class TestModelProviderLaunch:
         return names[0]
 
     @staticmethod
+    def _first_databricks_hosted_model(workspace: str, token: str) -> str | None:
+        """A natively-servable Databricks-hosted model id from the anthropic gateway catalog:
+        namespace-qualified (so the proxy re-routes it to gateway auth) and served directly.
+        Excludes `anthropic-aigw-*` aliases — they're listed but need their provider-service
+        header to route, which the Databricks route drops (they 404 on a direct call). Prefers
+        a non-Claude (OSS) native id when the workspace serves one."""
+        from ucode.gateway_proxy import is_databricks_routed_model
+
+        try:
+            resp = httpx.get(
+                f"{build_tool_base_url('claude', workspace)}/v1/models",
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=30,
+            )
+            resp.raise_for_status()
+            ids = [m.get("id") for m in resp.json().get("data", [])]
+        except (httpx.HTTPError, ValueError, KeyError):
+            return None
+        native = [
+            i
+            for i in ids
+            if i and is_databricks_routed_model(i) and not i.startswith("anthropic-aigw-")
+        ]
+        oss = [i for i in native if "claude" not in i]
+        return (oss or native or [None])[0]
+
+    @staticmethod
     def _skip_if_provider_unusable(combined: str, provider: str) -> None:
         # Environmental provider-account conditions, not ucode bugs: the test only proves routing
         # reaches the provider, so skip (rather than fail) when the account lacks a grant on the
@@ -700,6 +727,11 @@ class TestModelProviderLaunch:
         via CLAUDE_CODE_OAUTH_TOKEN (`claude setup-token` output); without it the
         launch would open an interactive browser login, so the test skips. Also
         needs a relayed MPS on the workspace, so it stays inert until both exist.
+
+        Also asserts the hybrid path: through the same proxy (relayed_oss_routing on),
+        a Databricks-hosted model the subscription doesn't serve is re-routed to gateway
+        auth and served — so one relayed session reaches both the subscription and
+        Databricks models.
         """
         import ucode.config_io as config_io_mod
         from ucode import gateway_proxy
@@ -725,15 +757,21 @@ class TestModelProviderLaunch:
 
         # Start the real loopback refresh proxy exactly as `_launch_relayed` does,
         # so the request is credential-swapped and relayed like a live session.
+        # relayed_oss_routing lets the same proxy also serve Databricks-hosted models.
         server, cache, client = gateway_proxy.start_proxy(
             e2e_workspace,
             None,
             0,
             token_header=gateway_proxy.AI_GATEWAY_TOKEN_HEADER,
             force_refresh_near_expiry=False,
+            relayed_oss_routing=True,
         )
         port = server.server_address[1]
         threading.Thread(target=server.serve_forever, daemon=True).start()
+        # A Databricks-hosted model the subscription doesn't serve, to exercise the
+        # proxy's per-model Databricks re-route from within the relayed session.
+        oss_model = self._first_databricks_hosted_model(e2e_workspace, e2e_token)
+        oss_response = None
         try:
             state = {**e2e_state, "workspace": e2e_workspace, "relayed_proxy_port": port}
             with pytest.MonkeyPatch().context() as mp:
@@ -745,6 +783,23 @@ class TestModelProviderLaunch:
                 "ANTHROPIC_BASE_URL": f"http://127.0.0.1:{port}",
             }
             result = _run_agent(claude.validate_cmd("claude"), env=env, timeout=90)
+            if oss_model is not None:
+                # A deliberately fake Authorization proves the Databricks route replaced it:
+                # were this wrongly relayed to the subscription, the bad OAuth would 401.
+                oss_response = httpx.post(
+                    f"http://127.0.0.1:{port}/v1/messages",
+                    headers={
+                        "Authorization": "Bearer not-a-real-oauth",
+                        "content-type": "application/json",
+                        "anthropic-version": "2023-06-01",
+                    },
+                    json={
+                        "model": oss_model,
+                        "max_tokens": 16,
+                        "messages": [{"role": "user", "content": "say hi in 3 words"}],
+                    },
+                    timeout=60,
+                )
         finally:
             cache.stop()
             server.shutdown()
@@ -755,6 +810,23 @@ class TestModelProviderLaunch:
             f"relayed provider={provider} rc={result.returncode} "
             f"stdout={result.stdout[:300]!r} stderr={result.stderr[:300]!r}"
         )
+        # Databricks re-route check. The fake OAuth is the tell: 401 means the proxy relayed
+        # this to the subscription (routing regression) instead of swapping in the gateway
+        # token — so 401 fails. The relay check above already passed, so the gateway token is
+        # valid and a 401 here can only be the fake OAuth. 200 proves the model served; any
+        # other status means the route reached the gateway but the CI principal can't serve
+        # this model (environmental, not a routing bug) — skip.
+        if oss_response is not None:
+            assert oss_response.status_code != 401, (
+                f"relayed_oss_routing regressed: {oss_model} was relayed to the subscription "
+                f"(401) instead of routed to the gateway. Body: {oss_response.text[:200]}"
+            )
+            if oss_response.status_code != 200:
+                pytest.skip(
+                    f"gateway did not serve {oss_model} for the CI principal "
+                    f"(HTTP {oss_response.status_code}); routing reached the gateway but "
+                    f"model access is environmental: {oss_response.text[:200]}"
+                )
 
     def test_launch_codex_through_provider(
         self, tmp_path, monkeypatch, e2e_state, e2e_workspace, e2e_token
