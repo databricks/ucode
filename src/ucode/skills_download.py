@@ -2,26 +2,33 @@
 
 from __future__ import annotations
 
+import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlencode
 
+import questionary
+
 from ucode.databricks import (
     _http_get_bytes,
     _http_get_json,
     get_databricks_token,
+    walk_catalog_schemas,
     workspace_hostname,
 )
 from ucode.mcp import register_schemaless_skills_connection, setup_mcp_clients
 from ucode.state import load_state
 from ucode.ui import (
     console,
+    picker_style,
     print_note,
     print_success,
     print_warning,
     progress_bar,
     prompt_yes_no,
+    scrolling_checkbox,
 )
 
 # `.claude/skills` (Claude) + `.agents/skills` (the alias other agents read).
@@ -31,6 +38,10 @@ SKILL_FILES_API_PREFIX = "Skills"
 
 # Parallel skill fetches per schema; writes stay sequential (they prompt).
 _MAX_FETCH_WORKERS = 8
+
+# Wall-clock budget for the workspace-wide skill walk; a slow workspace degrades
+# to partial results instead of hanging the picker.
+_SKILLS_WALK_DEADLINE_SECONDS = 30.0
 
 
 # --- Download client (UC skills API + Files API) ---------------------------
@@ -503,5 +514,126 @@ def configure_skills_download_command(
 
     download_skills_from_schema_locations(workspace, token, locations, path, skills)
 
+    register_schemaless_skills_connection(state, workspace, profile, clients)
+    return 0
+
+
+# --- Interactive picker (workspace discovery + selective download) ----------
+
+
+def list_all_skills(
+    workspace: str,
+    token: str,
+    *,
+    deadline_seconds: float = _SKILLS_WALK_DEADLINE_SECONDS,
+    on_progress: Callable[[int, int, int], None] | None = None,
+    on_services: Callable[[list[SkillRef]], None] | None = None,
+) -> tuple[list[SkillRef], str | None]:
+    """Return every finalized skill across all ``<catalog>.<schema>`` in the workspace, by FQN.
+
+    The skills API is one-schema-per-call, so this walks catalogs -> schemas ->
+    skills in parallel under a wall-clock budget, returning partial results once
+    ``deadline_seconds`` is exceeded. ``on_progress`` is called as each schema
+    completes with ``(schemas_done, schemas_total, skills_found)``, and
+    ``on_services`` with each schema's newly-found refs (deduped by FQN against
+    everything emitted so far) so a picker can stream them in as the walk runs.
+    The workspace-wide counterpart to ``list_schema_skills``.
+    """
+    deadline = time.monotonic() + deadline_seconds
+    by_fqn: dict[str, SkillRef] = {}
+
+    def probe(catalog: str, schema: str) -> tuple[list[SkillRef], str | None]:
+        return list_schema_skills(workspace, token, catalog, schema)
+
+    def collect(result: tuple[list[SkillRef], str | None], done: int, total: int) -> None:
+        found, _ = result
+        new = [ref for ref in found if ref.fqn not in by_fqn]
+        for ref in new:
+            by_fqn[ref.fqn] = ref
+        if on_progress is not None:
+            on_progress(done, total, len(by_fqn))
+        if on_services is not None and new:
+            on_services(sorted(new, key=lambda ref: ref.fqn))
+
+    reason = walk_catalog_schemas(workspace, token, deadline=deadline, probe=probe, collect=collect)
+    if reason is not None:
+        return [], reason
+    if not by_fqn:
+        if time.monotonic() > deadline:
+            return [], "deadline exceeded while listing skills"
+        return [], "no skills found"
+    return sorted(by_fqn.values(), key=lambda ref: ref.fqn), None
+
+
+def discover_all_skills(
+    workspace: str,
+    profile: str | None = None,
+    on_services: Callable[[list[SkillRef]], None] | None = None,
+) -> list[SkillRef]:
+    """Token + ``list_all_skills`` across the whole workspace, streaming via ``on_services``."""
+    token = get_databricks_token(workspace, profile)
+    refs, _reason = list_all_skills(workspace, token, on_services=on_services)
+    return refs
+
+
+def _skill_download_choice(ref: SkillRef, roots: list[Path]) -> questionary.Choice:
+    """Picker row for one skill: value is its FQN, title flags an on-disk bundle.
+
+    On-disk skills stay selectable, since re-downloading is a legitimate update and
+    the existing overwrite prompt confirms it.
+    """
+    on_disk = " (on disk)" if existing_skill_on_disk(roots, ref.bundle_name) else ""
+    return questionary.Choice(title=f"{ref.fqn}{on_disk}", value=ref.fqn)
+
+
+def _skills_download_background_loader(
+    workspace: str, profile: str | None, roots: list[Path]
+) -> Callable[[Callable[[list[questionary.Choice]], None]], None]:
+    """A picker ``background_loader`` that streams discovered skills in as choices."""
+
+    def loader(append: Callable[[list[questionary.Choice]], None]) -> None:
+        def on_services(refs: list[SkillRef]) -> None:
+            append([_skill_download_choice(ref, roots) for ref in refs])
+
+        discover_all_skills(workspace, profile, on_services=on_services)
+
+    return loader
+
+
+def prompt_for_skill_download_choices(
+    roots: list[Path],
+    background_loader: Callable[[Callable[[list[questionary.Choice]], None]], None],
+) -> list[str] | None:
+    """Show the skill-download picker, returning the selected FQNs or None on Ctrl-C."""
+    selection = scrolling_checkbox(
+        "Skills:",
+        choices=[],
+        instruction="(space to toggle, ctrl-a all, enter to save, type to filter)",
+        style=picker_style(),
+        background_loader=background_loader,
+        loading_noun="skills",
+    ).ask()
+    if selection is None:
+        return None
+    return [str(value) for value in selection]
+
+
+def configure_skills_download_picker_command(path: str | None = None) -> int:
+    """Pick skills from an interactive workspace-wide list, download them, and register.
+
+    Opens the picker immediately and streams skills in as discovery finds them.
+    Ctrl-C downloads nothing and leaves the connection untouched.
+    """
+    state = load_state()
+    workspace, profile, clients = setup_mcp_clients(state, "Skills")
+    token = get_databricks_token(workspace, profile)
+    roots = skill_dir_roots(path)
+
+    loader = _skills_download_background_loader(workspace, profile, roots)
+    fqns = prompt_for_skill_download_choices(roots, loader)
+    if fqns is None:
+        return 0
+
+    download_selected_skills(workspace, token, fqns, path)
     register_schemaless_skills_connection(state, workspace, profile, clients)
     return 0

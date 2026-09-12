@@ -916,3 +916,197 @@ class TestConfigureSkillsDownloadCommand:
 
         assert calls["download"] == (WS, "token", ["a.b"], None, {"triage"})
         assert calls["register"] == (WS, "profile", ["claude"])
+
+
+def _walk_stub(schemas, reason=None):
+    """A ``walk_catalog_schemas`` stub that probes each (catalog, schema) in order."""
+
+    def walk(workspace, token, *, deadline, probe, collect, **kwargs):
+        total = len(schemas)
+        for done, (catalog, schema) in enumerate(schemas, start=1):
+            collect(probe(catalog, schema), done, total)
+        return reason
+
+    return walk
+
+
+class _FakePrompt:
+    def __init__(self, result):
+        self._result = result
+
+    def ask(self):
+        return self._result
+
+
+class TestListAllSkills:
+    def test_flattens_and_streams_across_schemas(self, monkeypatch):
+        monkeypatch.setattr(
+            sd, "walk_catalog_schemas", _walk_stub([("main", "default"), ("ml", "prod")])
+        )
+        by_schema = {
+            "main.default": [ref("triage"), ref("pii")],
+            "ml.prod": [ref("scoring", catalog="ml", schema="prod")],
+        }
+        monkeypatch.setattr(
+            sd, "list_schema_skills", lambda ws, tok, c, s: (by_schema[f"{c}.{s}"], None)
+        )
+        streamed = []
+        progress = []
+
+        refs, reason = sd.list_all_skills(
+            WS,
+            "token",
+            on_services=streamed.append,
+            on_progress=lambda done, total, found: progress.append((done, total, found)),
+        )
+
+        assert reason is None
+        assert [r.fqn for r in refs] == [
+            "main.default.pii",
+            "main.default.triage",
+            "ml.prod.scoring",
+        ]
+        assert [[r.fqn for r in batch] for batch in streamed] == [
+            ["main.default.pii", "main.default.triage"],
+            ["ml.prod.scoring"],
+        ]
+        assert progress == [(1, 2, 2), (2, 2, 3)]
+
+    def test_dedupes_repeated_fqns(self, monkeypatch):
+        monkeypatch.setattr(
+            sd, "walk_catalog_schemas", _walk_stub([("main", "default"), ("main", "default")])
+        )
+        monkeypatch.setattr(sd, "list_schema_skills", lambda ws, tok, c, s: ([ref("triage")], None))
+        streamed = []
+
+        refs, reason = sd.list_all_skills(WS, "token", on_services=streamed.append)
+
+        assert [r.fqn for r in refs] == ["main.default.triage"]
+        assert streamed == [[ref("triage")]]
+
+    def test_walk_failure_returns_its_reason(self, monkeypatch):
+        monkeypatch.setattr(
+            sd, "walk_catalog_schemas", _walk_stub([], reason="no UC catalogs found")
+        )
+
+        assert sd.list_all_skills(WS, "token") == ([], "no UC catalogs found")
+
+    def test_empty_walk_reports_no_skills(self, monkeypatch):
+        monkeypatch.setattr(sd, "walk_catalog_schemas", _walk_stub([("main", "default")]))
+        monkeypatch.setattr(sd, "list_schema_skills", lambda *a, **k: ([], None))
+
+        assert sd.list_all_skills(WS, "token") == ([], "no skills found")
+
+
+class TestDiscoverAllSkills:
+    def test_gets_token_then_lists_all(self, monkeypatch):
+        monkeypatch.setattr(sd, "get_databricks_token", lambda ws, profile: "tok")
+        captured = {}
+
+        def fake_list_all(ws, tok, *, on_services=None, **kwargs):
+            captured["token"] = tok
+            on_services([ref("triage")])
+            return [ref("triage")], None
+
+        monkeypatch.setattr(sd, "list_all_skills", fake_list_all)
+        streamed = []
+
+        result = sd.discover_all_skills(WS, "profile", on_services=streamed.append)
+
+        assert result == [ref("triage")]
+        assert captured["token"] == "tok"
+        assert streamed == [[ref("triage")]]
+
+
+class TestSkillDownloadPicker:
+    def test_choice_value_is_fqn_and_flags_on_disk(self, tmp_path):
+        roots = skill_dir_roots(str(tmp_path))
+
+        fresh = sd._skill_download_choice(ref("triage"), roots)
+        assert fresh.value == "main.default.triage"
+        assert "(on disk)" not in fresh.title
+
+        write_skill(roots, ref("triage"), {"SKILL.md": b"x"})
+        existing = sd._skill_download_choice(ref("triage"), roots)
+        assert existing.value == "main.default.triage"
+        assert "(on disk)" in existing.title
+
+    def test_background_loader_streams_discovered_skills_as_choices(self, tmp_path, monkeypatch):
+        roots = skill_dir_roots(str(tmp_path))
+        monkeypatch.setattr(
+            sd,
+            "discover_all_skills",
+            lambda ws, profile, on_services=None: on_services(
+                [ref("triage"), ref("scoring", catalog="ml", schema="prod")]
+            ),
+        )
+        appended = []
+
+        sd._skills_download_background_loader(WS, "profile", roots)(appended.extend)
+
+        assert [c.value for c in appended] == ["main.default.triage", "ml.prod.scoring"]
+
+    def test_prompt_returns_selected_fqns(self, tmp_path, monkeypatch):
+        roots = skill_dir_roots(str(tmp_path))
+        loader = lambda append: None  # noqa: E731
+        captured = {}
+
+        def fake_checkbox(message, *, choices, instruction, style, background_loader, loading_noun):
+            captured.update(loading_noun=loading_noun, background_loader=background_loader)
+            return _FakePrompt(["main.default.triage", "ml.prod.scoring"])
+
+        monkeypatch.setattr(sd, "scrolling_checkbox", fake_checkbox)
+
+        assert sd.prompt_for_skill_download_choices(roots, loader) == [
+            "main.default.triage",
+            "ml.prod.scoring",
+        ]
+        assert captured["loading_noun"] == "skills"
+        assert captured["background_loader"] is loader
+
+    def test_prompt_returns_none_on_cancel(self, tmp_path, monkeypatch):
+        roots = skill_dir_roots(str(tmp_path))
+        monkeypatch.setattr(sd, "scrolling_checkbox", lambda *a, **k: _FakePrompt(None))
+
+        assert sd.prompt_for_skill_download_choices(roots, lambda append: None) is None
+
+
+class TestConfigureSkillsDownloadPickerCommand:
+    def _stub(self, monkeypatch, fqns):
+        calls: dict[str, object] = {}
+        monkeypatch.setattr(sd, "load_state", lambda: {"state": True})
+        monkeypatch.setattr(
+            sd, "setup_mcp_clients", lambda state, section: (WS, "profile", ["claude"])
+        )
+        monkeypatch.setattr(sd, "get_databricks_token", lambda ws, profile: "token")
+        monkeypatch.setattr(
+            sd, "_skills_download_background_loader", lambda ws, profile, roots: "loader"
+        )
+        monkeypatch.setattr(sd, "prompt_for_skill_download_choices", lambda roots, loader: fqns)
+        monkeypatch.setattr(
+            sd,
+            "download_selected_skills",
+            lambda ws, tok, selected, path: calls.update(download=(ws, tok, selected, path)),
+        )
+        monkeypatch.setattr(
+            sd,
+            "register_schemaless_skills_connection",
+            lambda state, ws, profile, clients: calls.update(register=(ws, profile, clients)),
+        )
+        return calls
+
+    def test_downloads_selected_then_registers(self, tmp_path, monkeypatch):
+        calls = self._stub(monkeypatch, ["main.default.triage"])
+
+        assert sd.configure_skills_download_picker_command(path=str(tmp_path)) == 0
+
+        assert calls["download"] == (WS, "token", ["main.default.triage"], str(tmp_path))
+        assert calls["register"] == (WS, "profile", ["claude"])
+
+    def test_cancel_downloads_nothing_and_skips_register(self, monkeypatch):
+        calls = self._stub(monkeypatch, None)
+
+        assert sd.configure_skills_download_picker_command() == 0
+
+        assert "download" not in calls
+        assert "register" not in calls
