@@ -38,11 +38,7 @@ def codex_config_precedence_paths(
     cli_config = profile_path
     # Lowest precedence: $CODEX_HOME/config.toml, or ~/.codex/config.toml by default.
     default_config = profile_path.parent / "config.toml"
-    return tuple(
-        path
-        for path in (managed_config, cli_config, default_config)
-        if path is not None
-    )
+    return tuple(path for path in (managed_config, cli_config, default_config) if path is not None)
 
 
 def custom_catalog_models() -> list[str] | None:
