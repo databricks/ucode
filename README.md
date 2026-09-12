@@ -281,7 +281,25 @@ ug skill remove --mcp
 ug skill remove --mcp --agents claude
 ```
 
-`--mcp` is required; removing downloaded skills from disk isn't supported yet.
+#### Remove downloaded skills
+
+Without `--mcp`, `ug skill remove` deletes downloaded skill directories. Only skills
+`ug` downloaded are removed, so a same-named skill you authored is left alone.
+
+```bash
+# Pick from every skill downloaded to disk, across all download bases.
+ug skill remove
+
+# Remove every skill downloaded from a schema (all bases, or one with --path).
+ug skill remove --location main.default
+ug skill remove --location main.default --path /abs/project/dir
+
+# Remove named skills by fully-qualified name (may span schemas).
+ug skill remove --skills main.default.my-skill,ml.prod.other-skill
+```
+
+`--location` and `--skills` each accept `--path` to limit removal to one download base, and are
+mutually exclusive with each other.
 
 ### Exporting the config
 
@@ -350,6 +368,9 @@ The output looks like:
 | `ug skill add --skills main.default.my-skill` | Download named skills by fully-qualified name (comma-separated; may span schemas) |
 | `ug skill remove --mcp` | Remove skill schemas from the skills MCP connection (every agent) |
 | `ug skill remove --mcp --agents claude` | Remove skill schemas from specific agents only, keeping them on the rest |
+| `ug skill remove` | Pick from every downloaded skill (across all bases) and delete it from disk |
+| `ug skill remove --location main.default [--path <dir>]` | Delete every skill downloaded from a schema (all bases, or one under `<dir>`) |
+| `ug skill remove --skills main.default.my-skill [--path <dir>]` | Delete named downloaded skills by fully-qualified name (comma-separated; may span schemas; `--path` limits to one base) |
 
 Databricks AI Tools are installed only by `ug configure`, never by `ug <agent>` launches.
 Use `--enable-databricks-ai-tools` or `--disable-databricks-ai-tools` with `ug configure` to

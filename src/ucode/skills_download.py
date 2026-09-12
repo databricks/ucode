@@ -19,7 +19,14 @@ from ucode.databricks import (
     workspace_hostname,
 )
 from ucode.mcp import register_schemaless_skills_connection, setup_mcp_clients
-from ucode.skills_state import SkillInstall, record_downloads
+from ucode.skills_state import (
+    SkillInstall,
+    list_downloaded,
+    record_downloads,
+    records_for_fqns,
+    records_for_schema,
+    remove_downloads,
+)
 from ucode.state import load_state
 from ucode.ui import (
     console,
@@ -676,4 +683,84 @@ def configure_skills_download_picker_command(path: str | None = None) -> int:
 
     download_selected_skills(workspace, token, fqns, path)
     register_schemaless_skills_connection(state, workspace, profile, clients)
+    return 0
+
+
+# --- Removing and listing downloaded skills ---------------------------------
+
+
+def _record_dirs_missing(record: dict) -> bool:
+    """Whether any of a record's on-disk directories no longer exists."""
+    return any(not Path(directory).exists() for directory in record.get("dirs") or [])
+
+
+def _download_label(record: dict) -> str:
+    label = f"{record.get('fqn')}  ({record.get('scope')}: {record.get('base')})"
+    return f"{label}  (missing)" if _record_dirs_missing(record) else label
+
+
+def _removal_choice(record: dict, index: int) -> questionary.Choice:
+    """Picker row for one downloaded skill, labeled by its scope and base (and missing dirs)."""
+    return questionary.Choice(title=_download_label(record), value=index)
+
+
+def _prompt_for_downloaded_skill_removal(records: list[dict]) -> list[dict] | None:
+    """Checklist of downloaded skills to remove, across every base.
+
+    Returns the selected records, ``None`` if cancelled (Ctrl-C), or ``[]`` if nothing
+    is checked. Only recorded downloads are offered, so a user-authored skill directory
+    with no attribution can never be selected.
+    """
+    if not records:
+        print_note("No downloaded skills to remove.")
+        return []
+    choices = [_removal_choice(record, index) for index, record in enumerate(records)]
+    selection = scrolling_checkbox(
+        "Remove downloaded skills:",
+        choices=choices,
+        style=picker_style(),
+        instruction="(space to toggle, ctrl-a all, enter to remove, type to filter)",
+    ).ask()
+    if selection is None:
+        return None
+    return [records[int(index)] for index in selection]
+
+
+def remove_downloaded_skills_command(
+    locations: list[str], fqns: list[str] | None = None, *, path: str | None
+) -> int:
+    """`ug skill remove` (download side): delete downloaded skills and forget them.
+
+    With ``fqns``, removes those fully-qualified skills; with ``locations``, every skill
+    downloaded from those ``<catalog>.<schema>`` schemas; with neither, opens a picker over
+    every downloaded skill. ``path`` limits any of these to one download base. Removal is
+    driven entirely by attribution, so a same-named skill the user authored is never touched.
+    """
+    if fqns is not None:
+        records = records_for_fqns(set(fqns), path)
+        if not records:
+            scope = f" under `{path}`" if path else ""
+            joined = ", ".join(f"`{fqn}`" for fqn in fqns) or "those names"
+            print_note(f"No downloaded skills matching {joined}{scope}.")
+            return 0
+    elif locations:
+        records = [
+            record for location in locations for record in records_for_schema(location, path)
+        ]
+        if not records:
+            scope = f" under `{path}`" if path else ""
+            joined = ", ".join(f"`{location}`" for location in locations)
+            print_note(f"No downloaded skills from {joined}{scope}.")
+            return 0
+    else:
+        selected = _prompt_for_downloaded_skill_removal(list_downloaded())
+        if selected is None:
+            return 0
+        if not selected:
+            print_note("No skills selected.")
+            return 0
+        records = selected
+
+    remove_downloads(records)
+    print_success(f"Removed {len(records)} downloaded skill(s).")
     return 0
