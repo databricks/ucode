@@ -500,19 +500,27 @@ def _smart_routing_config_model(state: dict) -> str | None:
     model = state.get("codex_default_model")
     if isinstance(model, str) and model.strip():
         return model
+
+    for path in config_precedence_paths():
+        model = read_toml_safe(path).get("model")
+        if isinstance(model, str) and model.strip():
+            return model
+    return None
+
+
+def config_precedence_paths() -> tuple[Path, ...]:
+    """Return Codex config paths in managed, profile, then user precedence."""
     config_home = os.environ.get("CODEX_HOME")
     profile_path = (
         Path(config_home).expanduser() / f"{CODEX_PROFILE_NAME}.config.toml"
         if config_home
         else CODEX_CONFIG_PATH
     )
-    for path in (_managed_config_path(), profile_path, profile_path.parent / "config.toml"):
-        if path is None:
-            continue
-        model = read_toml_safe(path).get("model")
-        if isinstance(model, str) and model.strip():
-            return model
-    return None
+    return tuple(
+        path
+        for path in (_managed_config_path(), profile_path, profile_path.parent / "config.toml")
+        if path is not None
+    )
 
 
 def clear_model_preferences(state: dict) -> bool:

@@ -107,11 +107,9 @@ def custom_catalog_models() -> list[str] | None:
     administrator exposed, so there is no need to read the cached model services.
     """
     try:
-        from ucode.agents.codex import CODEX_CONFIG_PATH, _managed_config_path
+        from ucode.agents.codex import config_precedence_paths
 
-        # Hierarchy: managed settings, CLI-supplied settings (the ucode profile config passed as
-        # `--config` overrides), then the local `$CODEX_HOME/config.toml`.
-        paths = [_managed_config_path(), CODEX_CONFIG_PATH, _codex_home_config_path()]
+        paths = config_precedence_paths()
     except (ImportError, OSError):
         return None
     for path in paths:
@@ -524,10 +522,9 @@ def _cached_routing_models(state: dict) -> list[str]:
 
 
 def _codex_home_config_path() -> Path:
-    codex_home = os.environ.get("CODEX_HOME")
-    if codex_home:
-        return Path(codex_home).expanduser() / "config.toml"
-    return Path.home() / ".codex" / "config.toml"
+    from ucode.agents.codex import config_precedence_paths
+
+    return config_precedence_paths()[-1]
 
 
 def _v2_pre_tool_use_hooks(state: dict, available_models: list[str]) -> list[dict]:

@@ -372,7 +372,7 @@ class TestCustomCatalogModels:
         home.mkdir()
         monkeypatch.setenv("CODEX_HOME", str(home))
         managed_path = tmp_path / "managed_config.toml"
-        cli_path = tmp_path / "ucode.config.toml"
+        cli_path = home / "ucode.config.toml"
         local_path = home / "config.toml"
         for path, catalog in (
             (managed_path, managed),
