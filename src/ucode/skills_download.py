@@ -527,7 +527,7 @@ def list_all_skills(
     *,
     deadline_seconds: float = _SKILLS_WALK_DEADLINE_SECONDS,
     on_progress: Callable[[int, int, int], None] | None = None,
-    on_services: Callable[[list[SkillRef]], None] | None = None,
+    on_skills: Callable[[list[SkillRef]], None] | None = None,
 ) -> tuple[list[SkillRef], str | None]:
     """Return every finalized skill across all ``<catalog>.<schema>`` in the workspace, by FQN.
 
@@ -535,7 +535,7 @@ def list_all_skills(
     skills in parallel under a wall-clock budget, returning partial results once
     ``deadline_seconds`` is exceeded. ``on_progress`` is called as each schema
     completes with ``(schemas_done, schemas_total, skills_found)``, and
-    ``on_services`` with each schema's newly-found refs (deduped by FQN against
+    ``on_skills`` with each schema's newly-found refs (deduped by FQN against
     everything emitted so far) so a picker can stream them in as the walk runs.
     The workspace-wide counterpart to ``list_schema_skills``.
     """
@@ -552,8 +552,8 @@ def list_all_skills(
             by_fqn[ref.fqn] = ref
         if on_progress is not None:
             on_progress(done, total, len(by_fqn))
-        if on_services is not None and new:
-            on_services(sorted(new, key=lambda ref: ref.fqn))
+        if on_skills is not None and new:
+            on_skills(sorted(new, key=lambda ref: ref.fqn))
 
     reason = walk_catalog_schemas(workspace, token, deadline=deadline, probe=probe, collect=collect)
     if reason is not None:
@@ -581,10 +581,10 @@ def _skills_download_background_loader(
     """A picker ``background_loader`` that streams the workspace-wide skill walk in as choices."""
 
     def loader(append: Callable[[list[questionary.Choice]], None]) -> None:
-        def on_services(refs: list[SkillRef]) -> None:
+        def on_skills(refs: list[SkillRef]) -> None:
             append([_skill_download_choice(ref, roots) for ref in refs])
 
-        list_all_skills(workspace, token, on_services=on_services)
+        list_all_skills(workspace, token, on_skills=on_skills)
 
     return loader
 
