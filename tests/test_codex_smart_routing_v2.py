@@ -367,41 +367,53 @@ class TestCustomCatalogModels:
         )
         return path
 
-    def _settings(self, tmp_path, monkeypatch, *, managed=None, cli=None, local=None):
+    def _settings(self, tmp_path, monkeypatch, *, managed=None, cli=None, default=None):
         home = tmp_path / "codex-home"
         home.mkdir()
         monkeypatch.setenv("CODEX_HOME", str(home))
         managed_path = tmp_path / "managed_config.toml"
         cli_path = home / "ucode.config.toml"
-        local_path = home / "config.toml"
+        default_path = home / "config.toml"
         for path, catalog in (
             (managed_path, managed),
             (cli_path, cli),
-            (local_path, local),
+            (default_path, default),
         ):
             if catalog:
                 text = "model_catalog_json = " + json.dumps(str(catalog)) + "\n"
             else:
                 text = 'model = "gpt-5"\n'
             path.write_text(text, encoding="utf-8")
-        monkeypatch.setattr(codex, "_managed_config_path", lambda: managed_path)
-        monkeypatch.setattr(codex, "CODEX_CONFIG_PATH", cli_path)
+        monkeypatch.setattr(v2, "codex_managed_config_path", lambda: managed_path)
+        monkeypatch.setattr(v2, "DEFAULT_CODEX_CONFIG_PATH", cli_path)
 
     @pytest.mark.parametrize(
-        ("catalogs", "expected"),
+        ("managed_catalog", "cli_catalog", "default_catalog", "expected"),
         [
-            (("gpt-managed", "gpt-profile", "gpt-user"), ["gpt-managed"]),
-            ((None, "gpt-profile", "gpt-user"), ["gpt-profile"]),
-            ((None, None, "gpt-user"), ["gpt-user"]),
-            ((None, None, None), None),
+            ("gpt-managed", "gpt-cli", "gpt-default", ["gpt-managed"]),
+            (None, "gpt-cli", "gpt-default", ["gpt-cli"]),
+            (None, None, "gpt-default", ["gpt-default"]),
+            (None, None, None, None),
         ],
     )
-    def test_config_precedence(self, tmp_path, monkeypatch, catalogs, expected):
-        managed, cli, local = (
+    def test_config_precedence(
+        self,
+        tmp_path,
+        monkeypatch,
+        managed_catalog,
+        cli_catalog,
+        default_catalog,
+        expected,
+    ):
+        managed, cli, default = (
             self._catalog(tmp_path / f"{name}.json", [slug]) if slug else None
-            for name, slug in zip(("managed", "cli", "local"), catalogs, strict=True)
+            for name, slug in (
+                ("managed", managed_catalog),
+                ("cli", cli_catalog),
+                ("default", default_catalog),
+            )
         )
-        self._settings(tmp_path, monkeypatch, managed=managed, cli=cli, local=local)
+        self._settings(tmp_path, monkeypatch, managed=managed, cli=cli, default=default)
 
         assert v2.custom_catalog_models() == expected
 
@@ -423,6 +435,8 @@ class TestCustomCatalogModels:
         monkeypatch.setattr(v2, "get_databricks_token", lambda *_args: "token")
         monkeypatch.setattr(v2, "_free_port", lambda: 41001)
         monkeypatch.setattr(v2, "_wait_for_app_server", lambda port, timeout: True)
+        monkeypatch.setattr(codex, "agent_version", lambda _binary: "0.145.0")
+        monkeypatch.setattr(codex, "ucode_version", lambda: "test")
         launched = []
 
         class FakeProcess:

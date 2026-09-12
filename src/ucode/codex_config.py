@@ -23,15 +23,22 @@ def codex_managed_config_path() -> Path | None:
 
 def codex_config_precedence_paths(
     managed_path: Path | None,
-    profile_path: Path = DEFAULT_CODEX_CONFIG_PATH,
+    profile_path: Path,
 ) -> tuple[Path, ...]:
     """Return Codex config paths in managed, profile, then user precedence."""
     config_home = os.environ.get("CODEX_HOME")
     if config_home:
         profile_path = Path(config_home).expanduser() / f"{CODEX_PROFILE_NAME}.config.toml"
+
+    # Highest precedence: machine-managed settings, normally /etc/codex/managed_config.toml.
+    managed_config = managed_path
+    # Middle precedence: Unity Gateway's ucode.config.toml layer passed to Codex via the CLI.
+    cli_config = profile_path
+    # Lowest precedence: $CODEX_HOME/config.toml, or ~/.codex/config.toml by default.
+    default_config = profile_path.parent / "config.toml"
     return tuple(
         path
-        for path in (managed_path, profile_path, profile_path.parent / "config.toml")
+        for path in (managed_config, cli_config, default_config)
         if path is not None
     )
 
