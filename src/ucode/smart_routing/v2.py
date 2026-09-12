@@ -32,7 +32,7 @@ from ucode.smart_routing.claude_hooks import (
     sync_smart_routing_hooks,
 )
 from ucode.smart_routing.codex_hooks import merge_pre_tool_use_hooks, routing_models
-from ucode.ui import print_note
+from ucode.ui import print_note, print_warning
 
 ENV_VAR = "ENABLE_SMART_ROUTING_V2"
 LEGACY_STATE_KEY = "smart_routing_enabled"
@@ -98,6 +98,57 @@ def _model_picker_catalog() -> AnthropicModelCatalog | None:
         if model_ids:
             return AnthropicModelCatalog(model_ids, {})
     return None
+
+
+def custom_catalog_models() -> list[str] | None:
+    """Read model slugs from a model_catalog_json custom catalog, when one is configured.
+
+    A custom catalog is authoritative for smart routing: its models are the ones the
+    administrator exposed, so there is no need to read the cached model services.
+    """
+    try:
+        from ucode.agents.codex import CODEX_CONFIG_PATH, _managed_config_path
+
+        # Hierarchy: managed settings, CLI-supplied settings (the ucode profile config passed as
+        # `--config` overrides), then the local `$CODEX_HOME/config.toml`.
+        paths = [_managed_config_path(), CODEX_CONFIG_PATH, _codex_home_config_path()]
+    except (ImportError, OSError):
+        return None
+    for path in paths:
+        if path is None or not path.is_file():
+            continue
+        settings = read_toml_safe(path)
+        catalog_ref = settings.get("model_catalog_json")
+        if not isinstance(catalog_ref, str) or not catalog_ref.strip():
+            continue
+        slugs = _catalog_slugs(Path(catalog_ref).expanduser())
+        if slugs:
+            return slugs
+        print_warning(
+            f"Codex smart routing could not read models from the custom catalog {catalog_ref} "
+            f"referenced by {path}; falling back to the cached model services."
+        )
+        return None
+    return None
+
+
+def _catalog_slugs(path: Path) -> list[str]:
+    """Extract deduplicated model slugs from a Codex custom catalog JSON file."""
+    catalog = read_json_safe(path)
+    models = catalog.get("models")
+    if not isinstance(models, list):
+        return []
+    slugs: list[str] = []
+    seen: set[str] = set()
+    for row in models:
+        if not isinstance(row, dict) or not isinstance(row.get("slug"), str):
+            continue
+        slug = row["slug"].strip()
+        if not slug or slug in seen:
+            continue
+        seen.add(slug)
+        slugs.append(slug)
+    return slugs
 
 
 def enabled() -> bool:
@@ -510,7 +561,13 @@ def launch_codex(
 
     profile = state.get("profile")
     os.environ[OAUTH_TOKEN_ENV_VAR] = get_databricks_token(workspace, profile)
-    available_models = _cached_routing_models(state)
+    catalog_models = custom_catalog_models()
+    available_models = catalog_models or _cached_routing_models(state)
+    if catalog_models:
+        print_note(
+            f"Smart routing v2: routing across {len(catalog_models)} models from the configured "
+            "Codex custom catalog (model_catalog_json); cached model services are not used."
+        )
     if not available_models:
         print_note(
             f"Smart routing model metadata is unavailable; starting Codex on {start_model} "
