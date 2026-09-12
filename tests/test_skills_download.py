@@ -23,6 +23,7 @@ def ref(
     *,
     catalog: str = "main",
     schema: str = "default",
+    description: str | None = None,
 ) -> SkillRef:
     """A SkillRef whose two names match unless a differing bundle name is given."""
     return SkillRef(
@@ -30,6 +31,7 @@ def ref(
         schema=schema,
         securable_name=securable_name,
         bundle_name=bundle_name or securable_name,
+        description=description,
     )
 
 
@@ -56,6 +58,23 @@ class TestListSchemaSkills:
 
         assert reason is None
         assert refs == [ref("pii-handling"), ref("triage")]
+
+    def test_carries_description_when_present(self, monkeypatch):
+        payload = {
+            "skills": [
+                {
+                    "name": "skills/main.default.triage",
+                    "bundle_name": "triage",
+                    "finalize_time": "2026-06-26T05:58:25Z",
+                    "description": "Routes tickets by severity.",
+                }
+            ]
+        }
+        monkeypatch.setattr(sd, "_http_get_json", lambda url, token, timeout=30: (payload, None))
+
+        refs, _ = sd.list_schema_skills(WS, "token", "main", "default")
+
+        assert refs == [ref("triage", description="Routes tickets by severity.")]
 
     def test_keeps_both_names_when_bundle_differs_from_securable(self, monkeypatch):
         # bundle_name comes from the bundle's SKILL.md frontmatter, so it can
@@ -999,17 +1018,31 @@ class TestListAllSkills:
 
 
 class TestSkillDownloadPicker:
-    def test_choice_value_is_fqn_and_flags_on_disk(self, tmp_path):
+    def test_choice_value_is_fqn_flags_on_disk_and_carries_description(self, tmp_path):
         roots = skill_dir_roots(str(tmp_path))
 
-        fresh = sd._skill_download_choice(ref("triage"), roots)
+        fresh = sd._skill_download_choice(ref("triage", description="Routes tickets."), roots)
         assert fresh.value == "main.default.triage"
         assert "(on disk)" not in fresh.title
+        assert fresh.description == "triage: Routes tickets."
 
         write_skill(roots, ref("triage"), {"SKILL.md": b"x"})
         existing = sd._skill_download_choice(ref("triage"), roots)
         assert existing.value == "main.default.triage"
         assert "(on disk)" in existing.title
+
+    def test_choice_description_labels_by_bundle_name_not_securable(self, tmp_path):
+        roots = skill_dir_roots(str(tmp_path))
+        diverging = ref("task-prioritizer", "task-triage", description="Ranks work.")
+
+        choice = sd._skill_download_choice(diverging, roots)
+
+        assert choice.description == "task-triage: Ranks work."
+
+    def test_choice_without_description_has_no_footer_text(self, tmp_path):
+        roots = skill_dir_roots(str(tmp_path))
+
+        assert sd._skill_download_choice(ref("triage"), roots).description is None
 
     def test_background_loader_streams_the_walk_in_as_choices(self, tmp_path, monkeypatch):
         roots = skill_dir_roots(str(tmp_path))
@@ -1033,8 +1066,8 @@ class TestSkillDownloadPicker:
         loader = lambda append: None  # noqa: E731
         captured = {}
 
-        def fake_checkbox(message, *, choices, instruction, style, background_loader, loading_noun):
-            captured.update(loading_noun=loading_noun, background_loader=background_loader)
+        def fake_checkbox(message, *, choices, instruction, style, background_loader, **kwargs):
+            captured.update(background_loader=background_loader, **kwargs)
             return _FakePrompt(["main.default.triage", "ml.prod.scoring"])
 
         monkeypatch.setattr(sd, "scrolling_checkbox", fake_checkbox)
@@ -1044,6 +1077,7 @@ class TestSkillDownloadPicker:
             "ml.prod.scoring",
         ]
         assert captured["loading_noun"] == "skills"
+        assert captured["show_description"] is True
         assert captured["background_loader"] is loader
 
     def test_prompt_returns_none_on_cancel(self, tmp_path, monkeypatch):

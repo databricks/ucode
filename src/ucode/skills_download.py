@@ -57,13 +57,15 @@ class SkillRef:
     ``name:`` an agent reads from the bundle's SKILL.md frontmatter, so it names
     the on-disk directory. Finalize does not require the securable and bundle name
     to match, so a skill created under a securable that differs from its
-    frontmatter carries both.
+    frontmatter carries both. ``description`` is the skill's UC description, used only
+    to preview a skill in the interactive picker.
     """
 
     catalog: str
     schema: str
     securable_name: str
     bundle_name: str
+    description: str | None = None
 
     @property
     def fqn(self) -> str:
@@ -110,7 +112,11 @@ def _skill_ref(skill: dict) -> SkillRef | None:
         return None
     catalog, schema, securable_name = parts
     return SkillRef(
-        catalog=catalog, schema=schema, securable_name=securable_name, bundle_name=bundle_name
+        catalog=catalog,
+        schema=schema,
+        securable_name=securable_name,
+        bundle_name=bundle_name,
+        description=_non_empty_str(skill.get("description")),
     )
 
 
@@ -569,10 +575,13 @@ def _skill_download_choice(ref: SkillRef, roots: list[Path]) -> questionary.Choi
     """Picker row for one skill: value is its FQN, title flags an on-disk bundle.
 
     On-disk skills stay selectable, since re-downloading is a legitimate update and
-    the existing overwrite prompt confirms it.
+    the existing overwrite prompt confirms it. The detail footer previews the
+    description behind a bold bundle-name label (the row itself shows the FQN, so the
+    bundle name is the one identifier not otherwise on screen).
     """
     on_disk = " (on disk)" if existing_skill_on_disk(roots, ref.bundle_name) else ""
-    return questionary.Choice(title=f"{ref.fqn}{on_disk}", value=ref.fqn)
+    description = f"{ref.bundle_name}: {ref.description}" if ref.description else None
+    return questionary.Choice(title=f"{ref.fqn}{on_disk}", value=ref.fqn, description=description)
 
 
 def _skills_download_background_loader(
@@ -601,6 +610,7 @@ def prompt_for_skill_download_choices(
         style=picker_style(),
         background_loader=background_loader,
         loading_noun="skills",
+        show_description=True,
     ).ask()
     if selection is None:
         return None
