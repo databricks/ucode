@@ -1364,12 +1364,23 @@ def launch(
 
 
 def validate_cmd(binary: str) -> list[str]:
+    # A launch smoke test only proves auth + routing round-trip, so strip everything that
+    # bloats the request: built-in tool schemas (`--tools ""`), any MCP server tool defs
+    # (`--strict-mcp-config`), and Claude Code's large default system prompt (replaced with a
+    # one-liner). Together these dominate the token count — trimming them cuts a probe from
+    # ~25k input tokens to ~2k. The relayed path bills a real Anthropic subscription, so
+    # keeping each probe small matters most there.
     return [
         binary,
         "--settings",
         str(CLAUDE_SETTINGS_PATH),
+        "--tools",
+        "",
+        "--strict-mcp-config",
+        "--system-prompt",
+        "Reply in 5 words or less.",
         "-p",
-        "say hi in 5 words or less",
+        "hi",
         "--max-turns",
         "1",
     ]
