@@ -1512,6 +1512,40 @@ class TestSkillsAddCommand:
         assert result.exit_code == 0, result.output
         mock_picker.assert_called_once_with(path="/tmp/s")
 
+    def test_mcp_no_location_interactive_opens_schema_picker(self):
+        with (
+            patch("ucode.cli._stdin_is_interactive", return_value=True),
+            patch("ucode.cli.configure_skills_mcp_picker_command") as mock_picker,
+            patch("ucode.cli.configure_skills_download_picker_command") as mock_download,
+        ):
+            result = runner.invoke(app, ["skill", "add", "--mcp"])
+        assert result.exit_code == 0, result.output
+        mock_picker.assert_called_once_with(agents=None)
+        mock_download.assert_not_called()
+
+    def test_mcp_no_location_non_interactive_exit_1(self):
+        with (
+            patch("ucode.cli._stdin_is_interactive", return_value=False),
+            patch("ucode.cli.configure_skills_mcp_picker_command") as mock_picker,
+        ):
+            result = runner.invoke(app, ["skill", "add", "--mcp"])
+        assert result.exit_code == 1
+        assert "--location is required" in _strip_ansi(result.output)
+        mock_picker.assert_not_called()
+
+    def test_mcp_picker_with_agents_forwards_scope(self):
+        with (
+            patch("ucode.cli._stdin_is_interactive", return_value=True),
+            patch(
+                "ucode.cli._configure_agents_for_mcp", return_value={"claude", "codex"}
+            ) as configure,
+            patch("ucode.cli.configure_skills_mcp_picker_command") as mock_picker,
+        ):
+            result = runner.invoke(app, ["skill", "add", "--mcp", "--agents", "codex,claude"])
+        assert result.exit_code == 0, result.output
+        configure.assert_called_once_with(["claude", "codex"])
+        mock_picker.assert_called_once_with(agents={"claude", "codex"})
+
     def test_skills_bypass_picker_even_when_interactive(self):
         with (
             patch("ucode.cli._stdin_is_interactive", return_value=True),

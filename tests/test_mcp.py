@@ -2306,6 +2306,118 @@ class TestAddSkillsCommand:
         assert configured == []
 
 
+class TestConfiguredSkillLocations:
+    def test_unions_locations_across_targeted_clients(self):
+        state = _skills_state(
+            mcp._resolve_skills_mcp_servers(
+                WS, ["claude", "codex"], {"claude": ["A.a", "B.b"], "codex": ["C.c"]}, []
+            )
+        )
+        assert mcp.configured_skill_locations(state, ["claude", "codex"]) == {"A.a", "B.b", "C.c"}
+        assert mcp.configured_skill_locations(state, ["claude"]) == {"A.a", "B.b"}
+
+    def test_empty_when_nothing_configured(self):
+        assert mcp.configured_skill_locations(_skills_state(), ["claude"]) == set()
+
+
+class _FakePrompt:
+    def __init__(self, result):
+        self._result = result
+
+    def ask(self):
+        return self._result
+
+
+def _skill_ref(securable, *, catalog="main", schema="default"):
+    from ucode.skills_api import SkillRef
+
+    return SkillRef(catalog=catalog, schema=schema, securable_name=securable, bundle_name=securable)
+
+
+class TestSkillSchemaPicker:
+    def test_choice_value_is_location_and_shows_count(self):
+        choice = mcp._skill_schema_choice("main.default", 3, in_scope=False)
+        assert choice.value == "main.default"
+        assert "3 skills" in choice.title
+        assert "already in skill MCP" not in choice.title
+
+    def test_choice_singular_count_and_in_scope_flag(self):
+        choice = mcp._skill_schema_choice("ml.prod", 1, in_scope=True)
+        assert "1 skill" in choice.title and "1 skills" not in choice.title
+        assert "already in skill MCP" in choice.title
+
+    def test_background_loader_streams_one_row_per_schema(self, monkeypatch):
+        def fake_list_all(ws, tok, *, on_skills=None, **kwargs):
+            on_skills([_skill_ref("triage"), _skill_ref("pii")])
+            on_skills([_skill_ref("scoring", catalog="ml", schema="prod")])
+            return [], None
+
+        monkeypatch.setattr(mcp, "list_all_skills", fake_list_all)
+        appended = []
+
+        mcp._skill_schema_background_loader(WS, "token", {"ml.prod"})(appended.extend)
+
+        assert [c.value for c in appended] == ["main.default", "ml.prod"]
+        assert "2 skills" in appended[0].title and "already in skill MCP" not in appended[0].title
+        assert "already in skill MCP" in appended[1].title
+
+    def test_prompt_returns_selected_locations(self, monkeypatch):
+        loader = lambda append: None  # noqa: E731
+        captured = {}
+
+        def fake_checkbox(message, *, choices, instruction, style, background_loader, **kwargs):
+            captured.update(background_loader=background_loader, **kwargs)
+            return _FakePrompt(["main.default", "ml.prod"])
+
+        monkeypatch.setattr(mcp, "scrolling_checkbox", fake_checkbox)
+
+        assert mcp.prompt_for_skill_schema_choices(loader) == ["main.default", "ml.prod"]
+        assert captured["loading_noun"] == "skill schemas"
+        assert captured["background_loader"] is loader
+
+    def test_prompt_returns_none_on_cancel(self, monkeypatch):
+        monkeypatch.setattr(mcp, "scrolling_checkbox", lambda *a, **k: _FakePrompt(None))
+        assert mcp.prompt_for_skill_schema_choices(lambda append: None) is None
+
+
+class TestConfigureSkillsMcpPickerCommand:
+    def _stub(self, monkeypatch, locations):
+        calls: dict[str, object] = {}
+        monkeypatch.setattr(mcp, "load_state", lambda: {"state": True})
+        monkeypatch.setattr(
+            mcp,
+            "setup_mcp_clients",
+            lambda state, section, agents=None: (WS, "profile", ["claude"]),
+        )
+        monkeypatch.setattr(mcp, "get_databricks_token", lambda ws, profile=None: "token")
+        monkeypatch.setattr(mcp, "configured_skill_locations", lambda state, clients: {"A.a"})
+        monkeypatch.setattr(
+            mcp, "_skill_schema_background_loader", lambda ws, token, in_scope: "loader"
+        )
+        monkeypatch.setattr(mcp, "prompt_for_skill_schema_choices", lambda loader: locations)
+
+        def fake_add(state, ws, profile, clients, locs):
+            calls["added"] = (ws, profile, clients, locs)
+
+        monkeypatch.setattr(mcp, "add_skill_locations_to_mcp", fake_add)
+        return calls
+
+    def test_adds_selected_locations(self, monkeypatch):
+        calls = self._stub(monkeypatch, ["main.default", "ml.prod"])
+        assert mcp.configure_skills_mcp_picker_command() == 0
+        assert calls["added"] == (WS, "profile", ["claude"], ["main.default", "ml.prod"])
+
+    def test_cancel_adds_nothing(self, monkeypatch):
+        calls = self._stub(monkeypatch, None)
+        assert mcp.configure_skills_mcp_picker_command() == 0
+        assert "added" not in calls
+
+    def test_empty_selection_adds_nothing(self, monkeypatch):
+        calls = self._stub(monkeypatch, [])
+        assert mcp.configure_skills_mcp_picker_command() == 0
+        assert "added" not in calls
+
+
 class TestRemoveSkillsCommand:
     def _state(self, by_client=None):
         by_client = by_client or _by_client(["claude", "codex"], ["A.a", "B.b"])
