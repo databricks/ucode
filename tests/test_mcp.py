@@ -2536,6 +2536,78 @@ class TestRemoveSkillsCommand:
         assert "called" not in captured
 
 
+class TestRemoveSkillsLocationsCommand:
+    """`ug skill remove --mcp --location`: non-interactive schema removal from the skills scope."""
+
+    def _state(self, by_client=None):
+        by_client = by_client or _by_client(["claude", "codex"], ["A.a", "B.b"])
+        return {
+            "workspace": WS,
+            "available_tools": ["claude", "codex"],
+            "mcp_servers": mcp._resolve_skills_mcp_servers(WS, list(by_client), by_client, []),
+        }
+
+    def _stub(self, monkeypatch, state):
+        configured: list[tuple[str, str]] = []
+        _stub_location_base(monkeypatch, state)
+        monkeypatch.setattr(mcp, "available_mcp_clients", lambda: ["claude", "codex"])
+        monkeypatch.setattr(
+            mcp,
+            "configure_client_mcp_server",
+            lambda client, name, url, *a, **kw: configured.append((client, url)) or [],
+        )
+        monkeypatch.setattr(mcp, "save_state", lambda s: None)
+        return configured
+
+    def test_removes_named_schema_from_every_client(self, monkeypatch):
+        state = self._state()
+        configured = self._stub(monkeypatch, state)
+
+        assert mcp.remove_skills_locations_command(["A.a"]) == 0
+
+        entry = _find_skills(state["mcp_servers"])[0]
+        assert mcp.skill_locations_for_client(entry, "claude") == ["B.b"]
+        assert mcp.skill_locations_for_client(entry, "codex") == ["B.b"]
+        assert sorted(configured) == [
+            ("claude", f"{WS}/ai-gateway/skills/?schema=B.b"),
+            ("codex", f"{WS}/ai-gateway/skills/?schema=B.b"),
+        ]
+
+    def test_schema_not_in_scope_is_a_noop(self, monkeypatch):
+        state = self._state()
+        configured = self._stub(monkeypatch, state)
+
+        assert mcp.remove_skills_locations_command(["Z.z"]) == 0
+
+        entry = _find_skills(state["mcp_servers"])[0]
+        assert mcp.skill_locations_for_client(entry, "claude") == ["A.a", "B.b"]
+        assert configured == []
+
+    def test_agents_removes_from_only_named_client(self, monkeypatch):
+        state = self._state()
+        configured = self._stub(monkeypatch, state)
+
+        assert mcp.remove_skills_locations_command(["A.a"], agents={"claude"}) == 0
+
+        entry = _find_skills(state["mcp_servers"])[0]
+        assert mcp.skill_locations_for_client(entry, "claude") == ["B.b"]
+        assert mcp.skill_locations_for_client(entry, "codex") == ["A.a", "B.b"]
+        assert configured == [("claude", f"{WS}/ai-gateway/skills/?schema=B.b")]
+
+    def test_removing_all_schemas_keeps_schemaless_connection(self, monkeypatch):
+        state = self._state()
+        configured = self._stub(monkeypatch, state)
+
+        assert mcp.remove_skills_locations_command(["A.a", "B.b"]) == 0
+
+        entry = _find_skills(state["mcp_servers"])[0]
+        assert entry["skill_locations"] == []
+        assert sorted(configured) == [
+            ("claude", f"{WS}/ai-gateway/skills/"),
+            ("codex", f"{WS}/ai-gateway/skills/"),
+        ]
+
+
 class TestRegisterSchemalessSkillsConnection:
     def _stub(self, monkeypatch):
         saved_states: list[dict] = []
