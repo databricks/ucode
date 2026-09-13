@@ -1652,15 +1652,21 @@ class TestConfigureAgentsForMcp:
 class TestSkillsRemoveCommand:
     """`ug skill remove`: `--mcp` drops MCP scopes, the default mode deletes downloads."""
 
-    def test_mcp_remove_dispatches_global_removal(self):
-        with patch("ucode.cli.remove_skills_command") as remove:
+    def test_mcp_remove_no_location_interactive_opens_picker(self):
+        with (
+            patch("ucode.cli._stdin_is_interactive", return_value=True),
+            patch("ucode.cli.remove_skills_command") as remove,
+        ):
             result = runner.invoke(app, ["skill", "remove", "--mcp"])
 
         assert result.exit_code == 0, result.output
         remove.assert_called_once_with(agents=None)
 
     def test_mcp_remove_forwards_agent_scope(self):
-        with patch("ucode.cli.remove_skills_command") as remove:
+        with (
+            patch("ucode.cli._stdin_is_interactive", return_value=True),
+            patch("ucode.cli.remove_skills_command") as remove,
+        ):
             result = runner.invoke(app, ["skill", "remove", "--mcp", "--agents", "claude, codex"])
 
         assert result.exit_code == 0, result.output
@@ -1740,11 +1746,52 @@ class TestSkillsRemoveCommand:
         assert "--agents is only supported when using --mcp" in _strip_ansi(result.output)
         mock_remove.assert_not_called()
 
-    def test_mcp_with_location_exit_1(self):
-        with patch("ucode.cli.remove_skills_command") as remove:
-            result = runner.invoke(app, ["skill", "remove", "--mcp", "--location", "a.b"])
+    def test_mcp_with_location_routes_to_location_removal(self):
+        with patch("ucode.cli.remove_skills_locations_command") as remove:
+            result = runner.invoke(app, ["skill", "remove", "--mcp", "--location", "a.b, c.d"])
+        assert result.exit_code == 0, result.output
+        remove.assert_called_once_with(["a.b", "c.d"], agents=None)
+
+    def test_mcp_with_location_forwards_agent_scope(self):
+        with patch("ucode.cli.remove_skills_locations_command") as remove:
+            result = runner.invoke(
+                app,
+                ["skill", "remove", "--mcp", "--location", "a.b", "--agents", "claude, codex"],
+            )
+        assert result.exit_code == 0, result.output
+        remove.assert_called_once_with(["a.b"], agents={"claude", "codex"})
+
+    def test_mcp_no_location_non_interactive_exit_1(self):
+        with (
+            patch("ucode.cli._stdin_is_interactive", return_value=False),
+            patch("ucode.cli.remove_skills_command") as remove,
+            patch("ucode.cli.remove_skills_locations_command") as remove_locations,
+        ):
+            result = runner.invoke(app, ["skill", "remove", "--mcp"])
         assert result.exit_code == 1
-        assert "not supported with --mcp" in _strip_ansi(result.output)
+        assert "--location is required" in _strip_ansi(result.output)
+        remove.assert_not_called()
+        remove_locations.assert_not_called()
+
+    def test_mcp_malformed_location_exit_1(self):
+        with patch("ucode.cli.remove_skills_locations_command") as remove:
+            result = runner.invoke(app, ["skill", "remove", "--mcp", "--location", "a.b.c"])
+        assert result.exit_code == 1
+        assert "--location" in _strip_ansi(result.output)
+        remove.assert_not_called()
+
+    def test_mcp_with_path_exit_1(self):
+        with patch("ucode.cli.remove_skills_locations_command") as remove:
+            result = runner.invoke(app, ["skill", "remove", "--mcp", "--path", "/abs"])
+        assert result.exit_code == 1
+        assert "--path" in _strip_ansi(result.output)
+        remove.assert_not_called()
+
+    def test_mcp_with_skills_exit_1(self):
+        with patch("ucode.cli.remove_skills_locations_command") as remove:
+            result = runner.invoke(app, ["skill", "remove", "--mcp", "--skills", "a.b.s1"])
+        assert result.exit_code == 1
+        assert "--skills" in _strip_ansi(result.output)
         remove.assert_not_called()
 
 

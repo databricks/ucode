@@ -106,6 +106,7 @@ from ucode.mcp import (
     purge_cross_workspace_mcp_residue,
     remove_mcp_command,
     remove_skills_command,
+    remove_skills_locations_command,
     revert_mcp_configs,
     skill_locations_for_client,
 )
@@ -1372,8 +1373,8 @@ def skills_remove(
         str | None,
         typer.Option(
             "--location",
-            help="(download) Comma-separated `<catalog>.<schema>` schemas whose downloaded "
-            "skills to remove.",
+            help="Comma-separated `<catalog>.<schema>` schemas to remove (from the skills MCP "
+            "scope with --mcp, else their downloaded skills).",
         ),
     ] = None,
     mcp: Annotated[
@@ -1412,26 +1413,33 @@ def skills_remove(
 ) -> None:
     """Remove Skills previously added to your coding tools.
 
-    With ``--mcp``, interactively drops skill schemas from the skills MCP connection.
-    Otherwise removes downloaded skill directories: ``--location`` removes every skill
-    downloaded from a ``<catalog>.<schema>``, ``--skills`` removes named fully-qualified
-    skills that may span schemas, and with none of them a picker lists every downloaded
-    skill. ``--path`` limits either to one download base. Only skills ucode downloaded are
-    removed; a same-named skill you authored is left alone.
+    With ``--mcp``, drops skill schemas from the skills MCP connection: ``--location`` removes the
+    named ``<catalog>.<schema>`` schemas, and with none on an interactive terminal a picker lists
+    the scoped schemas. Otherwise removes downloaded skill directories: ``--location`` removes every
+    skill downloaded from a ``<catalog>.<schema>``, ``--skills`` removes named fully-qualified skills
+    that may span schemas, and with none of them a picker lists every downloaded skill. ``--path``
+    limits either to one download base. Only skills ucode downloaded are removed; a same-named skill
+    you authored is left alone.
     """
     try:
         requested_skills = (
             None if skills is None else {s.strip() for s in skills.split(",") if s.strip()}
         )
         if mcp:
-            if location is not None or path is not None or requested_skills is not None:
-                raise RuntimeError("--location, --path, and --skills are not supported with --mcp.")
+            if path is not None or requested_skills is not None:
+                raise RuntimeError("--path and --skills are not supported with --mcp.")
             requested_agents = (
                 None
                 if agents is None
                 else ({a.strip().lower() for a in agents.split(",") if a.strip()} or None)
             )
-            remove_skills_command(agents=requested_agents)
+            locations = _parse_skill_locations(location)
+            if locations:
+                remove_skills_locations_command(locations, agents=requested_agents)
+            elif _stdin_is_interactive():
+                remove_skills_command(agents=requested_agents)
+            else:
+                raise RuntimeError("--location is required for `ug skill remove --mcp`.")
             return
         if agents is not None:
             raise RuntimeError("--agents is only supported when using --mcp.")

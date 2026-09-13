@@ -270,15 +270,19 @@ configured agent. It applies only to `--mcp`, since downloaded skills are shared
 
 #### Remove skill scopes
 
-Remove schemas from the skills MCP connection with `ug skill remove --mcp`:
+Remove schemas from the skills MCP connection with `ug skill remove --mcp`. `--location` drops the
+named schemas; with no `--location` on an interactive terminal a picker lists the scoped schemas.
 
 ```bash
-# Pick schemas to remove; each is removed from every agent it's on.
-ug skill remove --mcp
+# Remove specific schemas from the MCP scope; each is removed from every agent it's on.
+ug skill remove --location main.default,ml.prod --mcp
 
 # Remove from specific agents only. A schema scoped to several agents is
 # removed from the named ones and kept on the rest.
-ug skill remove --mcp --agents claude
+ug skill remove --location main.default --mcp --agents claude
+
+# No --location launches a picker of the scoped schemas to remove.
+ug skill remove --mcp
 ```
 
 #### Remove downloaded skills
@@ -366,8 +370,8 @@ The output looks like:
 | `ug skill add --location main.default --mcp --agents claude,codex` | Add schemas to specific agents' skills MCP scope (sets up any not yet configured) |
 | `ug skill add --location main.default` | Download a schema's skills to disk without removing existing downloads |
 | `ug skill add --skills main.default.my-skill` | Download named skills by fully-qualified name (comma-separated; may span schemas) |
-| `ug skill remove --mcp` | Remove skill schemas from the skills MCP connection (every agent) |
-| `ug skill remove --mcp --agents claude` | Remove skill schemas from specific agents only, keeping them on the rest |
+| `ug skill remove --location main.default --mcp` | Remove specific schemas from the skills MCP scope, or omit `--location` on a TTY for a picker (every agent) |
+| `ug skill remove --location main.default --mcp --agents claude` | Remove schemas from specific agents' skills MCP scope, keeping them on the rest |
 | `ug skill remove` | Pick from every downloaded skill (across all bases) and delete it from disk |
 | `ug skill remove --location main.default [--path <dir>]` | Delete every skill downloaded from a schema (all bases, or one under `<dir>`) |
 | `ug skill remove --skills main.default.my-skill [--path <dir>]` | Delete named downloaded skills by fully-qualified name (comma-separated; may span schemas; `--path` limits to one base) |
