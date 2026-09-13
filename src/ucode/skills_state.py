@@ -178,9 +178,29 @@ def records_for_schema(location: str, base: str | None = None) -> list[dict]:
     ]
 
 
+def records_for_fqns(fqns: set[str], base: str | None = None) -> list[dict]:
+    """Installs whose fully-qualified name is in ``fqns``, optionally under one base."""
+    base_norm = _norm(base) if base is not None else None
+    return [
+        record
+        for record in list_downloaded()
+        if record.get("fqn") in fqns
+        and (base_norm is None or _norm(record.get("base", "")) == base_norm)
+    ]
+
+
 def forget(records: list[dict]) -> None:
     """Drop ``records`` from the manifest, leaving their on-disk directories alone."""
     if not records:
         return
     dropped = {_record_key(record) for record in records}
     _save([record for record in _load() if _record_key(record) not in dropped])
+
+
+def remove_downloads(records: list[dict]) -> None:
+    """Delete each record's on-disk directories, then drop it from the manifest."""
+    if not records:
+        return
+    for record in records:
+        _delete_dirs(record.get("dirs") or [])
+    forget(records)

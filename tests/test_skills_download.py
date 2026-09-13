@@ -1119,3 +1119,110 @@ class TestConfigureSkillsDownloadPickerCommand:
 
         assert "download" not in calls
         assert "register" not in calls
+
+
+def _seed_downloads(monkeypatch, fqns: list[str], path: str) -> None:
+    """Download ``fqns`` to ``path`` with a stubbed API, writing dirs and attribution."""
+
+    def fake_get(ws, tok, fqn):
+        catalog, schema, leaf = fqn.split(".")
+        return ref(leaf, catalog=catalog, schema=schema)
+
+    monkeypatch.setattr(sd, "get_skill", fake_get)
+    monkeypatch.setattr(
+        sd, "fetch_skill_bundle", lambda ws, tok, c, s, leaf: ({"SKILL.md": b"x"}, None)
+    )
+    sd.download_selected_skills(WS, "token", fqns, path)
+
+
+class TestRemoveDownloadedSkillsCommand:
+    def test_by_location_removes_across_all_bases(self, tmp_path, monkeypatch):
+        home, proj = tmp_path / "home", tmp_path / "proj"
+        home.mkdir()
+        proj.mkdir()
+        _seed_downloads(monkeypatch, ["main.default.triage"], str(home))
+        _seed_downloads(monkeypatch, ["main.default.triage"], str(proj))
+        _seed_downloads(monkeypatch, ["ml.prod.pii"], str(home))
+
+        sd.remove_downloaded_skills_command(["main.default"], path=None)
+
+        assert not (home / ".claude/skills/triage").exists()
+        assert not (proj / ".claude/skills/triage").exists()
+        assert (home / ".claude/skills/pii").exists()
+        assert [r["fqn"] for r in skills_state.list_downloaded()] == ["ml.prod.pii"]
+
+    def test_path_narrows_removal_to_one_base(self, tmp_path, monkeypatch):
+        home, proj = tmp_path / "home", tmp_path / "proj"
+        home.mkdir()
+        proj.mkdir()
+        _seed_downloads(monkeypatch, ["main.default.triage"], str(home))
+        _seed_downloads(monkeypatch, ["main.default.triage"], str(proj))
+
+        sd.remove_downloaded_skills_command(["main.default"], path=str(proj))
+
+        assert (home / ".claude/skills/triage").exists()
+        assert not (proj / ".claude/skills/triage").exists()
+        assert {r["base"] for r in skills_state.list_downloaded()} == {str(home)}
+
+    def test_user_authored_dir_without_record_is_untouched(self, tmp_path, monkeypatch):
+        _seed_downloads(monkeypatch, ["main.default.triage"], str(tmp_path))
+        mine = tmp_path / ".claude/skills/mine"
+        mine.mkdir(parents=True)
+        (mine / "SKILL.md").write_text("mine")
+
+        sd.remove_downloaded_skills_command(["main.default"], path=None)
+
+        assert mine.exists()
+        assert not (tmp_path / ".claude/skills/triage").exists()
+
+    def test_unknown_location_reports_and_keeps_records(self, tmp_path, monkeypatch, capsys):
+        _seed_downloads(monkeypatch, ["main.default.triage"], str(tmp_path))
+
+        sd.remove_downloaded_skills_command(["other.schema"], path=None)
+
+        assert "No downloaded skills from `other.schema`" in capsys.readouterr().out
+        assert (tmp_path / ".claude/skills/triage").exists()
+
+    def test_by_fqns_removes_only_named_skills(self, tmp_path, monkeypatch):
+        _seed_downloads(monkeypatch, ["main.default.triage", "ml.prod.pii"], str(tmp_path))
+
+        sd.remove_downloaded_skills_command([], ["main.default.triage"], path=None)
+
+        assert not (tmp_path / ".claude/skills/triage").exists()
+        assert (tmp_path / ".claude/skills/pii").exists()
+        assert [r["fqn"] for r in skills_state.list_downloaded()] == ["ml.prod.pii"]
+
+    def test_unknown_fqn_reports_and_keeps_records(self, tmp_path, monkeypatch, capsys):
+        _seed_downloads(monkeypatch, ["main.default.triage"], str(tmp_path))
+
+        sd.remove_downloaded_skills_command([], ["main.default.gone"], path=None)
+
+        assert "No downloaded skills matching `main.default.gone`" in capsys.readouterr().out
+        assert (tmp_path / ".claude/skills/triage").exists()
+
+    def test_picker_removes_selected(self, tmp_path, monkeypatch):
+        _seed_downloads(monkeypatch, ["main.default.triage", "ml.prod.pii"], str(tmp_path))
+        monkeypatch.setattr(
+            sd,
+            "_prompt_for_downloaded_skill_removal",
+            lambda records: [r for r in records if r["fqn"] == "main.default.triage"],
+        )
+
+        sd.remove_downloaded_skills_command([], path=None)
+
+        assert not (tmp_path / ".claude/skills/triage").exists()
+        assert (tmp_path / ".claude/skills/pii").exists()
+
+    def test_picker_labels_records_whose_dirs_are_missing(self, tmp_path, monkeypatch):
+        import shutil
+
+        _seed_downloads(monkeypatch, ["main.default.triage", "ml.prod.pii"], str(tmp_path))
+        shutil.rmtree(tmp_path / ".claude/skills/triage")
+        shutil.rmtree(tmp_path / ".agents/skills/triage")
+
+        by_fqn = {
+            r["fqn"]: sd._removal_choice(r, i) for i, r in enumerate(skills_state.list_downloaded())
+        }
+
+        assert "(missing)" in by_fqn["main.default.triage"].title
+        assert "(missing)" not in by_fqn["ml.prod.pii"].title

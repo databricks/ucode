@@ -113,6 +113,7 @@ from ucode.skills_download import (
     configure_selected_skills_download_command,
     configure_skills_download_picker_command,
     download_managed_skills_on_launch,
+    remove_downloaded_skills_command,
 )
 from ucode.smart_routing import v2 as smart_routing_v2
 from ucode.smart_routing.claude_hooks import FIRST_PROMPT_SOCKET_ENV, ROUTE_FIRST_PROMPT_EVENT
@@ -1358,6 +1359,14 @@ def skills_add(
 
 @skill_app.command("remove")
 def skills_remove(
+    location: Annotated[
+        str | None,
+        typer.Option(
+            "--location",
+            help="(download) Comma-separated `<catalog>.<schema>` schemas whose downloaded "
+            "skills to remove.",
+        ),
+    ] = None,
     mcp: Annotated[
         bool,
         typer.Option(
@@ -1365,34 +1374,76 @@ def skills_remove(
             help="Remove schemas from the skills MCP connection instead of downloaded files.",
         ),
     ] = False,
+    path: Annotated[
+        str | None,
+        typer.Option(
+            "--path",
+            help="(download) Limit removal to skills downloaded under this base directory; "
+            "without it, every base is in scope.",
+        ),
+    ] = None,
+    skills: Annotated[
+        str | None,
+        typer.Option(
+            "--skills",
+            help="(download) Remove exactly these comma-separated fully-qualified "
+            "`<catalog>.<schema>.<name>` skills, spanning any number of schemas. Not valid "
+            "with --mcp or --location.",
+        ),
+    ] = None,
     agents: Annotated[
         str | None,
         typer.Option(
             "--agents",
-            help="Comma-separated coding agents to remove the schemas from (e.g. claude,codex). "
-            "A schema scoped to several agents is removed only from the named ones and kept on "
-            "the rest. Without --agents, a selected schema is removed from every agent it's on.",
+            help="(--mcp only) Comma-separated coding agents to remove the schemas from "
+            "(e.g. claude,codex). A schema scoped to several agents is removed only from the "
+            "named ones and kept on the rest. Without --agents, it is removed from every agent.",
         ),
     ] = None,
 ) -> None:
-    """Interactively remove Skill schemas from the skills MCP connection.
+    """Remove Skills previously added to your coding tools.
 
-    Without ``--agents`` a selected schema is removed from every configured agent; ``--agents``
-    scopes the removal to the named agents and keeps the schema on the rest.
+    With ``--mcp``, interactively drops skill schemas from the skills MCP connection.
+    Otherwise removes downloaded skill directories: ``--location`` removes every skill
+    downloaded from a ``<catalog>.<schema>``, ``--skills`` removes named fully-qualified
+    skills that may span schemas, and with none of them a picker lists every downloaded
+    skill. ``--path`` limits either to one download base. Only skills ucode downloaded are
+    removed; a same-named skill you authored is left alone.
     """
     try:
-        if not mcp:
-            raise RuntimeError(
-                "Removing downloaded skills is not supported yet. Pass --mcp to remove "
-                "schemas from the skills MCP connection."
-            )
-        requested_agents = (
-            None
-            if agents is None
-            else ({agent.strip().lower() for agent in agents.split(",") if agent.strip()} or None)
+        requested_skills = (
+            None if skills is None else {s.strip() for s in skills.split(",") if s.strip()}
         )
-        remove_skills_command(agents=requested_agents)
-    except RuntimeError as exc:
+        if mcp:
+            if location is not None or path is not None or requested_skills is not None:
+                raise RuntimeError("--location, --path, and --skills are not supported with --mcp.")
+            requested_agents = (
+                None
+                if agents is None
+                else ({a.strip().lower() for a in agents.split(",") if a.strip()} or None)
+            )
+            remove_skills_command(agents=requested_agents)
+            return
+        if agents is not None:
+            raise RuntimeError("--agents is only supported when using --mcp.")
+        if requested_skills is not None and location is not None:
+            raise RuntimeError("--skills takes fully-qualified names; drop --location.")
+        if requested_skills is not None:
+            invalid = sorted(s for s in requested_skills if not _is_qualified_skill_name(s))
+            if invalid:
+                raise RuntimeError(
+                    "--skills entries must be fully-qualified `<catalog>.<schema>.<name>` names "
+                    f"(invalid: {', '.join(invalid)})."
+                )
+            remove_downloaded_skills_command([], sorted(requested_skills), path=path)
+            return
+        locations = _parse_skill_locations(location)
+        if path is not None and not locations:
+            raise RuntimeError("--path is only supported with --location or --skills.")
+        if not locations and not _stdin_is_interactive():
+            raise RuntimeError("--location or --skills is required for `ug skill remove`.")
+        remove_downloaded_skills_command(locations, path=path)
+    except (RuntimeError, ValueError) as exc:
         print_err(str(exc))
         raise typer.Exit(1) from None
     except KeyboardInterrupt:
