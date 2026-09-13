@@ -29,6 +29,7 @@ from ucode.databricks import (
     list_mcp_services,
     workspace_hostname,
 )
+from ucode.skills_api import SkillRef, list_all_skills
 from ucode.state import load_full_state, load_state, save_state
 from ucode.ui import (
     _BACK,
@@ -1975,6 +1976,28 @@ def _union_locations(base: list[str], new: list[str]) -> list[str]:
     return merged
 
 
+def add_skill_locations_to_mcp(
+    state: dict,
+    workspace: str,
+    profile: str | None,
+    clients: list[str],
+    locations: list[str],
+) -> None:
+    """Add ``locations`` to each client's skill MCP scope, keeping any already configured."""
+    locations_by_client = _skill_locations_by_client_from_state(state)
+    for client in clients:
+        locations_by_client[client] = _union_locations(
+            locations_by_client.get(client, []), locations
+        )
+    _update_skills_mcp(state, workspace, profile, clients, locations_by_client)
+
+
+def configured_skill_locations(state: dict, clients: list[str]) -> set[str]:
+    """The union of skill schemas already in the MCP scope across ``clients``."""
+    locations_by_client = _skill_locations_by_client_from_state(state)
+    return {location for client in clients for location in locations_by_client.get(client, [])}
+
+
 def add_skills_command(locations: list[str], agents: set[str] | None = None) -> int:
     """Add ``locations`` to each targeted client's skill scope, keeping any already configured.
 
@@ -1983,12 +2006,77 @@ def add_skills_command(locations: list[str], agents: set[str] | None = None) -> 
     the only thing ``--agents`` changes."""
     state = load_state()
     workspace, profile, clients = setup_mcp_clients(state, "Add Skills MCP", agents=agents)
-    locations_by_client = _skill_locations_by_client_from_state(state)
-    for client in clients:
-        locations_by_client[client] = _union_locations(
-            locations_by_client.get(client, []), locations
-        )
-    _update_skills_mcp(state, workspace, profile, clients, locations_by_client)
+    add_skill_locations_to_mcp(state, workspace, profile, clients, locations)
+    return 0
+
+
+def _skill_schema_choice(location: str, skill_count: int, in_scope: bool) -> questionary.Choice:
+    """Picker row for one schema: value is ``<catalog>.<schema>``, title carries the skill count.
+
+    An already-scoped schema is flagged and stays selectable; re-selecting it is a no-op, since
+    adding to the MCP scope is additive (removal is ``ug skill remove --mcp``).
+    """
+    noun = "skill" if skill_count == 1 else "skills"
+    scope_flag = "  (already in skill MCP)" if in_scope else ""
+    return questionary.Choice(
+        title=f"{location}  ({skill_count} {noun}){scope_flag}", value=location
+    )
+
+
+def _skill_schema_background_loader(
+    workspace: str, token: str, in_scope: set[str]
+) -> Callable[[Callable[[list[questionary.Choice]], None]], None]:
+    """A picker ``background_loader`` that streams the workspace-wide skill walk in as schema rows.
+
+    ``list_all_skills`` probes one schema per call, so each ``on_skills`` batch is that schema's
+    complete skill set: one row per schema, carrying its exact skill count.
+    """
+
+    def loader(append: Callable[[list[questionary.Choice]], None]) -> None:
+        def on_skills(refs: list[SkillRef]) -> None:
+            location = f"{refs[0].catalog}.{refs[0].schema}"
+            append([_skill_schema_choice(location, len(refs), location in in_scope)])
+
+        list_all_skills(workspace, token, on_skills=on_skills)
+
+    return loader
+
+
+def prompt_for_skill_schema_choices(
+    background_loader: Callable[[Callable[[list[questionary.Choice]], None]], None],
+) -> list[str] | None:
+    """Show the skill-schema picker, returning the selected schemas or None on Ctrl-C."""
+    selection = scrolling_checkbox(
+        "Skill schemas:",
+        choices=[],
+        instruction="(space to toggle, ctrl-a all, enter to save, type to filter)",
+        style=picker_style(),
+        background_loader=background_loader,
+        loading_noun="skill schemas",
+    ).ask()
+    if selection is None:
+        return None
+    return [str(value) for value in selection]
+
+
+def configure_skills_mcp_picker_command(agents: set[str] | None = None) -> int:
+    """Pick skill schemas from an interactive workspace-wide list and add them to the MCP scope.
+
+    Opens the picker immediately and streams schemas in as discovery finds them. Ctrl-C changes
+    nothing. ``agents`` scopes the addition to that subset of configured clients.
+    """
+    state = load_state()
+    workspace, profile, clients = setup_mcp_clients(state, "Add Skills MCP", agents=agents)
+    token = get_databricks_token(workspace, profile)
+
+    loader = _skill_schema_background_loader(
+        workspace, token, configured_skill_locations(state, clients)
+    )
+    locations = prompt_for_skill_schema_choices(loader)
+    if not locations:
+        return 0
+
+    add_skill_locations_to_mcp(state, workspace, profile, clients, locations)
     return 0
 
 

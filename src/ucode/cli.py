@@ -101,6 +101,7 @@ from ucode.mcp import (
     available_mcp_clients,
     configure_mcp_command,
     configure_skills_mcp_command,
+    configure_skills_mcp_picker_command,
     configured_mcp_clients,
     purge_cross_workspace_mcp_residue,
     remove_mcp_command,
@@ -1306,8 +1307,8 @@ def skills_add(
     to user-level skill directories when omitted, keeping already-downloaded skills.
     ``--location`` downloads whole ``<catalog>.<schema>`` schemas; ``--skills``
     downloads a named set of fully-qualified skills that may span schemas (and takes
-    no ``--location``). With none of ``--mcp``/``--location``/``--skills`` on an
-    interactive terminal, opens a picker of the workspace's skills to download.
+    no ``--location``). With no ``--location``/``--skills`` on an interactive terminal,
+    opens a picker of the workspace's schemas to scope (``--mcp``) or skills to download.
     """
     try:
         requested_skills = (
@@ -1338,15 +1339,23 @@ def skills_add(
             return
         locations = _parse_skill_locations(location)
         if not locations:
-            if not mcp and _stdin_is_interactive():
-                configure_skills_download_picker_command(path=path)
+            if _stdin_is_interactive():
+                if mcp:
+                    configured_agents = (
+                        _configure_agents_for_mcp(sorted(requested_agents))
+                        if requested_agents
+                        else None
+                    )
+                    configure_skills_mcp_picker_command(agents=configured_agents)
+                else:
+                    configure_skills_download_picker_command(path=path)
                 return
             raise RuntimeError("--location is required for `ucode skill add`.")
         if mcp:
-            scope = (
+            configured_agents = (
                 _configure_agents_for_mcp(sorted(requested_agents)) if requested_agents else None
             )
-            add_skills_command(locations, agents=scope)
+            add_skills_command(locations, agents=configured_agents)
         else:
             configure_location_skills_download_command(locations, path=path)
     except (RuntimeError, ValueError) as exc:
