@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from pathlib import Path
 from typing import TypedDict, cast
 
@@ -39,6 +41,25 @@ def ensure_parent_dir(path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
         raise RuntimeError(f"Failed to create directory for {path}") from exc
+
+
+def atomic_write_json(path: Path, payload: object) -> None:
+    """Write ``payload`` as indented JSON to ``path`` atomically (temp file + ``os.replace``).
+
+    The temp file is created in the destination directory and renamed into place, so a crash, a
+    full disk, or a concurrent reader never sees a half-written file. This is a raw writer: unlike
+    ``write_json_file`` it does not honor dry-run, so callers that should be skipped under dry-run
+    must guard the call themselves.
+    """
+    ensure_parent_dir(path)
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, indent=2))
+        os.replace(tmp_name, path)
+    except OSError as exc:
+        Path(tmp_name).unlink(missing_ok=True)
+        raise RuntimeError(f"Failed to write file: {path}") from exc
 
 
 def backup_existing_file(config_path: Path, backup_path: Path) -> bool:

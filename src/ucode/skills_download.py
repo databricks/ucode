@@ -19,6 +19,7 @@ from ucode.databricks import (
     workspace_hostname,
 )
 from ucode.mcp import register_schemaless_skills_connection, setup_mcp_clients
+from ucode.skills_state import SkillInstall, record_downloads
 from ucode.state import load_state
 from ucode.ui import (
     console,
@@ -58,7 +59,9 @@ class SkillRef:
     the on-disk directory. Finalize does not require the securable and bundle name
     to match, so a skill created under a securable that differs from its
     frontmatter carries both. ``description`` is the skill's UC description, used only
-    to preview a skill in the interactive picker.
+    to preview a skill in the interactive picker. ``metastore_id``, ``skill_id``, and
+    ``uc_update_time`` are UC attribution metadata recorded when the skill is
+    downloaded (see ``skills_state``); the download flow never reads them.
     """
 
     catalog: str
@@ -66,6 +69,9 @@ class SkillRef:
     securable_name: str
     bundle_name: str
     description: str | None = None
+    metastore_id: str | None = None
+    skill_id: str | None = None
+    uc_update_time: str | None = None
 
     @property
     def fqn(self) -> str:
@@ -117,6 +123,9 @@ def _skill_ref(skill: dict) -> SkillRef | None:
         securable_name=securable_name,
         bundle_name=bundle_name,
         description=_non_empty_str(skill.get("description")),
+        metastore_id=_non_empty_str(skill.get("metastore_id")),
+        skill_id=_non_empty_str(skill.get("id")),
+        uc_update_time=_non_empty_str(skill.get("update_time")),
     )
 
 
@@ -301,6 +310,28 @@ def write_skill(roots: list[Path], ref: SkillRef, files: dict[str, bytes]) -> No
         _write_bundle(root / ref.bundle_name, ref.bundle_name, files)
 
 
+def _skill_installs(
+    refs: list[SkillRef], roots: list[Path], path: str | None, workspace: str
+) -> list[SkillInstall]:
+    """Attribution records for ``refs`` written into ``roots`` (see ``skills_state``)."""
+    base = path or str(Path.home())
+    scope = "project" if path else "user"
+    return [
+        SkillInstall(
+            fqn=ref.fqn,
+            bundle_name=ref.bundle_name,
+            workspace=workspace,
+            scope=scope,
+            base=base,
+            dirs=tuple(str(root / ref.bundle_name) for root in roots),
+            metastore_id=ref.metastore_id,
+            skill_id=ref.skill_id,
+            uc_update_time=ref.uc_update_time,
+        )
+        for ref in refs
+    ]
+
+
 # --- Orchestration ---------------------------------------------------------
 
 
@@ -358,27 +389,28 @@ def _reject_bundle_name_collisions(refs: list[SkillRef]) -> list[SkillRef]:
 
 def _download_refs(
     workspace: str, token: str, refs: list[SkillRef], roots: list[Path], *, label: str
-) -> tuple[int, int]:
+) -> tuple[list[SkillRef], int]:
     """Fetch and write ``refs`` into ``roots``, returning ``(written, total)``.
 
     The shared download core: drop siblings claiming one directory
     (``_reject_bundle_name_collisions``), prompt before overwriting a skill already
     on disk (``should_download_skill``, so a declined skill is never fetched), then
-    fetch the survivors' bundles concurrently and write them. ``total`` is the
-    count that could reach disk (dropped siblings excluded), so a caller's summary
-    denominator is right. A per-skill fetch failure warns and skips only that skill.
+    fetch the survivors' bundles concurrently and write them. ``written`` are the
+    refs that reached disk, so a caller can record their attribution; ``total`` is
+    the count that could reach disk (dropped siblings excluded), so a caller's
+    summary denominator is right. A per-skill fetch failure warns and skips it.
     """
     refs = _reject_bundle_name_collisions(refs)
     to_download = [ref for ref in refs if should_download_skill(roots, ref)]
     bundles = _fetch_bundles(workspace, token, to_download, label=label)
-    written = 0
+    written: list[SkillRef] = []
     for ref in to_download:
         files, reason = bundles[ref.fqn]
         if reason or files is None:
             print_warning(f"Skipping `{ref.fqn}`: {reason}.")
             continue
         write_skill(roots, ref, files)
-        written += 1
+        written.append(ref)
     console.print()
     return written, len(refs)
 
@@ -413,9 +445,11 @@ def download_skills_from_schema_locations(
         written, total = _download_refs(
             workspace, token, refs, roots, label=f"Fetching skills from {location}"
         )
-        skipped = f"; {total - written} skipped" if written < total else ""
+        record_downloads(_skill_installs(written, roots, path, workspace))
+        count = len(written)
+        skipped = f"; {total - count} skipped" if count < total else ""
         print_success(
-            f"Downloaded {written}/{total} skill(s){skipped} from `{location}` in {roots_display}."
+            f"Downloaded {count}/{total} skill(s){skipped} from `{location}` in {roots_display}."
         )
 
 
@@ -450,8 +484,10 @@ def download_selected_skills(workspace: str, token: str, fqns: list[str], path: 
             continue
         refs.append(ref)
     written, total = _download_refs(workspace, token, refs, roots, label="Fetching selected skills")
-    skipped = f"; {total - written} skipped" if written < total else ""
-    print_success(f"Downloaded {written}/{total} skill(s){skipped} in {roots_display}.")
+    record_downloads(_skill_installs(written, roots, path, workspace))
+    count = len(written)
+    skipped = f"; {total - count} skipped" if count < total else ""
+    print_success(f"Downloaded {count}/{total} skill(s){skipped} in {roots_display}.")
 
 
 def download_managed_skills_on_launch(
@@ -483,13 +519,16 @@ def download_managed_skills_on_launch(
         bundles = _fetch_bundles(
             workspace, token, missing, label=f"Fetching skills from {location}"
         )
+        installed: list[SkillRef] = []
         for ref in missing:
             files, reason = bundles[ref.fqn]
             if reason or files is None:
                 print_warning(f"Skipping `{ref.fqn}`: {reason}.")
                 continue
             write_skill(roots, ref, files)
+            installed.append(ref)
             written.append(ref.bundle_name)
+        record_downloads(_skill_installs(installed, roots, path, workspace))
     return written
 
 
