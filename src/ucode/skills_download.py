@@ -17,6 +17,7 @@ from ucode.databricks import (
     get_databricks_token,
     walk_catalog_schemas,
     workspace_hostname,
+    workspace_org_id,
 )
 from ucode.mcp import register_schemaless_skills_connection, setup_mcp_clients
 from ucode.skills_state import (
@@ -323,6 +324,7 @@ def _skill_installs(
     """Attribution records for ``refs`` written into ``roots`` (see ``skills_state``)."""
     base = path or str(Path.home())
     scope = "project" if path else "user"
+    org_id = workspace_org_id(workspace)
     return [
         SkillInstall(
             fqn=ref.fqn,
@@ -332,6 +334,7 @@ def _skill_installs(
             base=base,
             dirs=tuple(str(root / ref.bundle_name) for root in roots),
             metastore_id=ref.metastore_id,
+            workspace_id=org_id,
             skill_id=ref.skill_id,
             uc_update_time=ref.uc_update_time,
         )

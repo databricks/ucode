@@ -76,6 +76,38 @@ class TestWorkspaceHostname:
             workspace_hostname("")
 
 
+class _FakeResponseWithHeaders(_FakeResponse):
+    def __init__(self, payload: dict, headers: dict):
+        super().__init__(payload)
+        self.headers = headers
+
+
+class TestWorkspaceOrgId:
+    def _stub_response(self, monkeypatch, headers: dict) -> None:
+        monkeypatch.setattr(
+            db_mod.urllib_request,
+            "urlopen",
+            lambda request, timeout=None: _FakeResponseWithHeaders({"ok": True}, headers),
+        )
+
+    def test_captures_org_id_header_from_get(self, monkeypatch):
+        self._stub_response(monkeypatch, {"X-Databricks-Org-Id": "1234567890"})
+
+        db_mod._http_get_json(f"{WS}/api/2.1/unity-catalog/skills", "token")
+
+        assert db_mod.workspace_org_id(WS) == "1234567890"
+
+    def test_absent_until_a_response_reveals_it(self):
+        assert db_mod.workspace_org_id(WS) is None
+
+    def test_missing_header_leaves_it_absent(self, monkeypatch):
+        self._stub_response(monkeypatch, {})
+
+        db_mod._http_get_json(f"{WS}/api/x", "token")
+
+        assert db_mod.workspace_org_id(WS) is None
+
+
 class TestBuildDatabricksCliEnv:
     def test_sets_databricks_host(self):
         env = build_databricks_cli_env(WS)
