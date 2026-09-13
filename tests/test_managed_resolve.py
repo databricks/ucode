@@ -152,7 +152,7 @@ class TestManagedProviderService:
 
 class TestResolveState:
     def test_does_not_mutate_input_state(self):
-        # managed-state.json and state.json stay separate files: resolution is per-write and
+        # managed-configuration.json and state.json stay separate files: resolution is per-write and
         # in-memory, so the developer's own state must come back untouched.
         state = _state(claude_models={"opus": "local-opus"})
         before = json.dumps(state, sort_keys=True)
@@ -185,7 +185,7 @@ class TestResolveState:
 class TestStateFileIsNotRewritten:
     """The managed config must win by precedence, not by overwriting the developer's state file.
 
-    managed-state.json and state.json stay separate on disk: resolution happens in memory and only
+    managed-configuration.json and state.json stay separate on disk: resolution happens in memory and only
     the generated agent settings file reflects it. These tests deliberately let the real
     ``save_state`` run against a temp ``state.json`` — stubbing it out is what let this regress,
     because the overwrite happens inside ``write_tool_config``, one layer below the resolver.

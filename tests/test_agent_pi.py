@@ -440,7 +440,7 @@ class TestValidateAllToolsPiRollback:
         monkeypatch.setitem(
             agents_mod.TOOL_SPECS["pi"], "backup_path", tmp_path / "models.backup.json"
         )
-        monkeypatch.setattr(agents_mod, "validate_tool", lambda tool: (False, "boom"))
+        monkeypatch.setattr(agents_mod, "validate_tool", lambda tool, **kwargs: (False, "boom"))
         monkeypatch.setattr(agents_mod, "save_state", lambda s: None)
         monkeypatch.setattr(agents_mod, "spinner", lambda *_a, **_kw: nullcontext())
 

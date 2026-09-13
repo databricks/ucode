@@ -31,6 +31,10 @@ MANAGED_FINGERPRINT_VERSION = 1
 _MISSING = object()
 _managed_write_batch: tuple[str, ...] = ()
 _managed_write_notice_shown = False
+# When set, reconcile_managed_file skips the OS-managed (sudo) write entirely. The launch path uses
+# this so a plain launch never re-writes /etc — that write is owned by `ug configure` and by the
+# launch-time apply that runs only when the managed configuration actually changed.
+_managed_writes_suppressed = False
 
 ManagedParser = Callable[[str], dict]
 ManagedDumper = Callable[[dict], str]
@@ -154,6 +158,24 @@ def managed_write_batch(displays: list[str]) -> Iterator[None]:
         _managed_write_notice_shown = previous_notice
 
 
+@contextmanager
+def suppressed_managed_writes() -> Iterator[None]:
+    """Within this context, :func:`reconcile_managed_file` skips the OS-managed (sudo) write.
+
+    Used by the launch path so a launch that isn't re-applying the managed configuration never
+    touches the root-owned /etc file (and never prompts for a password); the user-level config is
+    still written by the caller.
+    """
+    global _managed_writes_suppressed
+
+    prev = _managed_writes_suppressed
+    _managed_writes_suppressed = True
+    try:
+        yield
+    finally:
+        _managed_writes_suppressed = prev
+
+
 def _print_managed_write_permission(display: str) -> None:
     global _managed_write_notice_shown
 
@@ -239,6 +261,8 @@ def reconcile_managed_file(
     The first pre-ucode contents are retained until ``ucode revert``. Subsequent writes update only
     the last-applied snapshot used for drift-safe three-way restoration.
     """
+    if _managed_writes_suppressed:
+        return "unchanged"
     if not managed_files_supported():
         print_warning(
             f"{display}: OS-managed settings aren't supported on this platform; skipped {path}."

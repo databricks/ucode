@@ -18,11 +18,25 @@ import sys
 import tempfile
 from pathlib import Path
 
-from ucode.managed_config import load_managed_state, managed_state_workspace
-from ucode.managed_setup import serialize_managed_config, validate_manifest
+from ucode.managed_config import (
+    load_managed_configuration,
+    managed_state_workspace,
+    normalize_managed_config,
+)
+from ucode.managed_setup import validate_manifest
 from ucode.state import load_state
 
-_SERVER_OWNED_FIELDS = ("name",)
+# Server-assigned metadata that is part of the stored raw config but is not authored config and
+# must not appear in a portable export (it would be rejected or ignored on re-import).
+_SERVER_OWNED_FIELDS = (
+    "name",
+    "workspace_id",
+    "create_time",
+    "update_time",
+    "retrieved_time",
+    "created_user_id",
+    "updated_user_id",
+)
 
 EXPORT_SPEC_VERSION = 1
 
@@ -36,19 +50,17 @@ def build_export_payload() -> dict:
     actionable message when no config is authored locally or the config fails structural validation.
     """
     workspace = load_state().get("workspace") or managed_state_workspace()
-    manifest = load_managed_state(workspace)
-    if not manifest:
+    config = load_managed_configuration(workspace)
+    if not config:
         raise RuntimeError(
-            "No managed coding-agent config found locally. Run `ug` against a workspace that "
+            "No managed configuration found locally. Run `ug` against a workspace that "
             "publishes one, then re-run `ug export`."
         )
-    errors = validate_manifest(manifest, None)
+    errors = validate_manifest(normalize_managed_config(config), None)
     if errors:
         detail = "\n".join(f"  - {error}" for error in errors)
         raise RuntimeError(f"The managed config is not valid, so it was not exported:\n{detail}")
-    config = serialize_managed_config(manifest)
-    for field in _SERVER_OWNED_FIELDS:
-        config.pop(field, None)
+    config = {key: value for key, value in config.items() if key not in _SERVER_OWNED_FIELDS}
     return {"workspace": workspace, "spec_version": EXPORT_SPEC_VERSION, **config}
 
 

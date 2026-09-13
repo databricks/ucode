@@ -1,6 +1,6 @@
 """Resolve the effective agent settings from the managed config plus local ucode state.
 
-The managed config (``~/.ucode/managed-state.json``, published by an admin through the AI Gateway
+The managed config (``~/.ucode/managed-configuration.json``, published by an admin through the AI Gateway
 and refreshed from the workspace at launch through :mod:`ucode.managed_config`) and the developer's own
 ucode state (``~/.ucode/state.json``) stay separate files — they are never merged on disk. Instead
 this module resolves them *per key* at config-write time: whatever the manifest specifies wins, and

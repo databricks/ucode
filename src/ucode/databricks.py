@@ -1909,7 +1909,7 @@ MANAGED_CONFIG_UPDATE_MASK_PATHS: tuple[str, ...] = (
     "mcp_servers",
     "skills",
     "tracing",
-    "budget_policy",
+    "spend_tiers",
 )
 
 
@@ -2892,7 +2892,7 @@ def _raise_ai_gateway_scope_failure(workspace: str, reason: str) -> NoReturn:
 
 def _raise_model_service_permission_failure(workspace: str, model_service_reason: str) -> NoReturn:
     raise RuntimeError(
-        "Databricks Unity AI Gateway model service access could not be verified on "
+        "Databricks Unity Gateway model service access could not be verified on "
         f"{workspace} ({model_service_reason}). Listing Unity Catalog model services requires "
         "USE CATALOG on `system`, and USE SCHEMA and EXECUTE on `system.ai`."
     )
@@ -2915,7 +2915,7 @@ def probe_unity_gateway_capabilities(workspace: str, token: str) -> GatewayProbe
         _raise_model_service_permission_failure(workspace, reason)
 
     raise RuntimeError(
-        "Databricks Unity AI Gateway is not enabled on this workspace: model services "
+        "Databricks Unity Gateway is not enabled on this workspace: model services "
         f"({reason}) are not available. See {AI_GATEWAY_DOCS_URL}"
     )
 

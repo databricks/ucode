@@ -100,10 +100,10 @@ ug configure --profiles DEFAULT --agents claude,codex
 
 Auth behaves the same as `--workspaces`: an OAuth `databricks auth login` is forced by default.
 
-For CI or headless environments where the profile holds a personal access token (`auth_type = pat` in `~/.databrickscfg`), add `--use-pat`. It must be combined with `--profiles` — ug never picks up a PAT implicitly — and runs no interactive login: the profile's token is used for the whole setup (and by launched agents afterwards), with workspace access verified against the AI Gateway. `--skip-validate` additionally skips the post-configure test message sent through each agent, so configure only writes config files with the freshly discovered models. Together these make setup fully non-interactive:
+For CI or headless environments where the profile holds a personal access token (`auth_type = pat` in `~/.databrickscfg`), add `--use-pat`. It must be combined with `--profiles` — ug never picks up a PAT implicitly — and runs no interactive login: the profile's token is used for the whole setup (and by launched agents afterwards), with workspace access verified against the AI Gateway. This makes setup fully non-interactive:
 
 ```bash
-ug configure --profiles DEFAULT --agents claude,codex --use-pat --skip-validate --skip-upgrade
+ug configure --profiles DEFAULT --agents claude,codex --use-pat --skip-upgrade
 ```
 
 ### MCP servers (optional)
@@ -327,7 +327,6 @@ The output looks like:
 | `ug codex --refresh` | Re-check Databricks, refresh models/configuration, and launch Codex |
 | `ug claude --enable-smart-routing` | Enable AI Gateway routing for Claude Code sessions and subagents |
 | `ug claude --refresh` | Re-check Databricks, refresh models/configuration, and launch Claude Code |
-| `ug configure --skip-validate` | Write configs without sending a test message through each agent |
 | `ug configure --agents claude,codex,pi --skip-unavailable` | Configure the requested agents that are available; skip the rest with a warning |
 | `ug configure --agents claude --mcp system.ai.slack` | Configure an agent and register its Databricks MCP server(s) in one command |
 | `ug mcp add --location system.ai` | Register a schema's MCP servers, keeping any already configured (additive; never removes) |
