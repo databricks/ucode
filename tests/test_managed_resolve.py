@@ -14,8 +14,10 @@ from ucode.managed_resolve import (
     managed_default_model,
     managed_enabled_tools,
     managed_launch_model,
+    managed_model_service_location,
     managed_provider_service,
     managed_state_overrides,
+    managed_static_models,
     managed_supplies_models,
     managed_unservable_models,
     recommended_agent,
@@ -401,6 +403,35 @@ class TestManagedSuppliesModels:
         }
         assert managed_supplies_models(managed, "claude") is False
 
+    def test_true_for_flat_agent_with_static_names_list(self):
+        # FIX 1: Flat-list agents (gemini, opencode, pi, copilot) with managed static `names`
+        # list must return True so discovery is skipped.
+        managed = {
+            "enabled_agents": {"gemini": {"model_config": {"names": ["system.ai.gemini-3-flash"]}}}
+        }
+        assert managed_supplies_models(managed, "gemini") is True
+
+    def test_true_for_opencode_with_static_names_list(self):
+        # Verify opencode also recognizes the names list.
+        managed = {
+            "enabled_agents": {
+                "opencode": {"model_config": {"names": ["system.ai.claude-opus-4-8"]}}
+            }
+        }
+        assert managed_supplies_models(managed, "opencode") is True
+
+    def test_true_for_flat_agent_with_legacy_models_list(self):
+        # Legacy flat `models` list for flat-agents should still work.
+        managed = {
+            "enabled_agents": {"gemini": {"model_config": {"models": ["system.ai.gemini-3-flash"]}}}
+        }
+        assert managed_supplies_models(managed, "gemini") is True
+
+    def test_false_when_names_list_is_blank(self):
+        # Empty or whitespace-only names list should not count.
+        managed = {"enabled_agents": {"gemini": {"model_config": {"names": ["   ", ""]}}}}
+        assert managed_supplies_models(managed, "gemini") is False
+
 
 class TestManagedStateOverrides:
     """Each agent reads its models from a different shape, so the manifest has to be translated."""
@@ -598,3 +629,125 @@ class TestManagedLaunchModel:
 
     def test_none_when_neither_names_a_model(self):
         assert managed_launch_model({}, None, "pi") is None
+
+
+class TestStaticAndAutoModels:
+    """The static `names` allow-list and the `model_service_location` auto-discovery source."""
+
+    @staticmethod
+    def _managed(tool, model_config):
+        return {"default_agent": tool, "enabled_agents": {tool: {"model_config": model_config}}}
+
+    def test_static_models_reads_the_names_list(self):
+        m = self._managed("claude", {"names": ["system.ai.claude-opus-4-8", "system.ai.kimi-k3"]})
+        assert managed_static_models(m, "claude") == [
+            "system.ai.claude-opus-4-8",
+            "system.ai.kimi-k3",
+        ]
+
+    def test_static_models_none_when_absent_or_empty(self):
+        assert managed_static_models(self._managed("claude", {"names": []}), "claude") is None
+        assert managed_static_models(self._managed("claude", {}), "claude") is None
+
+    def test_model_service_location_read(self):
+        m = self._managed("codex", {"model_service_location": "main.agents"})
+        assert managed_model_service_location(m, "codex") == "main.agents"
+
+    def test_names_and_location_count_as_supplying_models(self):
+        assert managed_supplies_models(self._managed("claude", {"names": ["x"]}), "claude") is True
+        assert (
+            managed_supplies_models(
+                self._managed("codex", {"model_service_location": "system.ai"}), "codex"
+            )
+            is True
+        )
+
+    def test_overrides_layer_static_and_location_for_claude_and_codex(self):
+        m = self._managed("claude", {"names": ["a", "b"]})
+        assert managed_state_overrides(m, "claude")["claude_static_models"] == ["a", "b"]
+        m2 = self._managed("codex", {"model_service_location": "main.agents"})
+        assert managed_state_overrides(m2, "codex")["codex_model_service_location"] == "main.agents"
+
+    def test_resolve_state_layers_static_models_into_state(self):
+        m = self._managed("claude", {"names": ["system.ai.claude-opus-4-8"]})
+        resolved = resolve_state(m, {"workspace": WORKSPACE}, "claude")
+        assert resolved["claude_static_models"] == ["system.ai.claude-opus-4-8"]
+
+
+class TestFlatListAgentsWithStaticNames:
+    """Flat-list agents (gemini, opencode, pi, copilot) should read managed static model lists from the `names` key."""
+
+    @staticmethod
+    def _managed(tool, model_config):
+        return {"default_agent": tool, "enabled_agents": {tool: {"model_config": model_config}}}
+
+    @pytest.mark.parametrize("tool", ["gemini", "opencode", "pi", "copilot"])
+    def test_flat_list_agents_resolve_managed_names_list(self, tool):
+        # Managed static model lists (from wire `model_services`) normalize to internal `names` key.
+        # Flat-list agents should resolve this to their agent-specific state key.
+        m = self._managed(
+            tool,
+            {
+                "names": [
+                    "system.ai.claude-opus-4-8",
+                    "system.ai.gemini-3-flash",
+                    "system.ai.kimi-k2-7-code",
+                ]
+            },
+        )
+        overrides = managed_state_overrides(m, tool)
+        # For opencode, names are bucketed by provider; for others, a flat list
+        if tool == "opencode":
+            assert overrides == {
+                "opencode_models": {
+                    "anthropic": ["system.ai.claude-opus-4-8"],
+                    "gemini": ["system.ai.gemini-3-flash"],
+                    "oss": ["system.ai.kimi-k2-7-code"],
+                }
+            }
+        else:
+            assert overrides == {
+                f"{tool}_models": [
+                    "system.ai.claude-opus-4-8",
+                    "system.ai.gemini-3-flash",
+                    "system.ai.kimi-k2-7-code",
+                ]
+            }
+
+    @pytest.mark.parametrize("tool", ["gemini", "pi", "copilot"])
+    def test_flat_list_agents_names_list_in_resolved_state(self, tool):
+        # The resolved state passed to write_tool_config should contain the managed list.
+        m = self._managed(tool, {"names": ["model-a", "model-b", "model-c"]})
+        state = _state()
+        resolved = resolve_state(m, state, tool)
+        assert resolved[f"{tool}_models"] == ["model-a", "model-b", "model-c"]
+
+    @pytest.mark.parametrize("tool", ["gemini", "opencode", "pi", "copilot"])
+    def test_flat_list_agents_legacy_models_list_fallback(self, tool):
+        # Backward compat: legacy flat `models` list should still work when `names` is absent.
+        m = self._managed(tool, {"models": ["legacy-a", "legacy-b"]})
+        overrides = managed_state_overrides(m, tool)
+        if tool == "opencode":
+            # opencode still gets bucketed (no family classification for "legacy-*" so likely empty)
+            assert "opencode_models" not in overrides or overrides["opencode_models"] == {}
+        else:
+            assert overrides == {f"{tool}_models": ["legacy-a", "legacy-b"]}
+
+    @pytest.mark.parametrize("tool", ["gemini", "opencode", "pi", "copilot"])
+    def test_names_takes_precedence_over_models(self, tool):
+        # When both `names` and `models` are present, `names` should win.
+        m = self._managed(
+            tool,
+            {
+                "names": ["system.ai.claude-opus-4-8"],
+                "models": ["system.ai.claude-sonnet-4-6"],
+            },
+        )
+        overrides = managed_state_overrides(m, tool)
+        if tool == "opencode":
+            # opencode still gets bucketed
+            assert overrides.get("opencode_models", {}).get("anthropic") == [
+                "system.ai.claude-opus-4-8"
+            ]
+        else:
+            assert overrides[f"{tool}_models"] == ["system.ai.claude-opus-4-8"]

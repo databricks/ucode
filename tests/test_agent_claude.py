@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import shlex
@@ -936,6 +937,59 @@ class TestWriteToolConfigManagedSettings:
 
         assert managed_writes == []
 
+    def test_admin_available_models_preserved_in_managed_file(self, monkeypatch):
+        # FIX P1-7: Enterprise admin's availableModels in OS-managed file must survive
+        # when ucode writes no static list. ucode's own keys should still be pruned.
+        private_writes: list = []
+        managed_writes: list = []
+        admin_available = ["system.ai.custom-model"]
+        existing_managed = {
+            str(FAKE_MANAGED_PATH): {
+                "availableModels": admin_available,
+                "enforceAvailableModels": True,
+            }
+        }
+        self._patch(monkeypatch, private_writes, managed_writes, existing_managed)
+        state = {"workspace": WS, "codex_models": []}
+        claude.write_tool_config(state, "databricks-claude-sonnet-4")
+        _, text = managed_writes[0]
+        written = json.loads(text)
+        # Admin's availableModels should survive since no ownership marker was set.
+        assert written["availableModels"] == admin_available
+        assert written["enforceAvailableModels"] is True
+
+    def test_ucode_available_models_pruned_when_transitioning_to_discovery(self, monkeypatch):
+        # FIX P1-7: When ucode transitions from static to discovery config, only prune
+        # the availableModels/enforceAvailableModels that ucode itself wrote. Admin keys stay.
+        private_writes: list = []
+        managed_writes: list = []
+        self._patch(monkeypatch, private_writes, managed_writes)
+        monkeypatch.setattr(claude, "managed_writes_allowed", lambda: True)
+        # Step 1: Write with static models to the managed file.
+        state1 = {"workspace": WS, "claude_static_models": ["system.ai.claude-opus-4-8"]}
+        claude.write_tool_config(state1, None)
+        # Now managed file has ucode-written availableModels/enforceAvailableModels.
+        # Verify the marker was saved.
+        assert claude.CLAUDE_MANAGED_PRUNED_PICKER_STATE_KEY in state1
+        # Step 2: Rewrite to managed file in discovery mode (no static list).
+        # Use the saved state with the ownership marker.
+        private_writes.clear()
+        managed_writes.clear()
+        state2 = {
+            "workspace": WS,
+            claude.CLAUDE_MANAGED_PRUNED_PICKER_STATE_KEY: state1[
+                claude.CLAUDE_MANAGED_PRUNED_PICKER_STATE_KEY
+            ],
+            "claude_model_service_location": "system.ai",
+        }
+        claude.write_tool_config(state2, None)
+        # Now the ucode-written keys should be pruned from managed file.
+        _, text = managed_writes[0]
+        written = json.loads(text)
+        assert "availableModels" not in written
+        assert "enforceAvailableModels" not in written
+        assert written.get("env", {}).get("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY") == "1"
+
     def test_noninteractive_uses_local_settings_when_managed_file_is_compatible(self, monkeypatch):
         private_writes: list = []
         managed_writes: list = []
@@ -1014,6 +1068,44 @@ class TestWriteToolConfigManagedSettings:
             claude.write_tool_config(
                 {"workspace": WS, "codex_models": []}, "databricks-claude-sonnet-4"
             )
+
+    def test_ownership_markers_persist_even_if_managed_reconcile_fails(self, monkeypatch):
+        # FIX #6: Ownership markers must be saved before the reconcile so they survive
+        # if reconcile raises, allowing later transitions to recognize stale keys.
+        private_writes: list = []
+        managed_writes: list = []
+        state_saves: list = []
+        self._patch(monkeypatch, private_writes, managed_writes)
+        monkeypatch.setattr(claude, "managed_writes_allowed", lambda: True)
+
+        # Mock save_state to capture when markers are saved, and make reconcile fail.
+        original_save = claude.save_state
+
+        def capture_save(s):
+            state_saves.append(copy.deepcopy(s))
+            return original_save(s)
+
+        monkeypatch.setattr(claude, "save_state", capture_save)
+
+        def failing_reconcile(*args, **kwargs):
+            raise RuntimeError("Simulated reconcile failure")
+
+        monkeypatch.setattr(claude, "_reconcile_managed_settings", failing_reconcile)
+
+        state = {"workspace": WS, "claude_static_models": ["system.ai.claude-opus-4-8"]}
+
+        # Reconcile will fail, but markers should still be saved.
+        with pytest.raises(RuntimeError, match="reconcile failure"):
+            claude.write_tool_config(state, None)
+
+        # Verify markers were saved before the failure.
+        assert len(state_saves) > 0
+        saved_state = state_saves[0]
+        assert claude.CLAUDE_MANAGED_PRUNED_PICKER_STATE_KEY in saved_state
+        # The saved marker should have availableModels/enforceAvailableModels.
+        saved_marker = saved_state[claude.CLAUDE_MANAGED_PRUNED_PICKER_STATE_KEY]
+        assert "availableModels" in saved_marker
+        assert "enforceAvailableModels" in saved_marker
 
 
 class TestRegisterWebSearchMcp:
@@ -1366,6 +1458,190 @@ class TestWriteToolConfigPrunesStaleModelEnv:
         assert "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME" not in env
 
 
+class TestMarkerRecordingBeforeManagedReconcile:
+    """FIX P2-3: Ownership markers must be recorded before _reconcile_managed_settings,
+    so they survive if that step fails."""
+
+    def test_ownership_marker_set_before_managed_reconcile_fails(self, monkeypatch):
+        # FIX P2-3: Markers are recorded in state BEFORE the fallible OS reconcile,
+        # so they're set even if reconcile fails. On next run, markers persist to help
+        # recognize stale values. This test verifies markers are placed before reconcile.
+        monkeypatch.setattr(claude, "backup_existing_file", lambda *a, **kw: True)
+        monkeypatch.setattr(claude, "read_json_safe", lambda path: {})
+        monkeypatch.setattr(claude, "write_json_file", lambda path, payload: None)
+        monkeypatch.setattr(claude, "_register_web_search_mcp", lambda *a, **kw: True)
+        marker_in_state_at_failure: dict = {}
+
+        def capture_state_on_failure(*args, **kwargs):
+            # Capture what's in state when reconcile is called (markers should be there).
+            # We use args[0] since compose is passed as a lambda, but state is in scope.
+            raise RuntimeError("Simulated OS reconcile failure")
+
+        def failing_reconcile(state, *args, **kwargs):
+            # Capture state before raising.
+            marker_in_state_at_failure.update(
+                {
+                    "marker": state.get(claude.CLAUDE_MANAGED_PRUNED_PICKER_STATE_KEY),
+                }
+            )
+            raise RuntimeError("Simulated OS reconcile failure")
+
+        monkeypatch.setattr(claude, "_reconcile_managed_settings", failing_reconcile)
+        state = {
+            "workspace": WS,
+            "claude_static_models": ["system.ai.claude-opus-4-8"],
+        }
+
+        with pytest.raises(RuntimeError, match="Simulated OS reconcile failure"):
+            claude.write_tool_config(state, None)
+
+        # The markers should be in state when reconcile is called (before it fails).
+        assert marker_in_state_at_failure["marker"] is not None
+
+
+class TestDiscoveryMarkerTiming:
+    """FIX 2: When discovery run (no static picker), markers must be cleared and persisted AFTER
+    reconcile succeeds. If reconcile fails, prior markers stay persisted for retry pruning."""
+
+    def _patch(self, monkeypatch, private_writes, managed_writes, existing=None):
+        monkeypatch.setattr(claude, "backup_existing_file", lambda *a, **kw: True)
+        monkeypatch.setattr(
+            claude, "read_json_safe", lambda path: existing.get(str(path), {}) if existing else {}
+        )
+        monkeypatch.setattr(
+            claude, "write_json_file", lambda path, payload: private_writes.append(payload)
+        )
+        monkeypatch.setattr(claude, "_register_web_search_mcp", lambda *a, **kw: True)
+
+        def reconcile_managed_file(path, desired_text, **kwargs):
+            managed_writes.append({"path": str(path), "payload": desired_text})
+            return "written"
+
+        monkeypatch.setattr(claude, "reconcile_managed_file", reconcile_managed_file)
+
+    def test_discovery_run_with_reconcile_failure_retains_prior_markers(self, monkeypatch):
+        # FIX 2b: When a DISCOVERY run (no static picker, markers cleared) has a reconcile failure,
+        # the prior markers must NOT be cleared/persisted before reconcile. This way, a retry can
+        # still recognize and prune stale keys using the prior marker.
+        private_writes: list = []
+        managed_writes: list = []
+        state_saves: list = []
+        self._patch(monkeypatch, private_writes, managed_writes)
+        monkeypatch.setattr(claude, "managed_writes_allowed", lambda: True)
+
+        original_save = claude.save_state
+
+        def capture_save(s):
+            state_saves.append(copy.deepcopy(s))
+            return original_save(s)
+
+        monkeypatch.setattr(claude, "save_state", capture_save)
+
+        # Capture state at reconcile time to verify markers are still there.
+        state_at_reconcile: dict = {}
+
+        def failing_reconcile(state, *args, **kwargs):
+            state_at_reconcile.update(copy.deepcopy(state))
+            raise RuntimeError("Simulated reconcile failure")
+
+        monkeypatch.setattr(claude, "_reconcile_managed_settings", failing_reconcile)
+
+        # DISCOVERY run (no static_models, so markers will be cleared AFTER reconcile).
+        # Start with prior markers from a previous static run.
+        state = {
+            "workspace": WS,
+            claude.CLAUDE_MANAGED_PRUNED_PICKER_STATE_KEY: {
+                "availableModels": ["old-model"],
+                "enforceAvailableModels": True,
+            },
+        }
+
+        # Reconcile will fail, but prior markers should remain unpersisted before the call.
+        # The key is: markers were NOT cleared and persisted BEFORE reconcile.
+        with pytest.raises(RuntimeError, match="reconcile failure"):
+            claude.write_tool_config(state, None)
+
+        # Verify the prior marker was STILL in state when reconcile was called.
+        # This proves markers were NOT cleared before reconcile on a DISCOVERY run.
+        assert claude.CLAUDE_MANAGED_PRUNED_PICKER_STATE_KEY in state_at_reconcile
+        assert state_at_reconcile[claude.CLAUDE_MANAGED_PRUNED_PICKER_STATE_KEY][
+            "availableModels"
+        ] == ["old-model"]
+
+    def test_discovery_run_with_reconcile_success_clears_markers(self, monkeypatch):
+        # FIX 2c: When a DISCOVERY run (no static picker) has a SUCCESSFUL reconcile,
+        # the markers should be cleared and persisted AFTER reconcile.
+        private_writes: list = []
+        managed_writes: list = []
+        state_saves: list = []
+        self._patch(monkeypatch, private_writes, managed_writes)
+        monkeypatch.setattr(claude, "managed_writes_allowed", lambda: True)
+
+        original_save = claude.save_state
+
+        def capture_save(s):
+            state_saves.append(copy.deepcopy(s))
+            return original_save(s)
+
+        monkeypatch.setattr(claude, "save_state", capture_save)
+
+        # DISCOVERY run (no static_models) - start with prior markers from a previous static run.
+        state = {
+            "workspace": WS,
+            claude.CLAUDE_MANAGED_PRUNED_PICKER_STATE_KEY: {
+                "availableModels": ["old-model"],
+                "enforceAvailableModels": True,
+            },
+        }
+
+        claude.write_tool_config(state, None)
+
+        # Verify markers were cleared and persisted AFTER reconcile.
+        # The last save_state call should have cleared the markers.
+        assert len(state_saves) > 0
+        final_save = state_saves[-1]
+        assert claude.CLAUDE_MANAGED_PRUNED_PICKER_STATE_KEY not in final_save
+        assert claude.CLAUDE_MANAGED_MODEL_PICKER_STATE_KEY not in final_save
+
+    def test_static_write_run_persists_markers_before_reconcile_fails(self, monkeypatch):
+        # FIX 2a: When a WRITE run (static picker) has a reconcile failure, the new markers
+        # must be persisted BEFORE reconcile so they survive the failure.
+        private_writes: list = []
+        managed_writes: list = []
+        state_saves: list = []
+        self._patch(monkeypatch, private_writes, managed_writes)
+        monkeypatch.setattr(claude, "managed_writes_allowed", lambda: True)
+
+        original_save = claude.save_state
+
+        def capture_save(s):
+            state_saves.append(copy.deepcopy(s))
+            return original_save(s)
+
+        monkeypatch.setattr(claude, "save_state", capture_save)
+
+        def failing_reconcile(*args, **kwargs):
+            raise RuntimeError("Simulated reconcile failure")
+
+        monkeypatch.setattr(claude, "_reconcile_managed_settings", failing_reconcile)
+
+        # WRITE run (has static_models, so new markers are set).
+        state = {"workspace": WS, "claude_static_models": ["system.ai.claude-opus-4-8"]}
+
+        with pytest.raises(RuntimeError, match="reconcile failure"):
+            claude.write_tool_config(state, None)
+
+        # Verify markers were saved BEFORE the failure.
+        # There should be at least one save_state call before the exception.
+        assert len(state_saves) > 0
+        first_save = state_saves[0]
+        # The new marker should be in the save (showing it was persisted before reconcile).
+        assert claude.CLAUDE_MANAGED_PRUNED_PICKER_STATE_KEY in first_save
+        saved_marker = first_save[claude.CLAUDE_MANAGED_PRUNED_PICKER_STATE_KEY]
+        assert "availableModels" in saved_marker
+        assert "enforceAvailableModels" in saved_marker
+
+
 class TestBuildClaudeArgv:
     def test_no_caller_settings_uses_ucode_file(self, monkeypatch):
         monkeypatch.setattr(claude, "read_json_safe", lambda p: {"apiKeyHelper": "u"})
@@ -1492,6 +1768,51 @@ class TestBuildClaudeArgv:
         monkeypatch.setattr(claude, "read_json_safe", lambda p: {"apiKeyHelper": "u"})
         with pytest.raises(RuntimeError, match="not valid JSON"):
             claude._build_claude_argv("claude", ["--settings", str(bad_file)])
+
+    def test_managed_discovery_flag_survives_caller_settings(self, monkeypatch):
+        # FIX P2-2: When managed config enables discovery, preserve the flag even
+        # when a caller passes --settings. The flag is launched-scoped and should
+        # survive the merge.
+        ucode_settings = {
+            "apiKeyHelper": "ucode-helper",
+            "env": {
+                "ANTHROPIC_BASE_URL": "https://gw",
+                "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY": "1",
+            },
+        }
+        monkeypatch.setattr(claude, "read_json_safe", lambda p: ucode_settings)
+        caller = json.dumps({"statusLine": {"type": "command", "command": "sl"}})
+        argv = claude._build_claude_argv("claude", ["--settings", caller, "-p", "hi"])
+        # Exactly one --settings reaches Claude, and the discovery flag is preserved.
+        assert argv.count("--settings") == 1
+        assert argv[:2] == ["claude", "--settings"]
+        assert argv[3:] == ["-p", "hi"]
+        merged = json.loads(argv[2])
+        # Discovery flag from managed config should survive.
+        assert merged["env"]["CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"] == "1"
+        assert merged["env"]["ANTHROPIC_BASE_URL"] == "https://gw"
+        assert merged["statusLine"] == {"type": "command", "command": "sl"}
+
+    def test_stale_discovery_flag_stripped_without_managed_config(self, monkeypatch):
+        # When managed config does NOT enable discovery, strip any stale flag
+        # that might come from a --settings merge.
+        ucode_settings = {
+            "apiKeyHelper": "ucode-helper",
+            "env": {"ANTHROPIC_BASE_URL": "https://gw"},
+        }
+        monkeypatch.setattr(claude, "read_json_safe", lambda p: ucode_settings)
+        caller = json.dumps(
+            {
+                "env": {"CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY": "1"},
+                "statusLine": {"type": "command", "command": "sl"},
+            }
+        )
+        argv = claude._build_claude_argv("claude", ["--settings", caller])
+        merged = json.loads(argv[2])
+        # Stale discovery flag should be stripped since managed config doesn't have it.
+        assert "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY" not in merged["env"]
+        assert merged["env"]["ANTHROPIC_BASE_URL"] == "https://gw"
+        assert merged["statusLine"] == {"type": "command", "command": "sl"}
 
 
 class TestClaudeSmartRouting:
@@ -1639,3 +1960,101 @@ class TestEnsureSubscriptionLogin:
         monkeypatch.setattr(claude, "print_success", lambda *a, **kw: None)
         claude._ensure_subscription_login()
         assert calls == [[claude.SPEC["binary"], "auth", "login"]]
+
+
+class TestManagedModelPicker:
+    """A managed static `names` list drives Claude Code's own picker allow-list; a discovery
+    location instead turns on gateway model discovery."""
+
+    WS = "https://ws.example.com"
+
+    def test_static_names_write_available_models_and_picker(self):
+        overlay, keys = claude.render_overlay(
+            self.WS, None, {}, static_models=["system.ai.claude-opus-4-8", "system.ai.kimi-k3"]
+        )
+        assert overlay["availableModels"] == ["system.ai.claude-opus-4-8", "system.ai.kimi-k3"]
+        assert overlay["enforceAvailableModels"] is True
+        assert overlay["modelPicker"] == {
+            "replaceBuiltInOptions": True,
+            "options": [
+                {"model": "system.ai.claude-opus-4-8", "label": "claude-opus-4-8"},
+                {"model": "system.ai.kimi-k3", "label": "kimi-k3"},
+            ],
+        }
+        for key in claude.CLAUDE_MANAGED_PICKER_KEYS:
+            assert [key] in keys
+
+    def test_model_service_location_enables_gateway_discovery(self):
+        overlay, keys = claude.render_overlay(self.WS, None, {}, model_service_location="system.ai")
+        assert overlay["env"]["CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"] == "1"
+        assert "availableModels" not in overlay
+        assert ["env", "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"] in keys
+
+    def test_provider_suppresses_the_static_picker(self):
+        overlay, _ = claude.render_overlay(
+            self.WS, None, {}, provider="cat.sch.mps", static_models=["system.ai.claude-opus-4-8"]
+        )
+        assert "availableModels" not in overlay
+        assert "modelPicker" not in overlay
+
+    def test_stale_picker_keys_pruned_when_no_static_list(self, tmp_path, monkeypatch):
+        settings_path = tmp_path / "ucode-settings.json"
+        settings_path.write_text(
+            json.dumps({"availableModels": ["old"], "enforceAvailableModels": True})
+        )
+        monkeypatch.setattr(claude, "CLAUDE_SETTINGS_PATH", settings_path)
+        monkeypatch.setattr(claude, "CLAUDE_BACKUP_PATH", tmp_path / "backup.json")
+        monkeypatch.setattr(claude, "_reconcile_managed_settings", lambda *a, **k: None)
+        monkeypatch.setattr(claude, "save_state", lambda s: None)
+        claude.write_tool_config({"workspace": self.WS}, None)
+        doc = json.loads(settings_path.read_text())
+        assert "availableModels" not in doc
+        assert "enforceAvailableModels" not in doc
+
+    def test_static_to_dynamic_transition_prunes_ucode_owned_picker(self, tmp_path, monkeypatch):
+        settings_path = tmp_path / "ucode-settings.json"
+        monkeypatch.setattr(claude, "CLAUDE_SETTINGS_PATH", settings_path)
+        monkeypatch.setattr(claude, "CLAUDE_BACKUP_PATH", tmp_path / "backup.json")
+        monkeypatch.setattr(claude, "_reconcile_managed_settings", lambda *a, **k: None)
+        saved_state = {}
+        monkeypatch.setattr(claude, "save_state", lambda s: saved_state.update(s))
+        # Step 1: Write with static models, generating a picker and setting the marker.
+        state1 = {"workspace": self.WS, "claude_static_models": ["system.ai.claude-opus-4-8"]}
+        claude.write_tool_config(state1, None)
+        doc1 = json.loads(settings_path.read_text())
+        assert "modelPicker" in doc1
+        assert "availableModels" in doc1
+        assert claude.CLAUDE_MANAGED_MODEL_PICKER_STATE_KEY in saved_state
+        saved_picker = saved_state[claude.CLAUDE_MANAGED_MODEL_PICKER_STATE_KEY]
+        # Step 2: Transition to discovery config, reusing same on-disk settings.
+        state2 = {
+            "workspace": self.WS,
+            claude.CLAUDE_MANAGED_MODEL_PICKER_STATE_KEY: saved_picker,
+            "claude_model_service_location": "system.ai",
+        }
+        claude.write_tool_config(state2, None)
+        doc2 = json.loads(settings_path.read_text())
+        # The ucode-owned picker should be pruned; discovery flag should be set.
+        assert "modelPicker" not in doc2
+        assert "availableModels" not in doc2
+        assert "enforceAvailableModels" not in doc2
+        assert doc2.get("env", {}).get("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY") == "1"
+
+    def test_admin_picker_preserved_under_dynamic_transition(self, tmp_path, monkeypatch):
+        settings_path = tmp_path / "ucode-settings.json"
+        admin_picker = {
+            "replaceBuiltInOptions": True,
+            "options": [{"model": "system.ai.claude-custom", "label": "custom"}],
+        }
+        settings_path.write_text(json.dumps({"modelPicker": admin_picker}))
+        monkeypatch.setattr(claude, "CLAUDE_SETTINGS_PATH", settings_path)
+        monkeypatch.setattr(claude, "CLAUDE_BACKUP_PATH", tmp_path / "backup.json")
+        monkeypatch.setattr(claude, "_reconcile_managed_settings", lambda *a, **k: None)
+        monkeypatch.setattr(claude, "save_state", lambda s: None)
+        # Apply discovery config without any ownership marker set.
+        state = {"workspace": self.WS, "claude_model_service_location": "system.ai"}
+        claude.write_tool_config(state, None)
+        doc = json.loads(settings_path.read_text())
+        # Admin picker should be preserved even though we're in discovery mode.
+        assert doc["modelPicker"] == admin_picker
+        assert doc.get("env", {}).get("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY") == "1"

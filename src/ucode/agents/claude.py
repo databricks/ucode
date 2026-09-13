@@ -80,6 +80,10 @@ SPEC: ToolSpec = {
 
 # Retained only to identify and remove state written by the legacy persisted opt-in.
 SMART_ROUTING_STATE_KEY = smart_routing_v2.LEGACY_STATE_KEY
+# Tracks the modelPicker that ucode wrote (for ownership detection on later pruning).
+CLAUDE_MANAGED_MODEL_PICKER_STATE_KEY = "claude_managed_model_picker"
+# Tracks the availableModels/enforceAvailableModels that ucode wrote (for ownership detection).
+CLAUDE_MANAGED_PRUNED_PICKER_STATE_KEY = "claude_managed_pruned_picker"
 
 
 def _parse_version(value: str) -> tuple[int, int, int] | None:
@@ -161,6 +165,8 @@ CLAUDE_DEFAULT_MODEL_ENV_KEYS = {
 # Launch-scoped feature flags that ucode may write into Claude settings. These
 # must be removed again when the corresponding launch flag is absent.
 CLAUDE_CONDITIONAL_ENV_KEYS = ("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY",)
+CLAUDE_MANAGED_PICKER_KEYS = ("availableModels", "enforceAvailableModels", "modelPicker")
+CLAUDE_PRUNED_PICKER_KEYS = ("availableModels", "enforceAvailableModels")
 # Env keys ucode used to write but no longer does; stripped from the managed
 # settings file on every launch so stale values never linger.
 CLAUDE_REMOVED_ENV_KEYS = ("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS",)
@@ -324,6 +330,8 @@ def render_overlay(
     relayed_base_url: str | None = None,
     route_root_model: str | None = None,
     custom_model: str | None = None,
+    static_models: list[str] | None = None,
+    model_service_location: str | None = None,
 ) -> tuple[dict, list[list[str]]]:
     """Return (overlay, managed_key_paths) for Claude settings.json.
 
@@ -449,7 +457,24 @@ def render_overlay(
         overlay["permissions"] = {"deny": ["WebSearch"]}
         keys.append(["permissions", "deny"])
 
+    if static_models and not provider and not relayed:
+        overlay["availableModels"] = list(static_models)
+        overlay["enforceAvailableModels"] = True
+        overlay["modelPicker"] = {
+            "replaceBuiltInOptions": True,
+            "options": [{"model": m, "label": _picker_label(m)} for m in static_models],
+        }
+        keys += [[key] for key in CLAUDE_MANAGED_PICKER_KEYS]
+    elif model_service_location and not provider and not relayed:
+        env["CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"] = "1"
+        keys.append(["env", "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"])
+
     return overlay, keys
+
+
+def _picker_label(model: str) -> str:
+    """A short picker label for a model id — the raw id minus the ``system.ai.`` prefix."""
+    return model.removeprefix("system.ai.")
 
 
 def _maybe_add_1m_suffix(model: str) -> str:
@@ -596,6 +621,8 @@ def write_tool_config(
         relayed_base_url=relayed_base_url,
         route_root_model=route_root_model,
         custom_model=custom_model,
+        static_models=state.get("claude_static_models"),
+        model_service_location=state.get("claude_model_service_location"),
     )
     tracing_env_vars = tracing_env(state, "claude")
     stop_hook_command = claude_tracing_stop_hook_command() if tracing_env_vars else None
@@ -619,13 +646,16 @@ def write_tool_config(
         + [["env", key] for key in CLAUDE_TRACING_ENV_KEYS]
         + [["hooks", "Stop"]]
         + [["hooks", event] for event in ("PreToolUse", "SessionStart", "SubagentStart")]
+        + [[key] for key in CLAUDE_MANAGED_PICKER_KEYS]
     ):
         if path not in managed_file_keys:
             managed_file_keys.append(path)
 
     # V2 installs routing hooks in a transient per-launch settings file. Persistent settings must
     # contain no ucode routing hooks; surgically strip legacy ones while preserving user hooks.
-    def _compose(base: dict, *, enforce_model_default_hierarchy: bool) -> dict:
+    def _compose(
+        base: dict, *, enforce_model_default_hierarchy: bool, is_managed: bool = False
+    ) -> dict:
         base_env = base.get("env")
         existing_custom_headers = (
             base_env.get(ANTHROPIC_CUSTOM_HEADERS_ENV_KEY) if isinstance(base_env, dict) else None
@@ -694,20 +724,91 @@ def write_tool_config(
             # longer writes.
             for key in CLAUDE_REMOVED_ENV_KEYS:
                 merged_env.pop(key, None)
+        # Prune availableModels/enforceAvailableModels when ucode stops writing them: the private
+        # file unconditionally (ucode owns it), the managed file only when they match the ownership
+        # marker (ucode wrote them) so admin-set values survive.
+        if not is_managed:
+            for picker_key in CLAUDE_PRUNED_PICKER_KEYS:
+                if picker_key not in overlay_for_merge:
+                    merged.pop(picker_key, None)
+        else:
+            saved_pruned = state.get(CLAUDE_MANAGED_PRUNED_PICKER_STATE_KEY)
+            if saved_pruned is not None:
+                current_pruned = {k: merged.get(k) for k in CLAUDE_PRUNED_PICKER_KEYS}
+                if current_pruned == saved_pruned:
+                    for picker_key in CLAUDE_PRUNED_PICKER_KEYS:
+                        if picker_key not in overlay_for_merge:
+                            merged.pop(picker_key, None)
+        # Prune ucode-owned modelPicker when transitioning to dynamic config. Only prune if
+        # it matches the ownership marker (ucode wrote it); preserve admin-authored pickers.
+        if "modelPicker" not in overlay_for_merge:
+            saved_picker = state.get(CLAUDE_MANAGED_MODEL_PICKER_STATE_KEY)
+            current_picker = merged.get("modelPicker")
+            if saved_picker is not None and current_picker == saved_picker:
+                merged.pop("modelPicker", None)
         sync_smart_routing_hooks(merged, state, enabled=False)
         return merged
 
     write_json_file(
         CLAUDE_SETTINGS_PATH,
-        _compose(read_json_safe(CLAUDE_SETTINGS_PATH), enforce_model_default_hierarchy=False),
+        _compose(
+            read_json_safe(CLAUDE_SETTINGS_PATH),
+            enforce_model_default_hierarchy=False,
+            is_managed=False,
+        ),
     )
+
+    # Prior markers let compose_managed prune keys ucode wrote on a previous run (e.g. a
+    # static->discovery transition).
+    prior_picker_marker = state.get(CLAUDE_MANAGED_MODEL_PICKER_STATE_KEY)
+    prior_pruned_marker = state.get(CLAUDE_MANAGED_PRUNED_PICKER_STATE_KEY)
+
+    is_writing_static_picker = (
+        "modelPicker" in overlay
+        or "availableModels" in overlay
+        or "enforceAvailableModels" in overlay
+    )
+
+    # Persist this run's markers before the fallible reconcile so a write survives a failed retry;
+    # discovery runs instead clear them only after reconcile succeeds (below).
+    if is_writing_static_picker:
+        if "modelPicker" in overlay:
+            state[CLAUDE_MANAGED_MODEL_PICKER_STATE_KEY] = overlay["modelPicker"]
+        else:
+            state.pop(CLAUDE_MANAGED_MODEL_PICKER_STATE_KEY, None)
+        if "availableModels" in overlay or "enforceAvailableModels" in overlay:
+            state[CLAUDE_MANAGED_PRUNED_PICKER_STATE_KEY] = {
+                k: overlay.get(k) for k in CLAUDE_PRUNED_PICKER_KEYS
+            }
+        else:
+            state.pop(CLAUDE_MANAGED_PRUNED_PICKER_STATE_KEY, None)
+        save_state(state)
+
+    def compose_managed(base: dict) -> dict:
+        # Compose against the prior markers so stale keys prune, then restore the current ones.
+        saved_picker = state.get(CLAUDE_MANAGED_MODEL_PICKER_STATE_KEY)
+        saved_pruned = state.get(CLAUDE_MANAGED_PRUNED_PICKER_STATE_KEY)
+        try:
+            state[CLAUDE_MANAGED_MODEL_PICKER_STATE_KEY] = prior_picker_marker
+            state[CLAUDE_MANAGED_PRUNED_PICKER_STATE_KEY] = prior_pruned_marker
+            return _compose(base, enforce_model_default_hierarchy=True, is_managed=True)
+        finally:
+            state[CLAUDE_MANAGED_MODEL_PICKER_STATE_KEY] = saved_picker
+            state[CLAUDE_MANAGED_PRUNED_PICKER_STATE_KEY] = saved_pruned
 
     _reconcile_managed_settings(
         state,
-        lambda base: _compose(base, enforce_model_default_hierarchy=True),
+        compose_managed,
         managed_file_keys,
         relayed,
     )
+
+    # Discovery runs clear the markers only after reconcile succeeds, so a failed reconcile leaves
+    # the prior markers in place for a retry to prune.
+    if not is_writing_static_picker:
+        state.pop(CLAUDE_MANAGED_MODEL_PICKER_STATE_KEY, None)
+        state.pop(CLAUDE_MANAGED_PRUNED_PICKER_STATE_KEY, None)
+        save_state(state)
 
     if web_search_model:
         web_search_entry = _web_search_mcp_entry(
@@ -795,8 +896,9 @@ def _reconcile_managed_settings(
     configuration mirrors ucode's settings there. The same compose operation that produced the
     private file is applied to the existing managed file, preserving unrelated IT-authored keys.
 
-    `ug configure` updates gateway-owned fields in this file, but does not generate or modify
-    the `modelPicker` object; an existing picker is retained by the merge.
+    `ug configure` generates the `modelPicker` object only when the managed config supplies a
+    static model list; without one the `/model` surface comes from gateway model discovery instead,
+    so ucode neither writes nor prunes `modelPicker` and an existing picker is retained by the merge.
 
     Relayed launches are skipped: they depend on a per-session loopback refresh proxy that only runs
     during `ucode claude`, so a bare `claude` could not reach the gateway anyway.
@@ -1214,12 +1316,20 @@ def _build_claude_argv(
         caller_settings = _merge_claude_settings(caller_settings, _load_caller_settings(value))
     # ucode wins over the caller for conflicting keys (protects gateway auth);
     # hooks from both sides survive.
-    merged = _merge_claude_settings(caller_settings, read_json_safe(CLAUDE_SETTINGS_PATH))
+    ucode_settings = read_json_safe(CLAUDE_SETTINGS_PATH)
+    merged = _merge_claude_settings(caller_settings, ucode_settings)
     if settings_override is not None:
         merged = _merge_claude_settings(merged, settings_override)
     merged_env = merged.get("env")
     if isinstance(merged_env, dict):
-        merged_env.pop("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY", None)
+        # Keep the gateway-discovery flag only if ucode's persistent settings set it (managed
+        # config); otherwise strip a stale one from the --settings merge.
+        ucode_env = ucode_settings.get("env")
+        if not (
+            isinstance(ucode_env, dict)
+            and ucode_env.get("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY") == "1"
+        ):
+            merged_env.pop("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY", None)
     return [
         binary,
         *source_args,

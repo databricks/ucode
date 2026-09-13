@@ -84,6 +84,13 @@ def managed_state_overrides(managed: dict, tool: str) -> dict[str, object]:
     default_model = _str(_agent_model_config(managed, tool).get("default_model"))
     if default_model:
         overrides[f"{tool}_default_model"] = default_model
+    if tool in ("claude", "codex"):
+        static_models = managed_static_models(managed, tool)
+        if static_models:
+            overrides[f"{tool}_static_models"] = static_models
+        location = managed_model_service_location(managed, tool)
+        if location:
+            overrides[f"{tool}_model_service_location"] = location
     return overrides
 
 
@@ -114,7 +121,8 @@ def managed_unservable_models(managed: dict, tool: str) -> list[str]:
 
 def _manifest_models(managed: dict, tool: str) -> dict | list | None:
     """The manifest's models for ``tool`` in its own vocabulary, or None when it names none."""
-    manifest_models = _agent_model_config(managed, tool).get("models")
+    model_config = _agent_model_config(managed, tool)
+    manifest_models = model_config.get("models")
     if tool == "claude":
         slots: dict[str, str] = {}
         for slot, family in _CLAUDE_FAMILY_SLOTS.items():
@@ -122,6 +130,14 @@ def _manifest_models(managed: dict, tool: str) -> dict | list | None:
             if model:
                 slots[family] = model
         return slots or None
+    # For flat-list agents (gemini, opencode, pi, copilot), check the `names` key first
+    # (from managed static model lists), then fall back to legacy `models` list.
+    if tool not in ("claude", "codex"):
+        names = model_config.get("names")
+        if isinstance(names, list):
+            listed = [model for model in (_str(item) for item in names) if model]
+            if listed:
+                return listed
     if isinstance(manifest_models, list):
         listed = [model for model in (_str(item) for item in manifest_models) if model]
         return listed or None
@@ -158,22 +174,46 @@ def managed_supplies_models(managed: dict | None, tool: str) -> bool:
 
     Lets the launch path skip Databricks model discovery, whose whole purpose is to find the models
     the config has now specified. Any of the three counts: a provider (the agent routes by header and
-    pins no Databricks model), a ``default_model``, or at least one entry in ``models``.
+    pins no Databricks model), a ``default_model``, or at least one entry in ``models`` (or ``names``
+    for flat-list agents).
     """
     model_config = _agent_model_config(managed or {}, tool)
     if _str(model_config.get("model_provider_service")) or _str(model_config.get("default_model")):
         return True
-    models = model_config.get("models")
-    if isinstance(models, dict):
-        return any(_str(value) for value in models.values())
-    if isinstance(models, list):
-        return any(_str(item) for item in models)
-    return False
+    if tool in ("claude", "codex") and (
+        managed_static_models(managed or {}, tool)
+        or _str(model_config.get("model_service_location"))
+    ):
+        return True
+    # For flat-list agents (gemini, opencode, pi, copilot), check both names (new static lists)
+    # and models (legacy lists), via _manifest_models which already handles both.
+    manifest_models = _manifest_models(managed or {}, tool)
+    return manifest_models is not None
 
 
 def managed_provider_service(managed: dict, tool: str) -> str | None:
     """Return only the provider the managed config specifies for ``tool``, ignoring local state."""
     return _str(_agent_model_config(managed, tool).get("model_provider_service"))
+
+
+def managed_static_models(managed: dict, tool: str) -> list[str] | None:
+    """The explicit model allow-list (``models.names``) the config sets for ``tool``, or None.
+
+    Static curation: the launch path writes exactly these into the agent's own picker allow-list
+    (Claude ``availableModels``/``modelPicker``, Codex ``model_catalog_json``) instead of discovering
+    the workspace's models. The order is the admin's; empty and non-string entries are dropped."""
+    names = _agent_model_config(managed, tool).get("names")
+    if isinstance(names, list):
+        listed = [model for model in (_str(item) for item in names) if model]
+        return listed or None
+    return None
+
+
+def managed_model_service_location(managed: dict, tool: str) -> str | None:
+    """The UC catalog/schema (``models.model_service_location``) the config points ``tool`` at for
+    auto model discovery, or None. The agent discovers from the gateway rather than ucode pinning a
+    list, so the launch path only turns discovery on for this source."""
+    return _str(_agent_model_config(managed, tool).get("model_service_location"))
 
 
 def managed_default_model(managed: dict, tool: str) -> str | None:
